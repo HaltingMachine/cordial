@@ -74,6 +74,25 @@ nothing convenient breaks in between.
 `gdb` is not installed here; lldb can do it but needs a stopping point in the
 middle of engine startup, which is the part still missing.
 
+## The setter is not findable by direct scan
+
+Every `mov %reg,0x400(%reg)` in the binary — 59 of them — was breakpointed in a
+single run. **None is hit** before the crash.
+
+Combined with the watchpoint result (the field is written only by the
+constructor's `movaps` zeroing), that means the value is not placed there by a
+plain register store at all. Remaining possibilities, none yet tested:
+
+- an immediate store (`movq $imm,0x400(%rbx)`)
+- a `memcpy`/struct assignment that copies a whole block in
+- a store through a base register that is not the object pointer, with the
+  offset folded in by earlier arithmetic
+- the object being expected to arrive already populated — i.e. copied or moved
+  from another instance rather than constructed empty
+
+The last is the most interesting: it would mean the bridge object is supposed to
+be initialised *from* something, and Cordial is producing a fresh empty one.
+
 ## Ruled out
 
 - **Missing Java.** Unresolved JNI lookups are at zero; every class, method and
@@ -86,3 +105,7 @@ middle of engine startup, which is the part still missing.
   calls `socket()`, so it fails before reaching the network.
 - **Activity lifecycle.** All nine `JNIActivityLifecycleCallbacks` stages fire in
   Android's order. It changed nothing.
+- **AGDK interference.** `CORDIAL_SKIP_AGDK=1` drives the app bridge with no
+  `initializeNativeCode` and no GameActivity at all. Same crash, same
+  instruction, on a thread Roblox creates itself — so it is not an artefact of
+  running two bring-ups together.
