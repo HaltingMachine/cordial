@@ -1,0 +1,27 @@
+[FLog::AndroidGLView] nativeInitClientSettings
+[FLog::AndroidGLView] nativePostClientSettingsLoadedInitialization3
+[FLog::JNIAppBridge] nativeAppBridgeAppStart:
+[FLog::JNIAppBridge] nativeAppBridgeV2Init:
+[FLog::SingleSurfaceApp] initializeWithAppStarter
+[FLog::SingleSurfaceApp] initializeSingleton
+[FLog::SingleSurfaceApp] registerForForceOTAUpdateAvailableConnection stage = 0
+[FLog::SingleSurfaceApp] setStage: (stage:Native)
+[FLog::SingleSurfaceApp] instantiate controllers
+[FLog::SingleSurfaceApp] instantiate experience coordinator
+[FLog::JNIAppBridge] nativeAppBridgeStartLuaAppDM: Calling initializeLuaAppWithLoggedInUser
+[FLog::SingleSurfaceApp] initializeLuaAppWithLoggedInUser: (stage:Native).
+[FLog::SingleSurfaceApp] applyLocale
+[FLog::SingleSurfaceApp] Register rendering frequency during startup.
+[FLog::SingleSurfaceApp] setStage: (stage:InitializedLuaApp)
+[FLog::AndroidGLView] rbx.datamodel: setTaskSchedulerBackgroundMode() enable:false context:ASMA.start
+[FLog::JNIAppBridge] nativeAppBridgeV2StartApp:
+[FLog::SingleSurfaceApp] startLuaApp: (stage:InitializedLuaApp).
+[FLog::SingleSurfaceApp] returnToLuaApp: (stage:InitializedLuaApp).
+[FLog::SingleSurfaceApp] returnToLuaAppInternal: ... App has been initialized, returning from game.
+[FLog::JNIAppBridge] ... StartupController finished starting: stage = 2, BTID = REDACTED, upgradeStatus = 3.
+[FLog::SingleSurfaceApp] setStage: (stage:LuaApp)
+[FLog::SingleSurfaceApp] userDidLogin
+[FLog::SingleSurfaceApp] applyLocale
+[FLog::JNIAppBridge] nativeAppBridgeV2UpdateSurfaceAppWithPlatformParams:
+[FLog::SingleSurfaceApp] updateSurfaceLuaApp: (stage:LuaApp)
+[FLog::SingleSurfaceApp] Restoring rendering frequency to normal.

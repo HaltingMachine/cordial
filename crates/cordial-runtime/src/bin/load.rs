@@ -345,7 +345,19 @@ fn main() -> ExitCode {
                             let (width, height, _) = w.geometry();
                             cordial_runtime::android::config::set_screen(width, height);
                             let apk_path = asset_folder(&opt.apk);
-                            // Ordering experiment: the engine spawns its
+                            // Order taken from a Waydroid capture of the real
+                            // Android client (docs/traces/render-bringup-sequence.log),
+                            // which logs:
+                            //   nativeAppBridgeAppStart
+                            //   nativeAppBridgeV2Init
+                            //   nativeAppBridgeStartLuaAppDM
+                            //   nativeAppBridgeV2StartApp
+                            // StartLuaAppDM comes BEFORE StartApp. An earlier
+                            // experiment here swapped them the other way on the
+                            // strength of a crash appearing to move; the capture
+                            // says that was backwards.
+                            //
+                            // Superseded note: the engine spawns its
                             // own 'Main' thread inside nativeGameGlobalInit,
                             // which independently races through the same
                             // StartLuaAppDM machinery our own explicit call
@@ -365,8 +377,8 @@ fn main() -> ExitCode {
                                 ("nativeGameGlobalInit", 0),
                                 ("nativeUpdateAdapterInit", 0),
                                 ("nativeAppBridgeV2InitWithParams", 1),
-                                ("nativeAppBridgeV2StartAppWithParams", 2),
                                 ("nativeAppBridgeStartLuaAppDM", 0),
+                                ("nativeAppBridgeV2StartAppWithParams", 2),
                             ] {
                                 let sym = format!(
                                     "Java_com_roblox_engine_jni_NativeGLInterface_{name}"
