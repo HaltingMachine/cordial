@@ -3,7 +3,8 @@
 **Session:** §16 bootstrap analysis
 **Date:** 2026-07-31
 **Status:** Tasks A, B, C, D complete. All §16.6 deliverables exist.
-**Code written this session:** none, except vendoring `libbadcpu` (Task D).
+Phase 0 done ([`base-evaluation.md`](base-evaluation.md)). Phase 1 has begun —
+**`libroblox.so` now loads and initialises**; see §8.
 
 ---
 
@@ -260,6 +261,53 @@ Stated plainly, so nothing here reads as more settled than it is.
   minor, noted so it is not forgotten.
 
 ---
+
+## 8. Phase 1 progress — the engine loads
+
+`cordial-load` maps Roblox's `libroblox.so` with the AOSP bionic linker, resolves
+every relocation, and runs all of its static constructors to completion in ~35 ms.
+105.6 MB of code, `JNI_OnLoad` resolved, **zero stubs called**, exit 0.
+
+That is the loader, the relocations and the TLS layout proven against the real
+object. It is not Roblox running: nothing has a JavaVM, a window, or a frame.
+
+Three bionic/glibc ABI divergences had to be fixed first. All three share a shape
+worth remembering — **each failed a long way from its cause**:
+
+| Divergence | bionic | glibc | How it presented |
+|---|---|---|---|
+| `sysconf` selectors | `_SC_PAGESIZE` = 39 | 39 is `_SC_BC_STRING_MAX` | Roblox asked for the page size, was told 1000, and an allocator handed a non-power-of-two page size aborted. Nothing pointed at `sysconf`. 145 of 147 constants differ, so the table is generated. |
+| `pthread_cond_t` | 32 bytes | 48 bytes | `pthread_cond_init` writes 16 bytes past the object, during static construction, into whatever is adjacent. |
+| `sem_t` | 16 bytes | 32 bytes | As above. |
+| `__sF` (legacy stdio) | array of `FILE` | — | Stubbed as a function pointer; glibc walks its stream list at exit and reported an invalid handle after everything else had succeeded. |
+
+The lesson generalises beyond these four: **shared symbol names do not imply
+shared ABI**, and the divergences that matter are the silent ones. This is exactly
+the caveat recorded in [`base-evaluation.md`](base-evaluation.md) §4 — 89% of libc
+symbol *names* resolving from the host is not 89% of the work — now demonstrated
+rather than asserted.
+
+### 8.1 Instrumentation, because the obvious tools were absent
+
+There is no `strace` in this environment, and libroblox has no frame pointers, so
+lldb's backtrace past the innermost frame was guesswork that sent the first
+investigation to the wrong function entirely.
+
+What worked was owning the symbol table: any import can be replaced with a
+wrapper. `CORDIAL_TRACE=1` logs the libc calls Roblox makes, which is what turned
+an anonymous abort into `sysconf(39) = 1000` in one run. `abort`,
+`__stack_chk_fail` and `__android_log_assert` are wrapped unconditionally — a
+silent abort costs more time than the wrapper costs anything.
+
+### 8.2 Still true, and worth not overstating
+
+- **Nothing renders.** No JavaVM, no window, no frame, no input.
+- **`--host-libc` is a diagnostic, not the design.** libc is currently the host's
+  where the ABI happens to agree. The divergences above are the ones found *so
+  far*, by running until something broke; the file, directory and signal
+  structures have not been exercised at all yet because nothing has opened a file.
+- **85 symbols remain stubbed**, almost all of `libandroid.so`, `libmediandk.so`
+  and `liblog.so` — the Android APIs proper, which is Phase 2's work.
 
 ## 7. Sources
 

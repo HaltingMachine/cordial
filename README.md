@@ -7,11 +7,12 @@ runs the official x86-64 Android build on Linux through a purpose-built runtime,
 Android-on-desktop gaps at the framework layer rather than by patching the client, and
 exposes a sandboxed, capability-scoped plugin surface on top.
 
-**Status: bootstrap analysis complete. The runtime does not exist yet.**
+**Status: Phase 1 in progress. Roblox's engine loads; nothing renders yet.**
 
-Nothing here launches Roblox. The only code in the tree is a vendored CPU-feature
-emulator — roughly 1% of Phase 1. See [`docs/findings.md`](docs/findings.md) for what has
-actually been established.
+`cordial-load` maps Roblox's 105.6 MB `libroblox.so` with the AOSP bionic linker,
+resolves every relocation, and runs all of its static constructors in ~35 ms. That is
+the loader proven against the real object — it is not Roblox running. There is no
+JavaVM, no window and no frame. See [`docs/findings.md`](docs/findings.md) §8.
 
 ## What is here
 
@@ -23,6 +24,9 @@ actually been established.
 | [`docs/analysis/`](docs/analysis) | Raw enumeration output: linked libraries, undefined symbols, JNI natives, framework classes |
 | [`docs/base-evaluation.md`](docs/base-evaluation.md) | Phase 0: port-vs-write assessment of the minecraft-linux stack |
 | [`docs/adr/ADR-001-in-process-hooking.md`](docs/adr/ADR-001-in-process-hooking.md) | Why Cordial has no in-process hooking, ever |
+| [`docs/design/instances-and-launch.md`](docs/design/instances-and-launch.md) | Multi-instance, multi-account, and `roblox://` handling |
+| [`crates/cordial-linker-sys/`](crates/cordial-linker-sys) | Rust bindings to the AOSP bionic linker |
+| [`crates/cordial-runtime/`](crates/cordial-runtime) | Symbol table, bionic shims, `cordial-load` |
 | [`third_party/libbadcpu/`](third_party/libbadcpu) | Vendored x86-64 CPU feature emulator (MIT) |
 
 ## Headline findings
@@ -59,11 +63,20 @@ user owns), and obfuscation-as-security.
 
 ## Build
 
+Rust, with a C++ subtree for the bionic linker. **Clang is required** — AOSP bionic uses
+C11 `_Atomic` inside C++ headers, which GCC rejects (see
+[`docs/base-evaluation.md`](docs/base-evaluation.md) §2.1). x86-64 Linux only.
+
 ```bash
-meson setup build && ninja -C build && meson test -C build
+git submodule update --init --recursive
+cargo build --release
 ```
 
-x86-64 Linux, C++20. Builds `libbadcpu.so` and runs its test. That is all it builds today.
+To load Roblox's engine, point it at the `lib/x86_64/` objects from an installed APK:
+
+```bash
+cargo run --release --bin cordial-load -- --lib-dir /path/to/lib/x86_64 --host-libc
+```
 
 ## Build order
 
