@@ -25,6 +25,27 @@
 #include <string>
 
 namespace cordial {
+
+/// Convert a C++ object into a `jobject` the way libjnivm expects.
+///
+/// A raw `cordial::to_jni(env, p)` looks right — libjnivm does
+/// represent a `jobject` as its own `Object*` — but it skips the two things
+/// `ToJNIType` does on the way:
+///
+///   * it sets `obj->clazz`, without which `GetObjectClass` returns null and
+///     libjnivm falls back to `FindClass("Invalid")`. Every field and method
+///     lookup on the object then resolves against the wrong class and yields
+///     nothing.
+///   * it parks the `shared_ptr` in the environment's local frame, which is what
+///     keeps the object alive for the duration of the call.
+///
+/// The failure is silent: the call succeeds, the engine reads its parameters
+/// through a classless receiver, gets nothing, and carries on into its failure
+/// path.
+template <class T>
+static auto to_jni(jnivm::ENV* env, const std::shared_ptr<T>& p) {
+    return jnivm::JNITypes<std::shared_ptr<T>>::ToJNIType(env, p);
+}
 jnivm::ENV* process_env();
 
 using jnivm::Class;
@@ -156,14 +177,14 @@ long cordial_game_activity_init(void* fn, const char* internal_path, const char*
         // above convert by taking their raw pointer. They stay in scope for the
         // duration of the call, which is what keeps the objects alive — the
         // engine must not retain them past this without its own reference.
-        auto j = [](const auto& p) { return reinterpret_cast<jobject>(p.get()); };
+        auto j = [env](const auto& p) { return cordial::to_jni(env, p); };
 
         return reinterpret_cast<Init>(fn)(
             env->GetJNIEnv(),
             j(activity),
-            reinterpret_cast<jstring>(internal.get()),
-            reinterpret_cast<jstring>(obb.get()),
-            reinterpret_cast<jstring>(external.get()),
+            cordial::to_jni(env, internal),
+            cordial::to_jni(env, obb),
+            cordial::to_jni(env, external),
             j(assets),
             // savedState is null on a cold start, which this always is.
             nullptr,
@@ -221,9 +242,9 @@ int cordial_game_activity_start(long handle, int width, int height, int format,
         };
 
         auto surface = std::make_shared<cordial::Surface>();
-        auto jsurface = reinterpret_cast<jobject>(surface.get());
+        auto jsurface = cordial::to_jni(env, surface);
         auto activity = std::make_shared<cordial::GameActivity>();
-        auto jactivity = reinterpret_cast<jobject>(activity.get());
+        auto jactivity = cordial::to_jni(env, activity);
 
         using HandleOnly = void (*)(JNIEnv*, jobject, jlong);
         using SurfaceFn = void (*)(JNIEnv*, jobject, jlong, jobject);

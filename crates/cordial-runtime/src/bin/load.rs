@@ -364,6 +364,19 @@ fn main() -> ExitCode {
                                             }
                                         }
 
+                                        // Flags before anything else asks for
+                                        // them: bootstrapTheApp's whole job is to
+                                        // reach this, and the engine reports
+                                        // onFlagsFailed without it.
+                                        if let Some(f) = lib.symbol(
+                                            "Java_com_roblox_client_flags_FlagJniInterface_nativeInitializeNativeFlags",
+                                        ) {
+                                            match linker::game_activity::init_flags(f) {
+                                                Ok(()) => println!("  flags initialised"),
+                                                Err(e) => println!("  flag init failed: {e}"),
+                                            }
+                                        }
+
                                         // Kicks the engine's initialisation once
                                         // everything it depends on is in place.
                                         if let Some(f) = lib.symbol(
@@ -372,6 +385,31 @@ fn main() -> ExitCode {
                                             match linker::game_activity::call_bare(f) {
                                                 Ok(()) => println!("  retryInit ok"),
                                                 Err(e) => println!("  retryInit failed: {e}"),
+                                            }
+                                        }
+
+                                        // The app bridge proper. ActivitySplash —
+                                        // the only launcher Activity — defaults
+                                        // to ActivityNativeMain, not the AGDK
+                                        // MainGameActivity, and this is the chain
+                                        // that actually brings the client up.
+                                        let apk_path = opt.apk.clone().unwrap_or_default();
+                                        if let Some(f) = lib.symbol(
+                                            "Java_com_roblox_engine_jni_NativeGLInterface_nativeAppBridgeV2InitWithParams",
+                                        ) {
+                                            match linker::game_activity::appbridge_init(
+                                                f, &apk_path, width, height,
+                                            ) {
+                                                Ok(()) => println!("  app bridge initialised"),
+                                                Err(e) => println!("  app bridge init failed: {e}"),
+                                            }
+                                        }
+                                        if let Some(f) = lib.symbol(
+                                            "Java_com_roblox_engine_jni_NativeGLInterface_nativeAppBridgeStartLuaAppDM",
+                                        ) {
+                                            match linker::game_activity::appbridge_call_bare(f) {
+                                                Ok(()) => println!("  Lua app DataModel started"),
+                                                Err(e) => println!("  StartLuaAppDM failed: {e}"),
                                             }
                                         }
 

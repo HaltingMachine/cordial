@@ -330,6 +330,16 @@ pub mod game_activity {
             n: usize,
         ) -> c_int;
         fn cordial_call_bare(f: *mut c_void, err: *mut c_char, n: usize) -> c_int;
+        fn cordial_init_flags(f: *mut c_void, err: *mut c_char, n: usize) -> c_int;
+        fn cordial_appbridge_init(
+            f: *mut c_void,
+            assets: *const c_char,
+            w: c_int,
+            h: c_int,
+            err: *mut c_char,
+            n: usize,
+        ) -> c_int;
+        fn cordial_appbridge_call_bare(f: *mut c_void, err: *mut c_char, n: usize) -> c_int;
     }
 
     fn take_err(err: Vec<u8>) -> String {
@@ -361,6 +371,50 @@ pub mod game_activity {
                 err.as_mut_ptr() as *mut c_char,
                 err.len(),
             )
+        };
+        if rc == 0 { Ok(()) } else { Err(take_err(err)) }
+    }
+
+    /// `FlagJniInterface.nativeInitializeNativeFlags` — what `bootstrapTheApp`
+    /// exists to reach. Without it the engine reports `onFlagsFailed` and stops.
+    pub fn init_flags(native: *mut c_void) -> Result<(), String> {
+        let mut err = vec![0u8; 512];
+        // SAFETY: `native` is the exported JNI native; `err` is a live buffer.
+        let rc = unsafe { cordial_init_flags(native, err.as_mut_ptr() as *mut c_char, err.len()) };
+        if rc == 0 { Ok(()) } else { Err(take_err(err)) }
+    }
+
+    /// `NativeGLInterface.nativeAppBridgeV2InitWithParams` — the real app-bridge
+    /// entry. The launcher Activity targets `ActivityNativeMain`, whose chain runs
+    /// through here rather than through AGDK's `MainGameActivity`.
+    pub fn appbridge_init(
+        native: *mut c_void,
+        assets: &str,
+        width: i32,
+        height: i32,
+    ) -> Result<(), String> {
+        let a = CString::new(assets).map_err(|e| e.to_string())?;
+        let mut err = vec![0u8; 512];
+        // SAFETY: `native` is the exported JNI native; `a` outlives the call.
+        let rc = unsafe {
+            cordial_appbridge_init(
+                native,
+                a.as_ptr(),
+                width,
+                height,
+                err.as_mut_ptr() as *mut c_char,
+                err.len(),
+            )
+        };
+        if rc == 0 { Ok(()) } else { Err(take_err(err)) }
+    }
+
+    /// A `NativeGLInterface` native taking no arguments — `nativeAppBridgeStartLuaAppDM`.
+    pub fn appbridge_call_bare(native: *mut c_void) -> Result<(), String> {
+        let mut err = vec![0u8; 512];
+        // SAFETY: as above.
+        let rc = unsafe {
+            cordial_appbridge_call_bare(native, err.as_mut_ptr() as *mut c_char, err.len())
         };
         if rc == 0 { Ok(()) } else { Err(take_err(err)) }
     }

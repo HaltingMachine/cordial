@@ -21,6 +21,27 @@
 
 namespace cordial {
 
+/// Convert a C++ object into a `jobject` the way libjnivm expects.
+///
+/// A raw `cordial::to_jni(env, p)` looks right — libjnivm does
+/// represent a `jobject` as its own `Object*` — but it skips the two things
+/// `ToJNIType` does on the way:
+///
+///   * it sets `obj->clazz`, without which `GetObjectClass` returns null and
+///     libjnivm falls back to `FindClass("Invalid")`. Every field and method
+///     lookup on the object then resolves against the wrong class and yields
+///     nothing.
+///   * it parks the `shared_ptr` in the environment's local frame, which is what
+///     keeps the object alive for the duration of the call.
+///
+/// The failure is silent: the call succeeds, the engine reads its parameters
+/// through a classless receiver, gets nothing, and carries on into its failure
+/// path.
+template <class T>
+static auto to_jni(jnivm::ENV* env, const std::shared_ptr<T>& p) {
+    return jnivm::JNITypes<std::shared_ptr<T>>::ToJNIType(env, p);
+}
+
 using jnivm::Class;
 using jnivm::ENV;
 using jnivm::Object;
@@ -175,6 +196,8 @@ public:
     }
 };
 
+class InitParams;
+
 void register_init_params_classes(ENV* env) {
     DeviceParams::Register(env);
     PlatformParams::Register(env);
@@ -198,8 +221,8 @@ int cordial_set_init_params(void* fn, const char* assets, int width, int height,
         auto params = cordial::InitParams::Create(assets, width, height);
         auto activity = std::make_shared<jnivm::Object>();
         reinterpret_cast<Call>(fn)(env->GetJNIEnv(),
-                                   reinterpret_cast<jobject>(activity.get()),
-                                   reinterpret_cast<jobject>(params.get()));
+                                   cordial::to_jni(env, activity),
+                                   cordial::to_jni(env, params));
         return 0;
     } catch (const std::exception& e) {
         snprintf(err, err_len, "%s", e.what());
@@ -231,8 +254,8 @@ int cordial_asset_manager_init(void* fn, char* err, size_t err_len) {
         auto cls = env->GetClass("com/roblox/client/JNIAAssetManagerSetup");
         auto assets = std::make_shared<jnivm::Object>();
         reinterpret_cast<Call>(fn)(env->GetJNIEnv(),
-                                   reinterpret_cast<jclass>(cls.get()),
-                                   reinterpret_cast<jobject>(assets.get()));
+                                   cordial::to_jni(env, cls),
+                                   cordial::to_jni(env, assets));
         return 0;
     } catch (const std::exception& e) {
         snprintf(err, err_len, "%s", e.what());
@@ -257,10 +280,10 @@ int cordial_storage_init(void* fn, const char* a, const char* b, char* err, size
         auto s1 = cordial::S_pub(a);
         auto s2 = cordial::S_pub(b);
         reinterpret_cast<Call>(fn)(env->GetJNIEnv(),
-                                   reinterpret_cast<jclass>(cls.get()),
-                                   reinterpret_cast<jobject>(assets.get()),
-                                   reinterpret_cast<jstring>(s1.get()),
-                                   reinterpret_cast<jstring>(s2.get()));
+                                   cordial::to_jni(env, cls),
+                                   cordial::to_jni(env, assets),
+                                   cordial::to_jni(env, s1),
+                                   cordial::to_jni(env, s2));
         return 0;
     } catch (const std::exception& e) {
         snprintf(err, err_len, "%s", e.what());
@@ -281,7 +304,106 @@ int cordial_call_bare(void* fn, char* err, size_t err_len) {
     }
     try {
         auto obj = std::make_shared<jnivm::Object>();
-        reinterpret_cast<Call>(fn)(env->GetJNIEnv(), reinterpret_cast<jobject>(obj.get()));
+        reinterpret_cast<Call>(fn)(env->GetJNIEnv(), cordial::to_jni(env, obj));
+        return 0;
+    } catch (const std::exception& e) {
+        snprintf(err, err_len, "%s", e.what());
+        return -1;
+    } catch (...) {
+        snprintf(err, err_len, "non-standard C++ exception");
+        return -1;
+    }
+}
+
+} // extern "C"
+
+extern "C" {
+
+/// `FlagJniInterface.nativeInitializeNativeFlags(String[])`
+///
+/// This is what `bootstrapTheApp()` exists to reach. On Android the Kotlin
+/// bootstrap fetches the flag set and passes it here; the engine then reports
+/// back through `NativeHelper.gameActivity_onFlagsLoaded` or, failing that,
+/// `gameActivity_onFlagsFailed` — and the second is what Cordial has been
+/// getting, because nothing ever called this.
+///
+/// An empty array means "no overrides": the engine falls back to the defaults
+/// compiled into it. That is the honest starting point — inventing flag values
+/// would change engine behaviour in ways nothing here could account for.
+int cordial_init_flags(void* fn, char* err, size_t err_len) {
+    using Call = jobject (*)(JNIEnv*, jclass, jobjectArray);
+    auto* env = cordial::process_env();
+    if (!fn || !env) {
+        snprintf(err, err_len, "no JavaVM, or nativeInitializeNativeFlags is not exported");
+        return -1;
+    }
+    try {
+        auto cls = env->GetClass("com/roblox/client/flags/FlagJniInterface");
+        auto empty = std::make_shared<jnivm::Array<jnivm::String>>(0);
+        reinterpret_cast<Call>(fn)(
+            env->GetJNIEnv(),
+            (jclass)cordial::to_jni(env, cls),
+            (jobjectArray)cordial::to_jni(env, empty));
+        return 0;
+    } catch (const std::exception& e) {
+        snprintf(err, err_len, "%s", e.what());
+        return -1;
+    } catch (...) {
+        snprintf(err, err_len, "non-standard C++ exception");
+        return -1;
+    }
+}
+
+} // extern "C"
+
+extern "C" {
+
+/// `NativeGLInterface.nativeAppBridgeV2InitWithParams(InitParams)`
+///
+/// The real entry to Roblox's app bridge. The launcher Activity is
+/// `ActivitySplash`, whose default target is `ActivityNativeMain` — not the AGDK
+/// `MainGameActivity`, which the manifest marks `exported=false`. The chain that
+/// actually brings the client up runs through here, not through
+/// `MainGameActivity.nativeAppBridgeSetInitParams`.
+int cordial_appbridge_init(void* fn, const char* assets, int width, int height, char* err,
+                           size_t err_len) {
+    using Call = void (*)(JNIEnv*, jobject, jobject);
+    auto* env = cordial::process_env();
+    if (!fn || !env) {
+        snprintf(err, err_len, "no JavaVM, or the app-bridge native is not exported");
+        return -1;
+    }
+    try {
+        auto cls = env->GetClass("com/roblox/engine/jni/NativeGLInterface");
+        auto params = cordial::InitParams::Create(assets, width, height);
+        reinterpret_cast<Call>(fn)(env->GetJNIEnv(),
+                                   (jobject)cordial::to_jni(env, cls),
+                                   (jobject)cordial::to_jni(env, params));
+        return 0;
+    } catch (const std::exception& e) {
+        snprintf(err, err_len, "%s", e.what());
+        return -1;
+    } catch (...) {
+        snprintf(err, err_len, "non-standard C++ exception");
+        return -1;
+    }
+}
+
+/// A `NativeGLInterface` native taking no arguments — `nativeAppBridgeStartLuaAppDM`.
+///
+/// "Start Lua App DataModel": the Lua app shell is what Roblox actually renders
+/// on this platform, so this is the call that turns a live engine into a drawing
+/// one.
+int cordial_appbridge_call_bare(void* fn, char* err, size_t err_len) {
+    using Call = void (*)(JNIEnv*, jobject);
+    auto* env = cordial::process_env();
+    if (!fn || !env) {
+        snprintf(err, err_len, "no JavaVM, or the native is not exported");
+        return -1;
+    }
+    try {
+        auto cls = env->GetClass("com/roblox/engine/jni/NativeGLInterface");
+        reinterpret_cast<Call>(fn)(env->GetJNIEnv(), (jobject)cordial::to_jni(env, cls));
         return 0;
     } catch (const std::exception& e) {
         snprintf(err, err_len, "%s", e.what());
