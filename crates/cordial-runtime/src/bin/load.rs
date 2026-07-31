@@ -284,11 +284,68 @@ fn main() -> ExitCode {
             }
 
             if opt.game_activity {
-                let native = lib.symbol(
-                    "Java_com_google_androidgamesdk_GameActivity_initializeNativeCode",
-                );
+                let skip_agdk = std::env::var_os("CORDIAL_SKIP_AGDK").is_some();
+                let native = if skip_agdk {
+                    // ActivityNativeMain, the manifest's real launch target, does
+                    // not extend GameActivity. Driving both bring-ups at once
+                    // creates AGDK's game thread, which then reads app-bridge
+                    // state that only Cordial's calling thread ever touched.
+                    println!("\nskipping AGDK; driving the app bridge alone");
+                    None
+                } else {
+                    lib.symbol(
+                        "Java_com_google_androidgamesdk_GameActivity_initializeNativeCode",
+                    )
+                };
+                if skip_agdk {
+                    // The bridge sequence, without a handle and without AGDK.
+                    match cordial_runtime::android::window::open(
+                        1280, 720, &cordial_runtime::window_title("OpenGL ES"),
+                    ) {
+                        Err(e) => println!("  no window: {e}"),
+                        Ok(w) => {
+                            let (width, height, _) = w.geometry();
+                            cordial_runtime::android::config::set_screen(width, height);
+                            let apk_path = opt.apk.clone().unwrap_or_default();
+                            for (name, run) in [
+                                ("nativeGameGlobalInit", 0),
+                                ("nativeUpdateAdapterInit", 0),
+                                ("nativeAppBridgeV2InitWithParams", 1),
+                                ("nativeAppBridgeStartLuaAppDM", 0),
+                                ("nativeAppBridgeV2StartAppWithParams", 2),
+                            ] {
+                                let sym = format!(
+                                    "Java_com_roblox_engine_jni_NativeGLInterface_{name}"
+                                );
+                                let Some(f) = lib.symbol(&sym) else {
+                                    println!("  {name} not exported");
+                                    continue;
+                                };
+                                let r = match run {
+                                    1 => linker::game_activity::appbridge_init(
+                                        f, &apk_path, width, height,
+                                    ),
+                                    2 => linker::game_activity::appbridge_start_app(
+                                        f, &apk_path, width, height,
+                                    ),
+                                    _ => linker::game_activity::appbridge_call_bare(f),
+                                };
+                                match r {
+                                    Ok(()) => println!("  {name} ok"),
+                                    Err(e) => println!("  {name} failed: {e}"),
+                                }
+                            }
+                            println!("  pumping for {}s", opt.run_seconds);
+                            cordial_runtime::android::looper::pump(
+                                std::time::Duration::from_secs(opt.run_seconds),
+                            );
+                        }
+                    }
+                }
+
                 match native {
-                    None => eprintln!("  initializeNativeCode is not exported"),
+                    None if !skip_agdk => eprintln!("  initializeNativeCode is not exported"),
+                    None => {}
                     Some(f) => {
                         let files = std::env::var("CORDIAL_FILES_DIR").unwrap_or_else(|_| {
                             format!(
