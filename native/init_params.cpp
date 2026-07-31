@@ -933,12 +933,38 @@ int cordial_init_flags(void* fn, const char* settings_json, char* err, size_t er
         // real cause was the `<init>` registration bug documented on
         // `NativeFlagsInitResult`, above).
         //
-        // An empty list is therefore always correct here: cache nothing up
-        // front. The `settings_json` parameter is intentionally ignored now —
-        // it never held flag names, only a full settings document that had no
-        // valid use as an array element.
-        (void)settings_json;
-        auto arr = std::make_shared<jnivm::Array<jnivm::String>>(0);
+        // The real Android client passes 139 specific names here. That is not a
+        // guess: a Waydroid capture of this same APK logs
+        //
+        //   nativeInitializeNativeFlags: Registered Flag Provider ID from Java: 0
+        //   nativeInitializeNativeFlags: flagCount = 139.
+        //   ... 0: EnableAndroidBinaryChannelDownloadTiming not found.
+        //   ... 5: FixAndroidWebDialogPaymentSessionId = true
+        //
+        // and docs/traces/native-flag-names.txt is that list, in order. An empty
+        // array is what Cordial sent for a long time; it is accepted, but it is
+        // not what the client does.
+        //
+        // `settings_json` is a newline-separated list of names. Blank lines are
+        // skipped so the file can be edited by hand without care.
+        std::vector<std::string> names;
+        if (settings_json) {
+            std::string all(settings_json);
+            size_t pos = 0;
+            while (pos <= all.size()) {
+                size_t nl = all.find('\n', pos);
+                if (nl == std::string::npos) nl = all.size();
+                std::string one = all.substr(pos, nl - pos);
+                while (!one.empty() && (one.back() == '\r' || one.back() == ' ')) one.pop_back();
+                if (!one.empty()) names.push_back(one);
+                if (nl == all.size()) break;
+                pos = nl + 1;
+            }
+        }
+        auto arr = std::make_shared<jnivm::Array<jnivm::String>>(names.size());
+        for (size_t k = 0; k < names.size(); ++k) {
+            (*arr)[k] = std::make_shared<jnivm::String>(names[k]);
+        }
         reinterpret_cast<Call>(fn)(
             env->GetJNIEnv(),
             (jclass)cordial::to_jni(env, cls),

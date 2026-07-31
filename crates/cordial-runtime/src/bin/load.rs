@@ -628,11 +628,27 @@ fn main() -> ExitCode {
                                             // document here was a bug once
                                             // already, so it is deliberately
                                             // NOT client_settings::load().
+                                            //
+                                            // The list is built in because the
+                                            // real client always passes it: a
+                                            // Waydroid capture of this APK logs
+                                            // "flagCount = 139" and names each
+                                            // one. See docs/traces/README.md.
+                                            // An explicit --client-settings file
+                                            // still overrides it, for
+                                            // experimenting with other lists.
+                                            const FLAG_NAMES: &str = include_str!(
+                                                "../native-flag-names.txt"
+                                            );
                                             let settings = opt
                                                 .client_settings
                                                 .as_deref()
                                                 .and_then(|p| std::fs::read_to_string(p).ok())
-                                                .unwrap_or_default();
+                                                .unwrap_or_else(|| FLAG_NAMES.to_string());
+                                            println!(
+                                                "  flag names: {}",
+                                                settings.lines().filter(|l| !l.trim().is_empty()).count()
+                                            );
                                             match linker::game_activity::init_flags(f, &settings) {
                                                 Ok(()) => println!("  flags initialised"),
                                                 Err(e) => println!("  flag init failed: {e}"),
