@@ -345,6 +345,12 @@ pub mod game_activity {
             n: usize,
         ) -> c_int;
         fn cordial_appbridge_call_bare(f: *mut c_void, err: *mut c_char, n: usize) -> c_int;
+        fn cordial_activity_lifecycle(
+            f: *mut c_void,
+            activity: *const c_char,
+            err: *mut c_char,
+            n: usize,
+        ) -> c_int;
         fn cordial_appbridge_start_app(
             f: *mut c_void,
             assets: *const c_char,
@@ -457,6 +463,24 @@ pub mod game_activity {
                 a.as_ptr(),
                 width,
                 height,
+                err.as_mut_ptr() as *mut c_char,
+                err.len(),
+            )
+        };
+        if rc == 0 { Ok(()) } else { Err(take_err(err)) }
+    }
+
+    /// One of `JNIActivityLifecycleCallbacks`' natives. The engine stores
+    /// per-Activity context — including the JNI environment it later reaches
+    /// through — as these fire.
+    pub fn activity_lifecycle(native: *mut c_void, activity: &str) -> Result<(), String> {
+        let a = CString::new(activity).map_err(|e| e.to_string())?;
+        let mut err = vec![0u8; 512];
+        // SAFETY: `native` is the exported JNI native; `a` outlives the call.
+        let rc = unsafe {
+            cordial_activity_lifecycle(
+                native,
+                a.as_ptr(),
                 err.as_mut_ptr() as *mut c_char,
                 err.len(),
             )

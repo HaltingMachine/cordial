@@ -401,6 +401,39 @@ fn main() -> ExitCode {
                                             }
                                         }
 
+                                        // Android's Application.ActivityLifecycleCallbacks
+                                        // order. The engine stores per-Activity
+                                        // context as these fire, and nothing was
+                                        // driving them — which is why it held a
+                                        // null JNIEnv on the game thread.
+                                        {
+                                            const PREFIX: &str =
+                                                "Java_com_roblox_universalapp_activitylifecyclecallbacks_JNIActivityLifecycleCallbacks_";
+                                            let activity = "com.roblox.client.ActivityNativeMain";
+                                            let mut fired = 0;
+                                            for stage in [
+                                                "nativeOnPreCreated", "nativeOnCreated",
+                                                "nativeOnPostCreated", "nativeOnPreStarted",
+                                                "nativeOnStarted", "nativeOnPostStarted",
+                                                "nativeOnPreResumed", "nativeOnResumed",
+                                                "nativeOnPostResumed",
+                                            ] {
+                                                if let Some(f) =
+                                                    lib.symbol(&format!("{PREFIX}{stage}"))
+                                                {
+                                                    match linker::game_activity::activity_lifecycle(
+                                                        f, activity,
+                                                    ) {
+                                                        Ok(()) => fired += 1,
+                                                        Err(e) => {
+                                                            println!("  {stage} failed: {e}")
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            println!("  activity lifecycle: {fired}/9 fired");
+                                        }
+
                                         // Globals first. Disassembly of the
                                         // ActivityNativeMain chain gives this
                                         // order, and calling StartLuaAppDM

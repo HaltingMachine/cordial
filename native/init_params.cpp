@@ -895,3 +895,39 @@ int cordial_appbridge_start_app(void* fn, const char* assets, int width, int hei
 }
 
 } // extern "C"
+
+extern "C" {
+
+/// One of `JNIActivityLifecycleCallbacks`' natives, all of which take the
+/// Activity's name.
+///
+/// Android's `Application.ActivityLifecycleCallbacks` fires these as the Activity
+/// moves through its states, and the engine stores per-Activity context —
+/// including the JNI environment it later reaches through — when it does.
+/// Nothing in Cordial was driving them, which is why the engine held a null
+/// environment on the game thread and faulted calling FindClass through it.
+int cordial_activity_lifecycle(void* fn, const char* activity, char* err, size_t err_len) {
+    using Call = void (*)(JNIEnv*, jobject, jstring);
+    auto* env = cordial::process_env();
+    if (!fn || !env) {
+        snprintf(err, err_len, "no JavaVM, or the lifecycle native is not exported");
+        return -1;
+    }
+    try {
+        auto cls = env->GetClass(
+            "com/roblox/universalapp/activitylifecyclecallbacks/JNIActivityLifecycleCallbacks");
+        auto name = cordial::S_pub(activity);
+        reinterpret_cast<Call>(fn)(env->GetJNIEnv(),
+                                   (jobject)cordial::to_jni(env, cls),
+                                   (jstring)cordial::to_jni(env, name));
+        return 0;
+    } catch (const std::exception& e) {
+        snprintf(err, err_len, "%s", e.what());
+        return -1;
+    } catch (...) {
+        snprintf(err, err_len, "non-standard C++ exception");
+        return -1;
+    }
+}
+
+} // extern "C"
