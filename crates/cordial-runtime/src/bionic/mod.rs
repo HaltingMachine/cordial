@@ -51,6 +51,8 @@ pub fn function_overrides() -> Vec<(&'static str, *mut c_void)> {
     ];
     // Synchronisation primitives whose bionic layout differs from glibc's.
     v.extend(pthread::overrides());
+    // Android's liblog — Roblox's own account of what it is doing.
+    v.extend(liblog_overrides());
     // A silent abort costs more debugging time than these wrappers cost anything.
     v.extend(trace::always_on());
     if std::env::var_os("CORDIAL_TRACE").is_some() {
@@ -289,4 +291,39 @@ extern "C" fn bionic_sysconf(name: c_int) -> i64 {
 
     eprintln!("[bionic] sysconf({name}) is not a selector bionic defines; returning -1");
     -1
+}
+
+// ----------------------------------------------------------------------- liblog
+
+/// Android's `liblog`, implemented in `native/liblog.cpp`.
+///
+/// Roblox narrates its own startup through these, so wiring them up is what turns
+/// every later failure from silent into explained. Implemented in C++ because
+/// three of the six are variadic.
+pub fn liblog_overrides() -> Vec<(&'static str, *mut c_void)> {
+    #[repr(C)]
+    struct Symbol {
+        name: *const c_char,
+        addr: *mut c_void,
+    }
+    extern "C" {
+        fn cordial_liblog_symbols(count: *mut usize) -> *const Symbol;
+    }
+
+    let mut count = 0usize;
+    // SAFETY: the table is a static in liblog.cpp and outlives the process.
+    let table = unsafe { cordial_liblog_symbols(&mut count) };
+    if table.is_null() {
+        return Vec::new();
+    }
+    // SAFETY: `table` points at `count` initialised entries with static names.
+    let entries = unsafe { std::slice::from_raw_parts(table, count) };
+    entries
+        .iter()
+        .map(|e| {
+            // SAFETY: each `name` is a string literal in liblog.cpp.
+            let name = unsafe { CStr::from_ptr(e.name) }.to_str().unwrap_or("");
+            (name, e.addr)
+        })
+        .collect()
 }

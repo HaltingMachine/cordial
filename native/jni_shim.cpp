@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <cstdio>
+#include <cstdlib>
 #include <exception>
 #include <execinfo.h>
 #include <unistd.h>
@@ -24,6 +25,21 @@ std::unique_ptr<jnivm::VM> g_vm;
 /// thread Cordial did not start cannot be caught anywhere — the default is
 /// `std::terminate` and a core dump carrying no information about which thread,
 /// which call, or why.
+/// Write the observed Java surface out, if a VM exists and a path was given.
+void dump_classes_now() {
+#ifdef JNI_DEBUG
+    const char* path = getenv("CORDIAL_JNI_DUMP");
+    if (path && g_vm) {
+        try {
+            g_vm->GenerateClassDump(path);
+            fprintf(stderr, "    Java surface Roblox reached for -> %s\n", path);
+        } catch (...) {
+            fprintf(stderr, "    class dump failed\n");
+        }
+    }
+#endif
+}
+
 [[noreturn]] void report_terminate() {
     fprintf(stderr, "\n*** uncaught C++ exception on thread %ld ***\n", (long)gettid());
     if (auto e = std::current_exception()) {
@@ -39,8 +55,55 @@ std::unique_ptr<jnivm::VM> g_vm;
     int n = backtrace(frames, 32);
     fprintf(stderr, "    %d frames:\n", n);
     backtrace_symbols_fd(frames, n, 2);
+
+    // Dump before dying. Everything Roblox asked Java for up to this point is
+    // the most valuable thing in the process, and it is about to be lost — the
+    // failure happens on a thread nobody can catch, so there is no later.
+    dump_classes_now();
     _exit(70);
 }
+} // namespace
+
+namespace {
+
+// A JavaVM whose invocation table logs before delegating. Roblox died before
+// asking for a single Java class, so the failure is in the invocation interface
+// itself — which of DestroyJavaVM / AttachCurrentThread / DetachCurrentThread /
+// GetEnv, called with which JavaVM, was not visible any other way.
+JNIInvokeInterface g_traced_iface;
+JavaVM g_traced_vm;
+const JNIInvokeInterface* g_real_iface = nullptr;
+JavaVM* g_real_vm = nullptr;
+bool g_trace_invoke = false;
+
+void note(const char* what, JavaVM* vm) {
+    if (g_trace_invoke) {
+        fprintf(stderr, "[jni] %s(vm=%p)%s\n", what, (void*)vm,
+                vm == &g_traced_vm ? " [ours]" : " [NOT ours]");
+    }
+}
+
+jint traced_destroy(JavaVM* vm) {
+    note("DestroyJavaVM", vm);
+    return g_real_iface->DestroyJavaVM(g_real_vm);
+}
+jint traced_attach(JavaVM* vm, JNIEnv** env, void* args) {
+    note("AttachCurrentThread", vm);
+    return g_real_iface->AttachCurrentThread(g_real_vm, env, args);
+}
+jint traced_attach_daemon(JavaVM* vm, JNIEnv** env, void* args) {
+    note("AttachCurrentThreadAsDaemon", vm);
+    return g_real_iface->AttachCurrentThreadAsDaemon(g_real_vm, env, args);
+}
+jint traced_detach(JavaVM* vm) {
+    note("DetachCurrentThread", vm);
+    return g_real_iface->DetachCurrentThread(g_real_vm);
+}
+jint traced_get_env(JavaVM* vm, void** env, jint version) {
+    note("GetEnv", vm);
+    return g_real_iface->GetEnv(g_real_vm, env, version);
+}
+
 } // namespace
 
 extern "C" {
@@ -53,7 +116,21 @@ void* cordial_jni_create_vm() {
     }
     std::set_terminate(report_terminate);
     g_vm = std::make_unique<jnivm::VM>();
-    JavaVM* vm = g_vm->GetJavaVM();
+    g_real_vm = g_vm->GetJavaVM();
+    g_real_iface = g_real_vm->functions;
+
+    // Copy the table wholesale — reserved0 has to survive, or libjnivm cannot
+    // recover its own VM — then replace only the entry points.
+    g_traced_iface = *g_real_iface;
+    g_traced_iface.DestroyJavaVM = traced_destroy;
+    g_traced_iface.AttachCurrentThread = traced_attach;
+    g_traced_iface.AttachCurrentThreadAsDaemon = traced_attach_daemon;
+    g_traced_iface.DetachCurrentThread = traced_detach;
+    g_traced_iface.GetEnv = traced_get_env;
+    g_traced_vm.functions = &g_traced_iface;
+    g_trace_invoke = getenv("CORDIAL_JNI_TRACE") != nullptr;
+
+    JavaVM* vm = &g_traced_vm;
     // libjnivm recovers its VM from JavaVM::functions->reserved0. If that is not
     // set, every callback Roblox makes throws before it does anything.
     fprintf(stderr, "[jni] JavaVM=%p functions=%p reserved0=%p (expect %p)\n",
@@ -97,7 +174,7 @@ int cordial_jni_call_onload(void* fn, char* err, size_t err_len) {
         return -1;
     }
     try {
-        return reinterpret_cast<OnLoad>(fn)(g_vm->GetJavaVM(), nullptr);
+        return reinterpret_cast<OnLoad>(fn)(&g_traced_vm, nullptr);
     } catch (const std::exception& e) {
         snprintf(err, err_len, "%s", e.what());
         return -2;

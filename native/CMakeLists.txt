@@ -19,10 +19,14 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../third_party/mcpelauncher-linker
                  ${CMAKE_CURRENT_BINARY_DIR}/mcpelauncher-linker)
 
 # Thin extern "C" surface over the linker's C++ API, so Rust can drive it.
+# Android liblog. Roblox narrates its own startup through it, so this is the
+# runtime layer's most valuable diagnostic — and the source of onLogLine/onJoin.
+add_library(cordial_liblog STATIC liblog.cpp)
+
 add_library(cordial_linker_shim STATIC shim.cpp)
 target_link_libraries(cordial_linker_shim PUBLIC linker)
 
-install(TARGETS cordial_linker_shim linker ARCHIVE DESTINATION lib)
+install(TARGETS cordial_linker_shim cordial_liblog linker ARCHIVE DESTINATION lib)
 
 # Vendored x86-64 CPU feature emulator (see third_party/libbadcpu/README.md).
 # Independent of the bionic subtree; built here so there is one native build.

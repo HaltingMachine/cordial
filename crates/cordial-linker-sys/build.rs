@@ -24,6 +24,7 @@ fn main() {
     println!("cargo:rustc-link-search=native={}/lib", dst.display());
     println!("cargo:rustc-link-lib=static=cordial_linker_shim");
     println!("cargo:rustc-link-lib=static=cordial_jni_shim");
+    println!("cargo:rustc-link-lib=static=cordial_liblog");
     println!("cargo:rustc-link-lib=static=jnivm");
     println!("cargo:rustc-link-lib=static=linker");
     println!("cargo:rustc-link-lib=dylib=stdc++");
@@ -33,5 +34,6 @@ fn main() {
 
     println!("cargo:rerun-if-changed={}", native.join("shim.cpp").display());
     println!("cargo:rerun-if-changed={}", native.join("jni_shim.cpp").display());
+    println!("cargo:rerun-if-changed={}", native.join("liblog.cpp").display());
     println!("cargo:rerun-if-changed={}", native.join("CMakeLists.txt").display());
 }
