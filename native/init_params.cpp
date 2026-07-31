@@ -16,6 +16,7 @@
 
 #include <cstdio>
 #include <memory>
+#include <map>
 #include <mutex>
 #include <string>
 
@@ -126,6 +127,113 @@ public:
     }
     static void Register(ENV* env) {
         env->GetClass<AppSurface>("android/view/Surface");
+    }
+};
+
+/// `java.util.Map`, enough of it for the flag result's cache.
+class JavaMap : public Object {
+public:
+    std::map<std::string, jboolean> entries;
+
+    jint size(ENV*) { return static_cast<jint>(entries.size()); }
+    jboolean isEmpty(ENV*) { return entries.empty(); }
+
+    static std::shared_ptr<JavaMap> Create(ENV* env) {
+        auto p = std::make_shared<JavaMap>();
+        to_jni(env, p);
+        return p;
+    }
+
+    static void Register(ENV* env) {
+        env->GetClass<JavaMap>("java/util/Map");
+        auto c = env->GetClass("java/util/Map");
+        c->HookInstanceFunction(env, "size", &JavaMap::size);
+        c->HookInstanceFunction(env, "isEmpty", &JavaMap::isEmpty);
+    }
+};
+
+/// `android.os.LocaleList`
+///
+/// `Configuration.getLocales()` returns one and the engine immediately asks it
+/// for `size()`. A null there is not survivable.
+class LocaleList : public Object {
+public:
+    jint size(ENV*) { return 1; }
+    jboolean isEmpty(ENV*) { return false; }
+
+    static std::shared_ptr<LocaleList> Create(ENV* env) {
+        auto p = std::make_shared<LocaleList>();
+        to_jni(env, p);
+        return p;
+    }
+
+    static void Register(ENV* env) {
+        env->GetClass<LocaleList>("android/os/LocaleList");
+        auto c = env->GetClass("android/os/LocaleList");
+        c->HookInstanceFunction(env, "size", &LocaleList::size);
+        c->HookInstanceFunction(env, "isEmpty", &LocaleList::isEmpty);
+    }
+};
+
+static std::shared_ptr<LocaleList> configuration_get_locales(ENV* env, Object*) {
+    return LocaleList::Create(env);
+}
+
+/// `com.roblox.client.flags.NativeFlagsInitResult`
+///
+/// `nativeInitializeNativeFlags` does not merely consume the flags — it *returns*
+/// one of these, which it builds itself over JNI: `new NativeFlagsInitResult(id)`
+/// then `addBoolean` per flag. With the class unimplemented the native could not
+/// construct its result, so every flag load failed no matter what was passed in.
+/// That is what `onFlagsFailed` was reporting.
+class NativeFlagsInitResult : public Object {
+public:
+    jint providerId = 0;
+    std::shared_ptr<JavaMap> cached;
+
+    /// Created on first use rather than in a constructor hook.
+    ///
+    /// libjnivm builds objects through its own allocation path, so a hook on
+    /// `<init>` does not reliably run — and a null map here is not a quiet
+    /// degradation: the engine calls `size()` on whatever it gets back.
+    std::shared_ptr<JavaMap>& map(ENV* env) {
+        if (!cached) {
+            cached = JavaMap::Create(env);
+        }
+        return cached;
+    }
+
+    void ctor(ENV* env, jint id) {
+        providerId = id;
+        map(env);
+    }
+    void addBoolean(ENV* env, std::shared_ptr<String> name, jboolean value, jboolean) {
+        if (name) {
+            map(env)->entries[*name] = value;
+        }
+    }
+    jint getNativeFlagProviderId(ENV*) { return providerId; }
+    std::shared_ptr<JavaMap> getBooleanCachedMap(ENV* env) { return map(env); }
+    jboolean resolveFlagValue(ENV* env, std::shared_ptr<String> name) {
+        if (!name) {
+            return false;
+        }
+        auto& m = map(env)->entries;
+        auto it = m.find(*name);
+        return it != m.end() ? it->second : false;
+    }
+
+    static void Register(ENV* env) {
+        env->GetClass<NativeFlagsInitResult>("com/roblox/client/flags/NativeFlagsInitResult");
+        auto c = env->GetClass("com/roblox/client/flags/NativeFlagsInitResult");
+        c->HookInstanceFunction(env, "<init>", &NativeFlagsInitResult::ctor);
+        c->HookInstanceFunction(env, "addBoolean", &NativeFlagsInitResult::addBoolean);
+        c->HookInstanceFunction(env, "getNativeFlagProviderId",
+                                &NativeFlagsInitResult::getNativeFlagProviderId);
+        c->HookInstanceFunction(env, "getBooleanCachedMap",
+                                &NativeFlagsInitResult::getBooleanCachedMap);
+        c->HookInstanceFunction(env, "resolveFlagValue",
+                                &NativeFlagsInitResult::resolveFlagValue);
     }
 };
 
@@ -469,6 +577,9 @@ static void hook_activity_resources(ENV* env, const char* klass) {
 }
 
 void register_init_params_classes(ENV* env) {
+    LocaleList::Register(env);
+    JavaMap::Register(env);
+    NativeFlagsInitResult::Register(env);
     NativeHelper::Register(env);
     DisplayMetrics::Register(env);
     AppSurface::Register(env);
@@ -476,6 +587,9 @@ void register_init_params_classes(ENV* env) {
     AndroidActivity::Register(env);
     // These classes are registered by register_game_activity_classes, which runs
     // first; only the descriptor-correct hook belongs here.
+    if (auto cfg = env->GetClass("android/content/res/Configuration")) {
+        cfg->HookInstanceFunction(env, "getLocales", &configuration_get_locales);
+    }
     for (const char* k : {"com/google/androidgamesdk/GameActivity",
                           "com/roblox/client/startup/MainGameActivity",
                           "android/app/Activity"}) {
