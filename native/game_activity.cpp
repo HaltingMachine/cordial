@@ -116,18 +116,6 @@ public:
     }
 };
 
-/// `android.view.Surface`
-///
-/// The handle passed to `onSurfaceCreatedNative`. `ANativeWindow_fromSurface`
-/// ignores it and returns Cordial's single window, so like the two above it is a
-/// type rather than a carrier of state.
-class Surface : public Object {
-public:
-    static void Register(ENV* env) {
-        env->GetClass<Surface>("android/view/Surface");
-    }
-};
-
 /// `com.google.androidgamesdk.GameActivity`, as an object to pass as `thiz`.
 class GameActivity : public Object {
 public:
@@ -142,7 +130,6 @@ void register_game_activity_classes(ENV* env) {
     ClassLoader::Register(env);
     AssetManager::Register(env);
     Configuration::Register(env);
-    Surface::Register(env);
     GameActivity::Register(env);
 }
 
@@ -246,7 +233,7 @@ int cordial_game_activity_start(long handle, int width, int height, int format,
             return it == cls->natives.end() ? nullptr : it->second;
         };
 
-        auto surface = std::make_shared<cordial::Surface>();
+        auto surface = std::make_shared<jnivm::Object>();
         auto jsurface = cordial::to_jni(env, surface);
         auto activity = std::make_shared<cordial::GameActivity>();
         auto jactivity = cordial::to_jni(env, activity);

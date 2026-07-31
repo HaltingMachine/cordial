@@ -59,8 +59,102 @@ std::shared_ptr<String> S(const char* v) {
 
 std::shared_ptr<String> S_pub(const char* v) { return S(v); }
 
+/// Screen size the Activity reports. AConfiguration, PlatformParams and
+/// DisplayMetrics all have to agree about this.
+static int g_width = 1280;
+static int g_height = 720;
+
+void set_display_size(int width, int height) {
+    g_width = width;
+    g_height = height;
+}
+
 class AndroidActivity;
 std::shared_ptr<Object> make_display_metrics(ENV* env);
+
+/// `android.util.DisplayMetrics`
+///
+/// The engine asks the Activity for these and reads `density` off the result.
+/// Android's density is the scale factor against 160 dpi — a desktop display at
+/// roughly 96 dpi is therefore *below* 1.0, not above it, and reporting a
+/// phone's 2.5-3.0 here would make the client lay itself out for a screen held
+/// at arm's length.
+class DisplayMetrics : public Object {
+public:
+    jfloat density = 1.0f;
+    jfloat scaledDensity = 1.0f;
+    jfloat xdpi = 96.0f;
+    jfloat ydpi = 96.0f;
+    jint densityDpi = 160;
+    jint widthPixels = 1280;
+    jint heightPixels = 720;
+
+    static std::shared_ptr<DisplayMetrics> Create(ENV* env, int width, int height) {
+        auto p = std::make_shared<DisplayMetrics>();
+        p->widthPixels = width;
+        p->heightPixels = height;
+        // 1.0 means "one density-independent pixel is one real pixel", which is
+        // what a desktop window wants: no scaling, no phone-sized controls.
+        p->density = 1.0f;
+        p->scaledDensity = 1.0f;
+        p->densityDpi = 160;
+        to_jni(env, p);
+        return p;
+    }
+
+    static void Register(ENV* env) {
+        env->GetClass<DisplayMetrics>("android/util/DisplayMetrics");
+        auto c = env->GetClass("android/util/DisplayMetrics");
+#define F(name) c->HookInstance(env, #name, &DisplayMetrics::name)
+        F(density); F(scaledDensity); F(xdpi); F(ydpi); F(densityDpi);
+        F(widthPixels); F(heightPixels);
+#undef F
+    }
+};
+
+/// `android.view.Surface`
+///
+/// Typed rather than a bare Object because StartAppParams.surface is declared
+/// `Landroid/view/Surface;` and libjnivm matches accessors on the descriptor it
+/// derives from the C++ return type.
+class AppSurface : public Object {
+public:
+    static std::shared_ptr<AppSurface> Create(ENV* env) {
+        auto p = std::make_shared<AppSurface>();
+        to_jni(env, p);
+        return p;
+    }
+    static void Register(ENV* env) {
+        env->GetClass<AppSurface>("android/view/Surface");
+    }
+};
+
+/// `com.roblox.client.startup.NativeHelper`
+///
+/// The engine's own status channel back into the app. `onFlagsFailed` is the one
+/// Cordial has been getting, and it arrives with no explanation — so these are
+/// implemented mainly to make the engine's verdict visible rather than to do
+/// anything with it.
+class NativeHelper : public Object {
+public:
+    static void onFlagsFailed(ENV*, Object*) {
+        fprintf(stderr, "[roblox] flags FAILED — the engine could not load its flag set\n");
+    }
+    static void onFlagsLoaded(ENV*, Object*, std::shared_ptr<Object>) {
+        fprintf(stderr, "[roblox] flags loaded\n");
+    }
+    static void onAppReady(ENV*, Object*, std::shared_ptr<String> s) {
+        fprintf(stderr, "[roblox] app ready: %s\n", s ? s->c_str() : "");
+    }
+
+    static void Register(ENV* env) {
+        env->GetClass<NativeHelper>("com/roblox/client/startup/NativeHelper");
+        auto c = env->GetClass("com/roblox/client/startup/NativeHelper");
+        c->HookInstanceFunction(env, "gameActivity_onFlagsFailed", &NativeHelper::onFlagsFailed);
+        c->HookInstanceFunction(env, "gameActivity_onFlagsLoaded", &NativeHelper::onFlagsLoaded);
+        c->HookInstanceFunction(env, "gameActivity_onAppReady", &NativeHelper::onAppReady);
+    }
+};
 
 /// `android.content.res.Resources`
 ///
@@ -69,7 +163,9 @@ std::shared_ptr<Object> make_display_metrics(ENV* env);
 /// getResources returning null and the engine calling getDisplayMetrics on it.
 class Resources : public Object {
 public:
-    std::shared_ptr<Object> getDisplayMetrics(ENV* env) { return make_display_metrics(env); }
+    std::shared_ptr<DisplayMetrics> getDisplayMetrics(ENV* env) {
+        return DisplayMetrics::Create(env, g_width, g_height);
+    }
 
     static std::shared_ptr<Resources> Create(ENV* env) {
         auto p = std::make_shared<Resources>();
@@ -93,8 +189,10 @@ std::shared_ptr<Object> make_resources(ENV* env) { return Resources::Create(env)
 /// asks the null for its display metrics and stops.
 class AndroidActivity : public Object {
 public:
-    std::shared_ptr<Object> getDisplayMetrics(ENV* env) { return make_display_metrics(env); }
-    std::shared_ptr<Object> getResources(ENV* env) { return make_resources(env); }
+    std::shared_ptr<DisplayMetrics> getDisplayMetrics(ENV* env) {
+        return DisplayMetrics::Create(env, g_width, g_height);
+    }
+    std::shared_ptr<Resources> getResources(ENV* env) { return Resources::Create(env); }
 
     static std::shared_ptr<AndroidActivity> Create(ENV* env) {
         auto p = std::make_shared<AndroidActivity>();
@@ -213,7 +311,7 @@ public:
     std::shared_ptr<String> baseURL, buildVariant, userAgent;
     std::shared_ptr<DeviceParams> deviceParams;
     std::shared_ptr<PlatformParams> platformParams;
-    std::shared_ptr<Object> vrContext;
+    std::shared_ptr<AndroidActivity> vrContext;
     jboolean isPotato = false;
     jboolean isTablet = false;
     jboolean isVrDevice = false;
@@ -230,6 +328,7 @@ public:
     jboolean get_isPotato(ENV*) { return isPotato; }
     jboolean get_isTablet(ENV*) { return isTablet; }
     jboolean get_isVrDevice(ENV*) { return isVrDevice; }
+    std::shared_ptr<AndroidActivity> get_vrContext(ENV*) { return vrContext; }
 
     static std::shared_ptr<InitParams> Create(ENV* env, const char* assets, int width, int height) {
         auto p = std::make_shared<InitParams>();
@@ -263,7 +362,7 @@ public:
         // uses whichever the generated class provided.
 #define G(name) c->HookInstanceFunction(env, #name, &InitParams::get_##name)
         G(baseURL); G(buildVariant); G(userAgent); G(deviceParams); G(platformParams);
-        G(isPotato); G(isTablet); G(isVrDevice);
+        G(isPotato); G(isTablet); G(isVrDevice); G(vrContext);
 #undef G
     }
 };
@@ -278,15 +377,16 @@ class StartAppParams : public Object {
 public:
     std::shared_ptr<String> appStarterPlace, appStarterScript, selectedTheme, username;
     std::shared_ptr<PlatformParams> platformParams;
-    std::shared_ptr<Object> surface;
-    std::shared_ptr<Object> vrContext;
+    std::shared_ptr<AppSurface> surface;
+    std::shared_ptr<AndroidActivity> vrContext;
     jlong appUserId = 0;
     jboolean isUnder13 = false;
     jint membershipType = 0;
 
 
     std::shared_ptr<PlatformParams> get_platformParams(ENV*) { return platformParams; }
-    std::shared_ptr<Object> get_surface(ENV*) { return surface; }
+    std::shared_ptr<AppSurface> get_surface(ENV*) { return surface; }
+    std::shared_ptr<AndroidActivity> get_vrContext(ENV*) { return vrContext; }
     std::shared_ptr<String> get_appStarterPlace(ENV*) { return appStarterPlace; }
     std::shared_ptr<String> get_appStarterScript(ENV*) { return appStarterScript; }
     std::shared_ptr<String> get_selectedTheme(ENV*) { return selectedTheme; }
@@ -297,7 +397,7 @@ public:
 
     static std::shared_ptr<StartAppParams> Create(ENV* env, const char* assets, int width,
                                                   int height,
-                                                  std::shared_ptr<Object> surface) {
+                                                  std::shared_ptr<AppSurface> surface) {
         auto p = std::make_shared<StartAppParams>();
         // Empty starter place and script mean "the default app shell" rather than
         // a specific experience. Naming one here would launch straight into a
@@ -326,60 +426,14 @@ public:
 #undef F
 #define G(name) c->HookInstanceFunction(env, #name, &StartAppParams::get_##name)
         G(appStarterPlace); G(appStarterScript); G(selectedTheme); G(username);
-        G(platformParams); G(surface); G(appUserId); G(isUnder13); G(membershipType);
+        G(platformParams); G(surface); G(vrContext); G(appUserId); G(isUnder13);
+        G(membershipType);
 #undef G
     }
 };
 
-/// `android.util.DisplayMetrics`
-///
-/// The engine asks the Activity for these and reads `density` off the result.
-/// Android's density is the scale factor against 160 dpi — a desktop display at
-/// roughly 96 dpi is therefore *below* 1.0, not above it, and reporting a
-/// phone's 2.5-3.0 here would make the client lay itself out for a screen held
-/// at arm's length.
-class DisplayMetrics : public Object {
-public:
-    jfloat density = 1.0f;
-    jfloat scaledDensity = 1.0f;
-    jfloat xdpi = 96.0f;
-    jfloat ydpi = 96.0f;
-    jint densityDpi = 160;
-    jint widthPixels = 1280;
-    jint heightPixels = 720;
 
-    static std::shared_ptr<DisplayMetrics> Create(ENV* env, int width, int height) {
-        auto p = std::make_shared<DisplayMetrics>();
-        p->widthPixels = width;
-        p->heightPixels = height;
-        // 1.0 means "one density-independent pixel is one real pixel", which is
-        // what a desktop window wants: no scaling, no phone-sized controls.
-        p->density = 1.0f;
-        p->scaledDensity = 1.0f;
-        p->densityDpi = 160;
-        to_jni(env, p);
-        return p;
-    }
 
-    static void Register(ENV* env) {
-        env->GetClass<DisplayMetrics>("android/util/DisplayMetrics");
-        auto c = env->GetClass("android/util/DisplayMetrics");
-#define F(name) c->HookInstance(env, #name, &DisplayMetrics::name)
-        F(density); F(scaledDensity); F(xdpi); F(ydpi); F(densityDpi);
-        F(widthPixels); F(heightPixels);
-#undef F
-    }
-};
-
-/// Screen size the Activity reports. Kept next to `AConfiguration` and
-/// `PlatformParams`, which must agree with it.
-static int g_width = 1280;
-static int g_height = 720;
-
-void set_display_size(int width, int height) {
-    g_width = width;
-    g_height = height;
-}
 
 std::shared_ptr<Object> make_display_metrics(ENV* env) {
     return DisplayMetrics::Create(env, g_width, g_height);
@@ -396,15 +450,28 @@ static std::shared_ptr<Resources> activity_get_resources(ENV* env, Object*) {
     return Resources::Create(env);
 }
 
+/// The engine reaches its own status channel through the Activity:
+/// `activity.getNativeHelper().gameActivity_onFlagsFailed()`. A null helper here
+/// means the failure report itself crashes, which is how the verdict stayed
+/// invisible.
+static std::shared_ptr<NativeHelper> activity_get_native_helper(ENV* env, Object*) {
+    auto p = std::make_shared<NativeHelper>();
+    to_jni(env, p);
+    return p;
+}
+
 static void hook_activity_resources(ENV* env, const char* klass) {
     auto c = env->GetClass(klass);
     if (c) {
         c->HookInstanceFunction(env, "getResources", &activity_get_resources);
+        c->HookInstanceFunction(env, "getNativeHelper", &activity_get_native_helper);
     }
 }
 
 void register_init_params_classes(ENV* env) {
+    NativeHelper::Register(env);
     DisplayMetrics::Register(env);
+    AppSurface::Register(env);
     Resources::Register(env);
     AndroidActivity::Register(env);
     // These classes are registered by register_game_activity_classes, which runs
@@ -649,8 +716,7 @@ int cordial_appbridge_start_app(void* fn, const char* assets, int width, int hei
         auto cls = env->GetClass("com/roblox/engine/jni/NativeGLInterface");
         // Reuses the android/view/Surface type registered in game_activity.cpp —
         // registering a second C++ class for the same Java name makes libjnivm throw.
-        auto surface = std::static_pointer_cast<jnivm::Object>(
-            std::make_shared<jnivm::Object>());
+        auto surface = cordial::AppSurface::Create(env);
         auto params = cordial::StartAppParams::Create(env, assets, width, height, surface);
         reinterpret_cast<Call>(fn)(env->GetJNIEnv(),
                                    (jobject)cordial::to_jni(env, cls),
