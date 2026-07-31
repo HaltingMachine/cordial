@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Cordial
+GenericName=Roblox Client
+Comment=Run Roblox on Linux
+Exec=cordial
+Icon=org.cordial.Cordial
+Terminal=false
+Categories=Game;
+StartupNotify=true
+StartupWMClass=Cordial

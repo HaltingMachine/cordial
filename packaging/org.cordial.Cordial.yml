@@ -62,6 +62,10 @@ modules:
     build-commands:
       - cargo build --release --offline || cargo build --release
       - install -Dm755 target/release/cordial-load /app/bin/cordial-load
+      - install -Dm644 packaging/icons/org.cordial.Cordial.svg
+          /app/share/icons/hicolor/scalable/apps/org.cordial.Cordial.svg
+      - install -Dm644 packaging/org.cordial.Cordial.desktop
+          /app/share/applications/org.cordial.Cordial.desktop
     sources:
       - type: dir
         path: ..
