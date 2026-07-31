@@ -1,0 +1,12 @@
+build/
+builddir/
+*.o
+*.so
+!third_party/**/*.so.license
+.cache/
+compile_commands.json
+
+# Never commit Roblox APKs or anything extracted from them.
+*.apk
+/apk/
+/native/
