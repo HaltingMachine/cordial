@@ -43,15 +43,40 @@ The 139 flag names are already extracted and built in
 already corrected. Both came from the capture; do not spend a session
 rediscovering them.
 
-## On reverse-engineering Sober
+## On observing Sober
 
-Attaching a debugger to Sober, or reading its decompilation, is the same
-provenance question either way: it is proprietary software, and deriving
-Cordial's implementation from observations of it puts Cordial's distribution at
-risk in exactly the way §16.1 and ADR-001 were written to prevent. Observing
-*Roblox* — our own capture of an app on its own platform — carries no such
-problem, which is why the trace exists. Worth a deliberate decision rather than a
-drift.
+An earlier version of this file said attaching a debugger to Sober raises "the
+same provenance question" as reading its decompilation. That was wrong, and the
+distinction matters enough to state properly.
+
+**Decompilation reconstructs expression.** You end up reading a reconstruction of
+their source and writing code from it, which is where derivative-work risk lives.
+That is why `decompiled/` stays off-limits (§16.1, ADR-001).
+
+**A debugger on a running process yields behaviour.** Which libraries it loads,
+which natives it calls, in what order, with what arguments, what it maps where.
+Those are facts and interfaces, not expression, and black-box observation for
+interoperability is the ordinary basis for this kind of work rather than an edge
+case.
+
+So the line is not the tool, it is **what you take away**:
+
+- Fine: the call sequence, the load order, argument shapes, which symbols get
+  resolved, timing, syscalls. Anything you could in principle have discovered by
+  watching the outside of the process.
+- Not fine: stepping into Sober's own routines to read how it implements
+  something and transcribing that logic. At that point the debugger is just a
+  slower decompiler.
+
+**And Sober is the better reference for this specific problem.** Waydroid runs a
+full Android stack in a container, which is exactly why its render path is not a
+model to copy (see the caveat above). Sober runs the same APK natively on the
+host against the host GPU — the shape Cordial is aiming at. Its *sequencing* is
+therefore more relevant ground truth than the Waydroid capture, particularly for
+the EGL/surface handshake the futex is likely waiting on.
+
+Worth doing, and worth recording in the commit which of the two kinds of
+observation produced any given fact.
 
 ## The blocker, as precisely as it is known
 
