@@ -59,6 +59,57 @@ std::shared_ptr<String> S(const char* v) {
 
 std::shared_ptr<String> S_pub(const char* v) { return S(v); }
 
+class AndroidActivity;
+std::shared_ptr<Object> make_display_metrics(ENV* env);
+
+/// `android.content.res.Resources`
+///
+/// Android's path to the screen is `activity.getResources().getDisplayMetrics()`,
+/// not `activity.getDisplayMetrics()`. Hooking the Activity alone left
+/// getResources returning null and the engine calling getDisplayMetrics on it.
+class Resources : public Object {
+public:
+    std::shared_ptr<Object> getDisplayMetrics(ENV* env) { return make_display_metrics(env); }
+
+    static std::shared_ptr<Resources> Create(ENV* env) {
+        auto p = std::make_shared<Resources>();
+        to_jni(env, p);
+        return p;
+    }
+
+    static void Register(ENV* env) {
+        env->GetClass<Resources>("android/content/res/Resources");
+        auto c = env->GetClass("android/content/res/Resources");
+        c->HookInstanceFunction(env, "getDisplayMetrics", &Resources::getDisplayMetrics);
+    }
+};
+
+std::shared_ptr<Object> make_resources(ENV* env) { return Resources::Create(env); }
+
+/// `android.app.Activity`
+///
+/// Both parameter objects carry one, typed `Landroid/app/Activity;`, and it is
+/// the only Activity the engine gets from the app-bridge path. Left null it
+/// asks the null for its display metrics and stops.
+class AndroidActivity : public Object {
+public:
+    std::shared_ptr<Object> getDisplayMetrics(ENV* env) { return make_display_metrics(env); }
+    std::shared_ptr<Object> getResources(ENV* env) { return make_resources(env); }
+
+    static std::shared_ptr<AndroidActivity> Create(ENV* env) {
+        auto p = std::make_shared<AndroidActivity>();
+        to_jni(env, p);
+        return p;
+    }
+
+    static void Register(ENV* env) {
+        env->GetClass<AndroidActivity>("android/app/Activity");
+        auto c = env->GetClass("android/app/Activity");
+        c->HookInstanceFunction(env, "getDisplayMetrics", &AndroidActivity::getDisplayMetrics);
+        c->HookInstanceFunction(env, "getResources", &AndroidActivity::getResources);
+    }
+};
+
 /// `com.roblox.engine.jni.model.DeviceParams`
 class DeviceParams : public Object {
 public:
@@ -196,6 +247,7 @@ public:
         // agrees with the XLARGE reported through AConfiguration.
         p->isTablet = true;
         p->isVrDevice = false;
+        p->vrContext = AndroidActivity::Create(env);
         to_jni(env, p);
         return p;
     }
@@ -259,6 +311,7 @@ public:
         p->appUserId = 0;
         p->isUnder13 = false;
         p->membershipType = 0;
+        p->vrContext = AndroidActivity::Create(env);
         to_jni(env, p);
         return p;
     }
@@ -332,8 +385,35 @@ std::shared_ptr<Object> make_display_metrics(ENV* env) {
     return DisplayMetrics::Create(env, g_width, g_height);
 }
 
+/// Hook `getResources` onto the Activity classes registered elsewhere.
+///
+/// Typed here rather than in game_activity.cpp because libjnivm binds by the JNI
+/// descriptor it derives from the C++ signature: a `shared_ptr<Object>` return
+/// becomes `Ljava/lang/Object;`, which never matches the
+/// `()Landroid/content/res/Resources;` Roblox asks for. The hook registers
+/// happily and is simply never called.
+static std::shared_ptr<Resources> activity_get_resources(ENV* env, Object*) {
+    return Resources::Create(env);
+}
+
+static void hook_activity_resources(ENV* env, const char* klass) {
+    auto c = env->GetClass(klass);
+    if (c) {
+        c->HookInstanceFunction(env, "getResources", &activity_get_resources);
+    }
+}
+
 void register_init_params_classes(ENV* env) {
     DisplayMetrics::Register(env);
+    Resources::Register(env);
+    AndroidActivity::Register(env);
+    // These classes are registered by register_game_activity_classes, which runs
+    // first; only the descriptor-correct hook belongs here.
+    for (const char* k : {"com/google/androidgamesdk/GameActivity",
+                          "com/roblox/client/startup/MainGameActivity",
+                          "android/app/Activity"}) {
+        hook_activity_resources(env, k);
+    }
     DeviceParams::Register(env);
     PlatformParams::Register(env);
     InitParams::Register(env);

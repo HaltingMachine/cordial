@@ -26,6 +26,7 @@
 
 namespace cordial {
 std::shared_ptr<jnivm::Object> make_display_metrics(jnivm::ENV* env);
+std::shared_ptr<jnivm::Object> make_resources(jnivm::ENV* env);
 void set_display_size(int width, int height);
 
 /// Convert a C++ object into a `jobject` the way libjnivm expects.
@@ -130,16 +131,10 @@ public:
 /// `com.google.androidgamesdk.GameActivity`, as an object to pass as `thiz`.
 class GameActivity : public Object {
 public:
-    /// The engine asks the Activity for the screen it is drawing on and reads
-    /// `density` off the answer. A null here stops it before it renders.
-    std::shared_ptr<Object> getDisplayMetrics(ENV* env) {
-        return make_display_metrics(env);
-    }
 
     static void Register(ENV* env) {
         env->GetClass<GameActivity>("com/google/androidgamesdk/GameActivity");
         auto c = env->GetClass("com/google/androidgamesdk/GameActivity");
-        c->HookInstanceFunction(env, "getDisplayMetrics", &GameActivity::getDisplayMetrics);
     }
 };
 
