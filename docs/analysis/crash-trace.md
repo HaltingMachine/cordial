@@ -28,6 +28,29 @@ Established by breakpoint, not inference:
 - That getter has **155 call sites**, so it is a widely used engine service, not
   something reached only down one path.
 
+## The watchpoint result — what actually happens to the field
+
+A hardware watchpoint on the faulting field (`0x7fffb17c70a0`, set from a
+breakpoint in Cordial's own `cordial_appbridge_init`, ASLR disabled so the
+address reproduces) answers it:
+
+- The field **is** written — twice, both times with **zero**.
+- The write is at `libroblox+0x2186803`, which is
+  `nativeAppBridgeV2InitWithParams+0x1543`, and it is a constructor zeroing a
+  block: `movaps %xmm0,0x3c0(%rbx)` through `0x440(%rbx)` with `%xmm0` zero.
+- Scanning the whole of `nativeAppBridgeV2InitWithParams` finds **no non-zeroing
+  store to `+0x400` at all**.
+
+So the object is created and zeroed by the app-bridge init on Cordial's calling
+thread, and nothing ever puts a `JNIEnv` in it. The game thread then reads it and
+faults. This is not a missing Java class or a wrong argument — it is a field the
+engine expects some *other* path to populate, and that path is not running.
+
+The obvious candidate is thread attachment: the engine may expect the thread that
+will run the game to attach to the JavaVM and cache its environment here. Cordial
+drives the whole bring-up from one thread, and AGDK's game thread was created
+before the bridge object existed.
+
 ## Not established — and a correction
 
 The write at `+0x24eca2d` was connected to the crash's `+0x400` **only because
