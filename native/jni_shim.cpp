@@ -205,6 +205,24 @@ int cordial_jni_call_onload(void* fn, char* err, size_t err_len) {
 
 namespace cordial {
 jnivm::ENV* process_env() {
-    return g_vm ? g_vm->GetEnv().get() : nullptr;
+    if (!g_vm || !g_real_vm) {
+        return nullptr;
+    }
+    // NOT `g_vm->GetEnv()`. That is `jnienvs[pthread_self()]` — an
+    // unordered_map::operator[], which for a thread it has never seen
+    // default-constructs a null shared_ptr and returns a reference to it. Every
+    // JNI hook in this build calls process_env(), and the engine calls those
+    // hooks from threads it created itself, so on those threads the old version
+    // handed back a null ENV and the engine stored the null where it expected a
+    // JNIEnv.
+    //
+    // AttachCurrentThread is the entry point that does create an env for an
+    // unknown thread; on a thread that already has one it finds it and changes
+    // nothing. Going through it makes "which thread am I on" stop mattering.
+    JNIEnv* env = nullptr;
+    if (g_real_vm->AttachCurrentThread(&env, nullptr) != JNI_OK || !env) {
+        return nullptr;
+    }
+    return jnivm::ENV::FromJNIEnv(env);
 }
 } // namespace cordial
