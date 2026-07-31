@@ -375,3 +375,34 @@ The engine takes the window and then does nothing with it — no
 and stops anyway, which puts the remaining suspicion back on engine *state*
 rather than on the surface: most likely the client settings it is still waiting
 for.
+
+## Both bring-up paths crash in the same function
+
+The full AGDK path segfaults too — `libroblox+0x2ccd912`, versus `+0x2ccd937` on
+the `CORDIAL_SKIP_AGDK` path. Same call chain in both:
+
+```
+nativeGameGlobalInit -> nativeAppBridgeStartLuaAppDM -> here
+```
+
+on an engine-spawned thread named `Main`, fault address `0x0` in both.
+
+`0x2ccd912` and `0x2ccd937` are 0x25 apart, inside the branch region already
+disassembled here:
+
+```
+2ccd8bc: cmp  byte [flag1], 0
+2ccd8c3: mov  al, [flag2]
+   ...   branches on (flag1, flag2)
+2ccd924: mov  rdi, [rbx+0x400]
+2ccd937: mov  rax, [rdi]        <- skip-AGDK path faults here
+```
+
+So the two paths take *different branches of the same two-flag test* and both
+reach a null pointer. That is consistent with the block at `+0x3c0..+0x440`
+being a table of delegate pointers of which only some are populated: whichever
+branch is taken, the slot it wants is empty.
+
+It also means AGDK-vs-app-bridge is not the axis that matters. Both bring-ups
+arrive at the same unpopulated state, so the missing initialisation is upstream
+of the choice between them.
