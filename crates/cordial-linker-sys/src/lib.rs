@@ -346,6 +346,12 @@ pub mod game_activity {
         ) -> c_int;
         fn cordial_appbridge_call_bare(f: *mut c_void, err: *mut c_char, n: usize) -> c_int;
         fn cordial_read_local_flags(f: *mut c_void, err: *mut c_char, n: usize) -> c_int;
+        fn cordial_appbridge_call_bare_cls(
+            f: *mut c_void,
+            class_name: *const c_char,
+            err: *mut c_char,
+            n: usize,
+        ) -> c_int;
         fn cordial_init_client_settings(
             f: *mut c_void,
             a: *const c_char,
@@ -438,6 +444,23 @@ pub mod game_activity {
         // SAFETY: `native` is the exported JNI native; `err` is a live buffer.
         let rc =
             unsafe { cordial_read_local_flags(native, err.as_mut_ptr() as *mut c_char, err.len()) };
+        if rc == 0 { Ok(()) } else { Err(take_err(err)) }
+    }
+
+    /// A no-argument native on a named class. `nativeAppBridgeAppStart` is on
+    /// `NativeAppBridgeInterface`, not `NativeGLInterface`.
+    pub fn call_bare_on(native: *mut c_void, class_name: &str) -> Result<(), String> {
+        let cls = CString::new(class_name).map_err(|e| e.to_string())?;
+        let mut err = vec![0u8; 512];
+        // SAFETY: `native` is the exported JNI native; buffers outlive the call.
+        let rc = unsafe {
+            cordial_appbridge_call_bare_cls(
+                native,
+                cls.as_ptr(),
+                err.as_mut_ptr() as *mut c_char,
+                err.len(),
+            )
+        };
         if rc == 0 { Ok(()) } else { Err(take_err(err)) }
     }
 

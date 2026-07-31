@@ -1171,6 +1171,32 @@ int cordial_appbridge_init(void* fn, const char* assets, int width, int height, 
     }
 }
 
+/// A no-argument native on an arbitrary class.
+///
+/// `nativeAppBridgeAppStart` lives on `NativeAppBridgeInterface`, not
+/// `NativeGLInterface` — which is why searching the GL interface for it kept
+/// coming up empty. The Waydroid capture shows the real client calling it first,
+/// before `nativeAppBridgeV2Init`.
+int cordial_appbridge_call_bare_cls(void* fn, const char* class_name, char* err, size_t err_len) {
+    using Call = void (*)(JNIEnv*, jobject);
+    auto* env = cordial::process_env();
+    if (!fn || !env || !class_name) {
+        snprintf(err, err_len, "no JavaVM, or the native is not exported");
+        return -1;
+    }
+    try {
+        auto cls = env->GetClass(class_name);
+        reinterpret_cast<Call>(fn)(env->GetJNIEnv(), (jobject)cordial::to_jni(env, cls));
+        return 0;
+    } catch (const std::exception& e) {
+        snprintf(err, err_len, "%s", e.what());
+        return -1;
+    } catch (...) {
+        snprintf(err, err_len, "non-standard C++ exception");
+        return -1;
+    }
+}
+
 /// A `NativeGLInterface` native taking no arguments — `nativeAppBridgeStartLuaAppDM`.
 ///
 /// "Start Lua App DataModel": the Lua app shell is what Roblox actually renders

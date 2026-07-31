@@ -14,6 +14,45 @@ Two of the nine were caught only because they were tested before being built on:
 a fix for a `Surface` that turned out to already work, and a client-settings
 theory that survived three careful arguments and died to one experiment.
 
+## Start here: the futex
+
+The driving thread parks in a futex during render bring-up. A wait like that is
+almost always on a sync primitive **nobody is going to signal**, and the prime
+candidate is an **EGL/GBM surface handshake that never completes**. That fits the
+one confirmed fact nothing else explained: the engine takes a real, non-null
+`ANativeWindow` and then never touches it again — no `setBuffersGeometry`, no
+`getWidth`, no EGL.
+
+Identify what that futex word belongs to before anything else. If it is a
+graphics-side handshake, the wall may not be Cordial's client code at all.
+
+## A limit on the trace, stated honestly
+
+Cordial runs **natively on the host** (X11/Mesa), not inside the container. The
+Waydroid capture is therefore trustworthy for **call order, names and contract**
+— which is what it was taken for — but **not** for timing or render behaviour.
+Roblox under Waydroid is reported to burn CPU with very little GPU utilisation,
+with missing explicit sync suspected, and on NVIDIA the container's Android is
+built against bionic while `nvidia-utils` is not. Do not read the capture's
+rendering path as a model of a healthy one.
+
+## Do not re-derive
+
+The 139 flag names are already extracted and built in
+(`crates/cordial-runtime/src/native-flag-names.txt`). The bring-up order is
+already corrected. Both came from the capture; do not spend a session
+rediscovering them.
+
+## On reverse-engineering Sober
+
+Attaching a debugger to Sober, or reading its decompilation, is the same
+provenance question either way: it is proprietary software, and deriving
+Cordial's implementation from observations of it puts Cordial's distribution at
+risk in exactly the way §16.1 and ADR-001 were written to prevent. Observing
+*Roblox* — our own capture of an app on its own platform — carries no such
+problem, which is why the trace exists. Worth a deliberate decision rather than a
+drift.
+
 ## The blocker, as precisely as it is known
 
 Confirmed by runtime evidence:
