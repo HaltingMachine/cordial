@@ -127,6 +127,32 @@ fn parse() -> Result<Options, String> {
     Ok(opt)
 }
 
+/// The directory the engine should treat as its asset folder.
+///
+/// Not the APK. The engine's HTTP stack is curl, and curl's `CURLOPT_CAINFO`
+/// needs a real filesystem path for `assets/ssl/cacert.pem`; handing it the
+/// `.apk` names a file inside a file. So the APK's assets are unpacked once to
+/// a cache directory and that is what `assetFolderPath` points at.
+///
+/// Falls back to the APK path if extraction fails, which keeps the old
+/// behaviour rather than refusing to start over an asset folder — the loader
+/// and asset paths still work without it.
+fn asset_folder(apk: &Option<String>) -> String {
+    let Some(apk) = apk else { return String::new() };
+    let base = std::env::var_os("XDG_CACHE_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".cache")))
+        .unwrap_or_else(std::env::temp_dir)
+        .join("cordial/assets");
+    match cordial_runtime::android::asset::extract_to(&base) {
+        Ok(dir) => dir.to_string_lossy().into_owned(),
+        Err(e) => {
+            println!("  asset extraction failed ({e}); using the APK path");
+            apk.clone()
+        }
+    }
+}
+
 fn main() -> ExitCode {
     let opt = match parse() {
         Ok(o) => o,
@@ -318,7 +344,7 @@ fn main() -> ExitCode {
                         Ok(w) => {
                             let (width, height, _) = w.geometry();
                             cordial_runtime::android::config::set_screen(width, height);
-                            let apk_path = opt.apk.clone().unwrap_or_default();
+                            let apk_path = asset_folder(&opt.apk);
                             // Ordering experiment: the engine spawns its
                             // own 'Main' thread inside nativeGameGlobalInit,
                             // which independently races through the same
@@ -680,7 +706,7 @@ fn main() -> ExitCode {
                                         // to ActivityNativeMain, not the AGDK
                                         // MainGameActivity, and this is the chain
                                         // that actually brings the client up.
-                                        let apk_path = opt.apk.clone().unwrap_or_default();
+                                        let apk_path = asset_folder(&opt.apk);
                                         if let Some(f) = lib.symbol(
                                             "Java_com_roblox_engine_jni_NativeGLInterface_nativeAppBridgeV2InitWithParams",
                                         ) {

@@ -80,6 +80,56 @@ impl Manager {
     }
 }
 
+/// Extract `assets/` to a real directory and return its path.
+///
+/// Not everything in the engine reads assets through `AAssetManager`. Its HTTP
+/// stack is curl, and curl's `CURLOPT_CAINFO` takes a **filesystem path** — it
+/// cannot be handed a zip entry or a pointer. Roblox ships its CA bundle as
+/// `assets/ssl/cacert.pem` precisely because the Android app extracts assets to
+/// a real directory and gives the engine that directory.
+///
+/// Cordial was passing the `.apk` file itself as `assetFolderPath`, so every
+/// path the engine built from it (`<assetFolder>/ssl/cacert.pem`) named a file
+/// inside a file and could not be opened. TLS verification then has no roots,
+/// which fails the client-settings fetch, which fails the flag set — three
+/// layers away from anything that mentions certificates.
+///
+/// Extraction is skipped when the destination is already populated, so repeat
+/// launches pay for it once.
+pub fn extract_to(dir: &Path) -> Result<PathBuf, String> {
+    let manager = MANAGER.get().ok_or("no APK is set")?;
+    let file = File::open(&manager.apk).map_err(|e| format!("{}: {e}", manager.apk.display()))?;
+    let mut zip = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+
+    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    for i in 0..zip.len() {
+        let mut entry = zip.by_index(i).map_err(|e| e.to_string())?;
+        let Some(name) = entry.enclosed_name().map(|p| p.to_path_buf()) else {
+            // `enclosed_name` is None for entries that escape the destination
+            // (`../`, absolute paths). Skipping them is the whole defence
+            // against a zip-slip write outside `dir`.
+            continue;
+        };
+        let Ok(rel) = name.strip_prefix("assets") else {
+            continue;
+        };
+        if entry.is_dir() {
+            continue;
+        }
+        let out = dir.join(rel);
+        if out.exists() {
+            continue;
+        }
+        if let Some(parent) = out.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+        }
+        let mut bytes = Vec::with_capacity(entry.size() as usize);
+        entry.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+        std::fs::write(&out, &bytes).map_err(|e| format!("{}: {e}", out.display()))?;
+    }
+    Ok(dir.to_path_buf())
+}
+
 /// SAFETY: `p` is null or a NUL-terminated C string, per the API contract.
 unsafe fn cstr(p: *const c_char) -> Option<String> {
     (!p.is_null()).then(|| CStr::from_ptr(p).to_string_lossy().into_owned())
