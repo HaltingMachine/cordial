@@ -769,9 +769,16 @@ int cordial_init_flags(void* fn, const char* settings_json, char* err, size_t er
     try {
         auto cls = env->GetClass("com/roblox/client/flags/FlagJniInterface");
 
-        // Roblox's ClientSettings document, as the client itself fetches it:
-        // {"applicationSettings": {"FFlagX": "True", ...}}. An empty array made
-        // the engine report flagCount = 0 and then fail — it wants the real set.
+        // The array is a list of flag *names to cache*, not a settings document.
+        //
+        // This was wrong for several iterations: passing Roblox's ClientSettings
+        // JSON here made the engine call addBoolean with the entire document as a
+        // single flag name, which is exactly what the trace showed. The flag
+        // *values* come from the engine's own load, not from this argument, so
+        // supplying a document here could never have fixed onFlagsFailed.
+        //
+        // An empty list is therefore correct: cache nothing up front. The
+        // parameter is kept so a caller can request specific names.
         const bool have = settings_json && *settings_json;
         auto arr = std::make_shared<jnivm::Array<jnivm::String>>(have ? 1 : 0);
         if (have) {

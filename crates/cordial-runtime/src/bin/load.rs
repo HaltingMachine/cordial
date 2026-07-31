@@ -33,8 +33,8 @@ usage: cordial-load --lib-dir <dir> [options]
   --library <name>  object to load (default: libroblox.so)
   --apk <path>      APK to serve assets from; without it AAssetManager_open fails
   --read-asset <p>  read one asset through the AAsset API and report its size
-  --client-settings <f>  Roblox ClientSettings JSON; the engine reports
-                    onFlagsFailed without it
+  --client-settings <f>  newline-free list of flag names to pre-cache.
+                    NOT the ClientSettings document — the engine loads values itself
   --gl-probe        bring up GLES2 through the symbol table and read a pixel back
   --window <secs>   GL PROBE ONLY: open a window and draw a gradient for <secs>.
                     This is Cordial's own test pattern, not Roblox rendering.
