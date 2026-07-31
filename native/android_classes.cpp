@@ -226,9 +226,15 @@ class NativeUserJavaInterface : public Object {
 public:
     static jlong getUserId(ENV*, Class*) { return 0; }
     static jboolean getIsUnder13(ENV*, Class*) {
-        // Not knowing the age must not read as "old enough". Nothing gated on
-        // this should unlock because Cordial failed to answer.
-        return true;
+        // This mirrors account state; it is not the age gate. Roblox enforces age
+        // restrictions server-side from the account itself, so a real under-13
+        // account is restricted whether or not the client says so here.
+        //
+        // Defaulting to under-13 therefore protects nobody and degrades the
+        // client for the majority of players, who are teens and adults. Once auth
+        // exists this comes from the signed-in account and stops being a default
+        // at all.
+        return false;
     }
     static jint getMembershipType(ENV*, Class*) { return 0; }
     static jboolean getHasRobloxSubscription(ENV*, Class*) { return false; }

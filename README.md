@@ -7,12 +7,17 @@ runs the official x86-64 Android build on Linux through a purpose-built runtime,
 Android-on-desktop gaps at the framework layer rather than by patching the client, and
 exposes a sandboxed, capability-scoped plugin surface on top.
 
-**Status: Phase 1 in progress. Roblox's engine loads; nothing renders yet.**
+**Status: Phase 1 substantially done, Phase 2 underway. Nothing renders yet.**
 
 `cordial-load` maps Roblox's 105.6 MB `libroblox.so` with the AOSP bionic linker,
-resolves every relocation, and runs all of its static constructors in ~35 ms. That is
-the loader proven against the real object — it is not Roblox running. There is no
-JavaVM, no window and no frame. See [`docs/findings.md`](docs/findings.md) §8.
+resolves every relocation, runs all of its static constructors, and completes
+`JNI_OnLoad` — in ~35 ms, exit 0. Eight of Roblox's Java classes are implemented and
+the client narrates itself through Cordial's `liblog`.
+
+There is still **no window, no frame and no input**. The remaining Phase 2 core is
+mapped in [`docs/design/path-to-a-frame.md`](docs/design/path-to-a-frame.md):
+an asset manager over the APK, a host window with an EGL surface, and
+`GameActivity.initializeNativeCode`. See [`docs/findings.md`](docs/findings.md) §8.
 
 ## What is here
 
@@ -24,6 +29,7 @@ JavaVM, no window and no frame. See [`docs/findings.md`](docs/findings.md) §8.
 | [`docs/analysis/`](docs/analysis) | Raw enumeration output: linked libraries, undefined symbols, JNI natives, framework classes |
 | [`docs/base-evaluation.md`](docs/base-evaluation.md) | Phase 0: port-vs-write assessment of the minecraft-linux stack |
 | [`docs/adr/ADR-001-in-process-hooking.md`](docs/adr/ADR-001-in-process-hooking.md) | Why Cordial has no in-process hooking, ever |
+| [`docs/design/path-to-a-frame.md`](docs/design/path-to-a-frame.md) | The remaining Phase 2 core: GameActivity, assets, surface |
 | [`docs/design/instances-and-launch.md`](docs/design/instances-and-launch.md) | Multi-instance, multi-account, and `roblox://` handling |
 | [`crates/cordial-linker-sys/`](crates/cordial-linker-sys) | Rust bindings to the AOSP bionic linker |
 | [`crates/cordial-runtime/`](crates/cordial-runtime) | Symbol table, bionic shims, `cordial-load` |
