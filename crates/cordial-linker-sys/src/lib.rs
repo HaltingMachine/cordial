@@ -279,6 +279,47 @@ pub mod game_activity {
         }
     }
 
+    extern "C" {
+        fn cordial_set_init_params(
+            f: *mut c_void,
+            assets: *const c_char,
+            width: c_int,
+            height: c_int,
+            err: *mut c_char,
+            err_len: usize,
+        ) -> c_int;
+    }
+
+    /// `MainGameActivity.nativeAppBridgeSetInitParams` — where the service lives,
+    /// what the device is, and what the viewport looks like. The engine renders
+    /// its own app shell and draws nothing until it has these.
+    pub fn set_init_params(
+        native: *mut c_void,
+        assets: &str,
+        width: i32,
+        height: i32,
+    ) -> Result<(), String> {
+        let a = CString::new(assets).map_err(|e| e.to_string())?;
+        let mut err = vec![0u8; 512];
+        // SAFETY: `native` is the exported JNI native; `a` outlives the call.
+        let rc = unsafe {
+            cordial_set_init_params(
+                native,
+                a.as_ptr(),
+                width,
+                height,
+                err.as_mut_ptr() as *mut c_char,
+                err.len(),
+            )
+        };
+        if rc == 0 {
+            Ok(())
+        } else {
+            let end = err.iter().position(|&b| b == 0).unwrap_or(err.len());
+            Err(String::from_utf8_lossy(&err[..end]).into_owned())
+        }
+    }
+
     pub fn initialize(
         native: *mut c_void,
         internal_path: &str,

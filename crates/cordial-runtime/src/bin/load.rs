@@ -317,16 +317,70 @@ fn main() -> ExitCode {
                                         let (width, height, format) = w.geometry();
                                         cordial_runtime::android::config::set_screen(width, height);
                                         println!("  window {width}x{height}");
+                                        // The engine renders its own app shell,
+                                        // so it needs the app bridge before it
+                                        // will draw anything at all.
+                                        cordial_runtime::android::config::set_screen(width, height);
+                                        if let Some(p) = lib.symbol(
+                                            "Java_com_roblox_client_startup_MainGameActivity_nativeAppBridgeSetInitParams",
+                                        ) {
+                                            match linker::game_activity::set_init_params(
+                                                p,
+                                                opt.apk.as_deref().unwrap_or(""),
+                                                width,
+                                                height,
+                                            ) {
+                                                Ok(()) => println!("  init params set"),
+                                                Err(e) => println!("  init params failed: {e}"),
+                                            }
+                                        }
+
                                         match linker::game_activity::start(
                                             handle, width, height, format,
                                         ) {
                                             Ok(()) => {
                                                 println!("  surface handed to the engine");
                                                 let secs = opt.run_seconds;
-                                                println!("  running for {secs}s");
-                                                std::thread::sleep(
+                                                println!("  pumping the looper for {secs}s");
+                                                // Android's UI thread runs the
+                                                // message loop; AGDK put its
+                                                // pipes on this thread's looper.
+                                                cordial_runtime::android::looper::pump(
                                                     std::time::Duration::from_secs(secs),
                                                 );
+                                                if std::env::var_os("CORDIAL_COUNT_GL").is_some() {
+                                                    // What each thread is blocked on. A game thread
+                                                    // waiting on a socket, a futex, or nothing at all
+                                                    // are three different problems.
+                                                    println!("\n  threads:");
+                                                    if let Ok(dir) = std::fs::read_dir("/proc/self/task") {
+                                                        for e in dir.flatten() {
+                                                            let p = e.path();
+                                                            let name = std::fs::read_to_string(p.join("comm"))
+                                                                .unwrap_or_default().trim().to_string();
+                                                            let wchan = std::fs::read_to_string(p.join("wchan"))
+                                                                .unwrap_or_default().trim().to_string();
+                                                            let state = std::fs::read_to_string(p.join("stat"))
+                                                                .ok()
+                                                                .and_then(|s| s.rsplit(')').next()
+                                                                    .and_then(|r| r.split_whitespace().next())
+                                                                    .map(str::to_string))
+                                                                .unwrap_or_default();
+                                                            println!("    {name:<18} state={state:<2} wchan={wchan}");
+                                                        }
+                                                    }
+                                                    println!(
+                                                        "  looper polls: {}",
+                                                        cordial_runtime::android::looper::POLLS
+                                                            .load(std::sync::atomic::Ordering::Relaxed)
+                                                    );
+                                                    println!("\n  graphics calls Roblox made:");
+                                                    for (name, n) in
+                                                        cordial_runtime::android::glcount::report()
+                                                    {
+                                                        println!("    {name:<24} {n}");
+                                                    }
+                                                }
                                             }
                                             Err(e) => println!("  lifecycle failed: {e}"),
                                         }

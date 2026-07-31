@@ -5,7 +5,10 @@
 #include <jnivm.h>
 
 extern "C" void cordial_register_android_classes(void* env);
-namespace cordial { void register_game_activity_classes(jnivm::ENV* env); }
+namespace cordial {
+void register_game_activity_classes(jnivm::ENV* env);
+void register_init_params_classes(jnivm::ENV* env);
+}
 
 /// The process VM, for translation units that need the real jnivm::ENV rather
 /// than a JNIEnv. Keeping this on the C++ side means Rust never has to hold a
@@ -129,6 +132,7 @@ void* cordial_jni_create_vm() {
     // Cordial's Java side, before Roblox can ask for any of it.
     cordial_register_android_classes(g_vm->GetEnv().get());
     cordial::register_game_activity_classes(g_vm->GetEnv().get());
+    cordial::register_init_params_classes(g_vm->GetEnv().get());
     g_real_vm = g_vm->GetJavaVM();
     g_real_iface = g_real_vm->functions;
 

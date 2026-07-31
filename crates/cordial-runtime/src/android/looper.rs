@@ -11,7 +11,11 @@
 
 use std::cell::RefCell;
 use std::ffi::{c_int, c_void};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+/// How many times the engine has polled. A game thread that is alive and waiting
+/// for work shows up here; one that never started does not.
+pub static POLLS: AtomicU64 = AtomicU64::new(0);
 
 // Return values from android/looper.h.
 pub const POLL_WAKE: c_int = -1;
@@ -146,6 +150,27 @@ pub fn prepare_for_current_thread() -> bool {
     Looper::prepare().is_some()
 }
 
+/// Pump this thread's looper, as Android's UI thread does.
+///
+/// AGDK registers its command and input pipes on the looper belonging to the
+/// thread that called `initializeNativeCode`, and expects that thread to keep
+/// polling. Sleeping instead means the engine's own messages — including the one
+/// that says the window is ready — are queued and never delivered, so it sits
+/// with a surface it has not been told about and never draws.
+pub fn pump(duration: std::time::Duration) {
+    let deadline = std::time::Instant::now() + duration;
+    while std::time::Instant::now() < deadline {
+        // A bounded timeout rather than -1: the loop has to notice the deadline
+        // even when nothing is happening.
+        looper_poll_once(
+            50,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        );
+    }
+}
+
 // ------------------------------------------------------------------- the API
 
 extern "C" fn looper_prepare(_opts: c_int) -> *mut c_void {
@@ -188,6 +213,7 @@ extern "C" fn looper_add_fd(
     callback: Option<extern "C" fn(c_int, c_int, *mut c_void) -> c_int>,
     data: *mut c_void,
 ) -> c_int {
+    super::trace(format_args!("ALooper_addFd(fd={fd}, ident={ident})"));
     let Some(l) = as_looper(looper) else {
         return -1;
     };
@@ -251,8 +277,10 @@ extern "C" fn looper_poll_once(
     out_data: *mut *mut c_void,
 ) -> c_int {
     let Some(l) = Looper::for_thread() else {
+        super::trace(format_args!("ALooper_pollOnce on a thread with no looper"));
         return POLL_ERROR;
     };
+    POLLS.fetch_add(1, Ordering::Relaxed);
 
     let mut events = [EpollEvent { events: 0, data: 0 }; 16];
     // SAFETY: `events` is a live array of the length passed.

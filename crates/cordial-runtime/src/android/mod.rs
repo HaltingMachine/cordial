@@ -15,6 +15,7 @@
 pub mod asset;
 pub mod config;
 pub mod gl;
+pub mod glcount;
 pub mod looper;
 pub mod window;
 
@@ -42,5 +43,8 @@ pub fn overrides() -> Vec<(&'static str, *mut c_void)> {
     v.extend(config::overrides());
     v.extend(looper::overrides());
     v.extend(window::overrides());
+    if std::env::var_os("CORDIAL_COUNT_GL").is_some() {
+        v.extend(glcount::overrides());
+    }
     v
 }

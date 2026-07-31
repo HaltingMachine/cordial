@@ -21,6 +21,7 @@
 #include <cstdio>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <string>
 
 namespace cordial {
@@ -198,44 +199,57 @@ int cordial_game_activity_start(long handle, int width, int height, int format,
 
     try {
         JNIEnv* jni = env->GetJNIEnv();
-        jclass cls = jni->FindClass("com/google/androidgamesdk/GameActivity");
+        auto cls = env->GetClass("com/google/androidgamesdk/GameActivity");
         if (!cls) {
             snprintf(err, err_len, "GameActivity class is not registered");
             return -1;
         }
+
+        // The natives are called directly rather than through GetMethodID and
+        // CallVoidMethod, because libjnivm's method lookup deliberately excludes
+        // them: `AllowNative == (bool)namesp->native` is false for an ordinary
+        // GetMethodID, and CallVoidMethod dispatches on `nativehandle`, which
+        // RegisterNatives never sets. Going through JNI silently finds nothing
+        // and does nothing — which is exactly what it did.
+        //
+        // RegisterNatives does keep the raw function pointers, so this looks them
+        // up there and calls them with the signatures AGDK registered.
+        auto native = [&](const char* name) -> void* {
+            std::lock_guard<std::mutex> lock(cls->mtx);
+            auto it = cls->natives.find(name);
+            return it == cls->natives.end() ? nullptr : it->second;
+        };
 
         auto surface = std::make_shared<cordial::Surface>();
         auto jsurface = reinterpret_cast<jobject>(surface.get());
         auto activity = std::make_shared<cordial::GameActivity>();
         auto jactivity = reinterpret_cast<jobject>(activity.get());
 
-        auto call_handle_only = [&](const char* name) {
-            jmethodID m = jni->GetMethodID(cls, name, "(J)V");
-            if (m) {
-                jni->CallVoidMethod(jactivity, m, (jlong)handle);
-            }
-            return m != nullptr;
-        };
+        using HandleOnly = void (*)(JNIEnv*, jobject, jlong);
+        using SurfaceFn = void (*)(JNIEnv*, jobject, jlong, jobject);
+        using SurfaceChangedFn = void (*)(JNIEnv*, jobject, jlong, jobject, jint, jint, jint);
 
-        // Lifecycle first: the engine sets up its renderer on resume and will
-        // ignore a surface that arrives before it is ready for one.
-        call_handle_only("onStartNative");
-        call_handle_only("onResumeNative");
-
-        if (jmethodID created = jni->GetMethodID(
-                cls, "onSurfaceCreatedNative", "(JLandroid/view/Surface;)V")) {
-            jni->CallVoidMethod(jactivity, created, (jlong)handle, jsurface);
-        } else {
-            snprintf(err, err_len, "onSurfaceCreatedNative is not registered");
-            return -1;
+        // Lifecycle first: the engine builds its renderer on resume and ignores a
+        // surface that arrives before it is ready for one.
+        if (auto f = native("onStartNative")) {
+            reinterpret_cast<HandleOnly>(f)(jni, jactivity, (jlong)handle);
+        }
+        if (auto f = native("onResumeNative")) {
+            reinterpret_cast<HandleOnly>(f)(jni, jactivity, (jlong)handle);
         }
 
-        // Size and format come after creation, and this is the call that tells
-        // the engine how big its framebuffers must be.
-        if (jmethodID changed = jni->GetMethodID(
-                cls, "onSurfaceChangedNative", "(JLandroid/view/Surface;III)V")) {
-            jni->CallVoidMethod(jactivity, changed, (jlong)handle, jsurface,
-                                (jint)format, (jint)width, (jint)height);
+        auto created = native("onSurfaceCreatedNative");
+        if (!created) {
+            snprintf(err, err_len, "onSurfaceCreatedNative was never registered");
+            return -1;
+        }
+        reinterpret_cast<SurfaceFn>(created)(jni, jactivity, (jlong)handle, jsurface);
+
+        // Size and format come after creation; this is what tells the engine how
+        // big its framebuffers have to be.
+        if (auto f = native("onSurfaceChangedNative")) {
+            reinterpret_cast<SurfaceChangedFn>(f)(jni, jactivity, (jlong)handle, jsurface,
+                                                  (jint)format, (jint)width, (jint)height);
         }
         return 0;
     } catch (const std::exception& e) {
