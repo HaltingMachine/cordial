@@ -104,20 +104,12 @@ test $0xfc00,%edi
 jne  <alternate path>
 ```
 
-The variable is in `.bss` with **no relocation and no rip-relative writer
-anywhere in the binary** — so it is zero at load and is only ever written through
-a computed address (a pointer into an enclosing struct, or a block copy). Zero
-means the test falls through to the "not yet initialised" path.
-
-So `StartLuaAppDM` is running its cold path because a global the engine expects
-some earlier initialisation to have set is still zero. That is consistent with
-everything else here: the object at `+0x400`, this gate, and the engine's
-`onFlagsFailed` all look like one missing initialisation rather than several
-independent gaps.
-
-Finding what sets it needs a watchpoint on `0x6eb9e48` from process start, which
-is straightforward and was not run — the address is a fixed `.bss` offset, so it
-does not need the object-address trick used above.
+**A watchpoint on it shows it is written, to `1030` (`0x406`).** So the "it is
+still zero" reading was wrong — and it would not have mattered either way:
+`0x406 & 0xfc00 == 0`, so the branch falls through exactly as it would at zero.
+That test is not a gate on initialisation at all; `1030` looks like a count or
+capacity. This line of reasoning is a dead end and is recorded so it is not
+retried.
 
 ## Ruled out
 
