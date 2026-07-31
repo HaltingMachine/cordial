@@ -7,5 +7,6 @@
 //!
 //! Nothing here runs Roblox yet. See docs/findings.md.
 
+pub mod bionic;
 pub mod stubs;
 pub mod symtab;

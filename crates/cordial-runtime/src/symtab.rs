@@ -56,8 +56,22 @@ pub const EMPTY_LIBRARIES: &[&str] = &["libOpenSLES.so", "libOpenMAXAL.so"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
+    /// Implemented by Cordial itself (see `bionic`).
+    Cordial,
+    /// The host's own library, used directly.
     Host,
+    /// Not implemented yet.
     Stub,
+}
+
+impl Source {
+    pub fn label(self) -> &'static str {
+        match self {
+            Source::Cordial => "cordial",
+            Source::Host => "host",
+            Source::Stub => "stub",
+        }
+    }
 }
 
 pub struct Entry {
@@ -68,8 +82,19 @@ pub struct Entry {
 
 #[derive(Default, Clone, Copy)]
 pub struct Stats {
+    pub cordial: usize,
     pub host: usize,
     pub stub: usize,
+}
+
+impl Stats {
+    fn record(&mut self, source: Source) {
+        match source {
+            Source::Cordial => self.cordial += 1,
+            Source::Host => self.host += 1,
+            Source::Stub => self.stub += 1,
+        }
+    }
 }
 
 pub struct SymbolTable {
@@ -82,6 +107,7 @@ pub struct SymbolTable {
 impl SymbolTable {
     pub fn totals(&self) -> Stats {
         self.stats.values().fold(Stats::default(), |mut acc, s| {
+            acc.cordial += s.cordial;
             acc.host += s.host;
             acc.stub += s.stub;
             acc
@@ -126,12 +152,25 @@ fn classify(symbol: &str) -> Class {
 /// exists to see how far execution gets, not to be correct.
 pub fn build(host_libc: bool) -> SymbolTable {
     // (host soname, Android soname it stands in for)
+    //
+    // libstdc++ and libgcc_s are here for one symbol: `__gxx_personality_v0`,
+    // the Itanium C++ ABI personality routine. Roblox imports it undefined and
+    // throws during static initialisation; with it stubbed the unwinder cannot
+    // find a handler, calls std::terminate, and the whole load aborts inside
+    // DT_INIT_ARRAY. The ABI is standard, so the host's is the right one.
     let candidates: &[(&'static str, &'static str)] = &[
         ("libm.so.6", "libm.so"),
         ("libz.so.1", "libz.so"),
         ("libGLESv2.so.2", "libGLESv2.so"),
         ("libEGL.so.1", "libEGL.so"),
+        ("libstdc++.so.6", "libc.so"),
+        ("libgcc_s.so.1", "libc.so"),
     ];
+
+    let overrides: BTreeMap<&'static str, *mut c_void> = crate::bionic::function_overrides()
+        .into_iter()
+        .chain(crate::bionic::data_overrides())
+        .collect();
 
     let mut host_libs = Vec::new();
     let mut missing_host_libs = Vec::new();
@@ -153,22 +192,33 @@ pub fn build(host_libc: bool) -> SymbolTable {
 
     for (symbol, stub) in SYMBOLS.iter() {
         let stub_addr = *stub as *mut c_void;
+        let class = classify(symbol);
 
-        let (library, address, source) = match classify(symbol) {
-            Class::Android(lib) => (lib, stub_addr, Source::Stub),
+        // Cordial's own implementations win over everything. They exist because
+        // neither the host nor a stub is correct for these; see `bionic`.
+        let (library, address, source) = if let Some(&addr) = overrides.get(symbol) {
+            let lib = match class {
+                Class::Android(lib) | Class::Khronos(lib) => lib,
+                Class::Generic => "libc.so",
+            };
+            (lib, addr, Source::Cordial)
+        } else {
+            match class {
+                Class::Android(lib) => (lib, stub_addr, Source::Stub),
 
-            Class::Khronos(lib) => match lookup(&host_libs, symbol) {
-                Some((_, addr)) => (lib, addr, Source::Host),
-                None => (lib, stub_addr, Source::Stub),
-            },
-
-            Class::Generic => match lookup(&host_libs, symbol) {
-                Some((provides, addr)) => (provides, addr, Source::Host),
-                None => match libc.as_ref().and_then(|l| l.lookup(symbol)) {
-                    Some(addr) => ("libc.so", addr, Source::Host),
-                    None => ("libc.so", stub_addr, Source::Stub),
+                Class::Khronos(lib) => match lookup(&host_libs, symbol) {
+                    Some((_, addr)) => (lib, addr, Source::Host),
+                    None => (lib, stub_addr, Source::Stub),
                 },
-            },
+
+                Class::Generic => match lookup(&host_libs, symbol) {
+                    Some((provides, addr)) => (provides, addr, Source::Host),
+                    None => match libc.as_ref().and_then(|l| l.lookup(symbol)) {
+                        Some(addr) => ("libc.so", addr, Source::Host),
+                        None => ("libc.so", stub_addr, Source::Stub),
+                    },
+                },
+            }
         };
 
         table.libraries.entry(library).or_default().push(Entry {
@@ -176,11 +226,7 @@ pub fn build(host_libc: bool) -> SymbolTable {
             address,
             source,
         });
-        let s = table.stats.entry(library).or_default();
-        match source {
-            Source::Host => s.host += 1,
-            Source::Stub => s.stub += 1,
-        }
+        table.stats.entry(library).or_default().record(source);
     }
 
     for name in EMPTY_LIBRARIES {
@@ -202,6 +248,8 @@ struct HostLib {
     /// Filename prefix a symbol's defining object must have to count as ours,
     /// e.g. `libm.so` for `libm.so.6`.
     soname_stem: &'static str,
+    /// Whether vDSO-provided symbols count as this library's.
+    accepts_vdso: bool,
     handle: *mut c_void,
 }
 
@@ -214,7 +262,12 @@ impl HostLib {
             // "libm.so.6" -> "libm.so"
             &soname[..stem.len() + 3]
         });
-        (!handle.is_null()).then_some(HostLib { provides, soname_stem, handle })
+        (!handle.is_null()).then_some(HostLib {
+            provides,
+            soname_stem,
+            accepts_vdso: soname.starts_with("libc."),
+            handle,
+        })
     }
 
     fn lookup(&self, symbol: &str) -> Option<*mut c_void> {
@@ -242,7 +295,14 @@ impl HostLib {
         let path = unsafe { std::ffi::CStr::from_ptr(info.dli_fname) };
         let path = path.to_string_lossy();
         let file = path.rsplit('/').next().unwrap_or(&path);
-        file.starts_with(self.soname_stem)
+
+        if file.starts_with(self.soname_stem) {
+            return true;
+        }
+        // glibc puts gettimeofday, time and clock_gettime in the vDSO, so dladdr
+        // attributes them to linux-vdso.so.1 rather than libc. They are still the
+        // implementation libc would have given us.
+        self.accepts_vdso && file.starts_with("linux-vdso")
     }
 }
 

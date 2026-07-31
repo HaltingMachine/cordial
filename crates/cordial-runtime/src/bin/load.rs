@@ -31,6 +31,7 @@ env:
   MCPELAUNCHER_LINKER_VERBOSITY=<n>  bionic linker tracing (try 1 or 2)
   CORDIAL_STUB_ABORT=1               abort on the first unimplemented call
   CORDIAL_STUB_QUIET=1               do not report stub hits as they happen
+  CORDIAL_TRACE=1                    log libc calls Roblox makes (loud)
 ";
 
 fn parse() -> Result<Options, String> {
@@ -75,14 +76,18 @@ fn main() -> ExitCode {
     let totals = table.totals();
 
     println!(
-        "symbol table: {} host, {} stub, {} total across {} libraries",
+        "symbol table: {} cordial, {} host, {} stub, {} total across {} libraries",
+        totals.cordial,
         totals.host,
         totals.stub,
-        totals.host + totals.stub,
+        totals.cordial + totals.host + totals.stub,
         table.libraries.len()
     );
     for (lib, s) in &table.stats {
-        println!("  {lib:<20} host={:<5} stub={}", s.host, s.stub);
+        println!(
+            "  {lib:<20} cordial={:<4} host={:<5} stub={}",
+            s.cordial, s.host, s.stub
+        );
     }
     for missing in &table.missing_host_libs {
         println!("  warning: host {missing} unavailable; its symbols are stubbed");
@@ -94,10 +99,7 @@ fn main() -> ExitCode {
                 println!(
                     "  {lib:<20} {:<44} {}",
                     e.symbol,
-                    match e.source {
-                        symtab::Source::Host => "host",
-                        symtab::Source::Stub => "stub",
-                    }
+                    e.source.label()
                 );
             }
         }
@@ -166,5 +168,22 @@ fn main() -> ExitCode {
     }
 
     stubs::report();
-    ExitCode::SUCCESS
+
+    // Leave via _exit rather than returning.
+    //
+    // Roblox's static initialisers registered atexit handlers and DT_FINI_ARRAY
+    // destructors that expect a live Android process — a JavaVM, a working
+    // looper, its own stdio. Running them here segfaults during teardown, long
+    // after the load this tool exists to verify has already succeeded. Clean
+    // shutdown belongs with instance lifecycle in core; until then, reporting a
+    // teardown crash as a load failure would be actively misleading.
+    //
+    // SAFETY: _exit is async-signal-safe and terminates without running any
+    // handler. Nothing here owns a resource the kernel will not reclaim.
+    unsafe { libc_exit(0) }
+}
+
+extern "C" {
+    #[link_name = "_exit"]
+    fn libc_exit(status: std::ffi::c_int) -> !;
 }
