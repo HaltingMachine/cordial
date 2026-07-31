@@ -19,6 +19,7 @@
 use std::ffi::{c_char, c_int, c_void, CStr};
 
 pub mod pthread;
+pub mod signal;
 pub mod trace;
 
 /// Functions Cordial provides. Consulted before any host library.
@@ -49,6 +50,10 @@ pub fn function_overrides() -> Vec<(&'static str, *mut c_void)> {
         // Selector numbering differs wholesale between the two libcs.
         f!("sysconf", bionic_sysconf),
     ];
+    // sigset_t is 8 bytes in bionic and 128 in glibc; struct sigaction is 32
+    // against 152, with a different field order. Passing either through is a
+    // 120-byte overrun of the caller's object.
+    v.extend(signal::overrides());
     // Synchronisation primitives whose bionic layout differs from glibc's.
     v.extend(pthread::overrides());
     // Android's liblog — Roblox's own account of what it is doing.
