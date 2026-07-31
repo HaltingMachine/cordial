@@ -259,3 +259,61 @@ depends on exists.
 The invoke interface is being used correctly by the engine, so this is not an
 attach problem: `CORDIAL_JNI_TRACE=1` records 30 `GetEnv` and 2
 `AttachCurrentThread` calls, all against our JavaVM.
+
+---
+
+# Client settings never load — the current best explanation
+
+Two independent investigations converged on this from opposite ends: an audit of
+the render path, and the flags failure recorded above.
+
+**`nativeInitClientSettings`, `nativeInitClientSettingsSigned`,
+`nativeInitClientSettingsCached[Compressed]` and
+`nativePostClientSettingsLoadedInitialization3` are never called, and no path in
+Cordial can call them.** They are wired only to an async network-response
+callback (dex `vi/e$f`, methods `a`/`b`), never to the synchronous
+`ActivityNativeMain.N2()` / `vi/e.j` chain Cordial replicates. Cordial never
+constructs that callback, never drives it, and never times it out.
+
+`InitParams::Create` hands the engine `baseURL = "https://www.roblox.com"`, so
+the engine issues the real request. At the moment of the crash there are two
+`HttpClient` threads: one blocked in `poll()`, one idle in `pthread_cond_wait`.
+The engine is waiting for a client-settings response that never arrives.
+
+The faulting code branches on two booleans and *then* reads the member that is
+null — the shape of "have client settings arrived yet?" taking the not-yet path.
+A sibling branch reads the same `[rbx+0x400]` and calls through it successfully,
+so the member is legitimately populated on some other path. This is a state
+problem, not a missing implementation.
+
+Roblox's FastFlags *are* client settings, so this is very likely the same root
+cause as `onFlagsFailed`, not a second bug.
+
+## Correction: networking is no longer ruled out
+
+The "Ruled out" list above says the engine never calls `socket()`. That was true
+when written and is now false. It was true *because* the engine died earlier;
+with the null-`ENV` bug fixed it gets far enough to actually attempt the network.
+
+This is worth naming as a pattern, because it has now happened twice in this
+file: **a fact established about a crashing program expires when the crash moves.**
+Anything ruled out by "the engine never gets there" has to be re-checked after
+any fix that gets it further.
+
+## Correction: the ordering change is not the improvement it appeared to be
+
+Calling `nativeAppBridgeV2StartAppWithParams` before
+`nativeAppBridgeStartLuaAppDM` was reported to move the crash later, to
+`libroblox+0x240462b`. On current `main` it does not reproduce: across four
+consecutive runs the process dies while our thread is still inside
+`nativeAppBridgeV2InitWithParams`, and the crash is the original
+`libroblox+0x2ccd937`.
+
+The engine's `Main` thread crashes on its own schedule, asynchronously, so which
+site is reached depends on timing rather than on our call order — and the
+accompanying claim that the thread is "blocked, not racing" does not hold. The
+reorder is kept because it is harmless and matches the engine's own order, but
+it is not a fix and should not be counted as progress.
+
+**How to judge a fix from here:** not by how far Cordial's own log gets, which
+is a race. By the crash address moving, and by the flags verdict line changing.
