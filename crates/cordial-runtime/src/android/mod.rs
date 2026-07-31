@@ -13,6 +13,7 @@
 //! load a shader or a font without them. See docs/design/path-to-a-frame.md.
 
 pub mod asset;
+pub mod gl;
 
 use std::ffi::c_void;
 

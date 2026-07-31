@@ -88,13 +88,42 @@ creation and is the obvious starting point
 ([`base-evaluation.md`](../base-evaluation.md) §1); it needs `linux-gamepad` to
 build, which was not investigated.
 
+## 4a. The GL stack is confirmed working
+
+`cordial-load --gl-probe` brings up a GLES2 context through the symbol table
+Roblox will be handed — not by calling `libEGL` directly — clears to a known
+colour and reads the pixel back:
+
+```
+vendor    Intel
+renderer  Mesa Intel(R) Graphics (RPL-P)
+version   OpenGL ES 3.2 Mesa 26.1.4
+readback  [33, 66, 99, ff]
+```
+
+The readback is what makes this worth anything. Every call up to `glClear` can
+succeed against a driver that never rasterises; only reading the framebuffer
+proves something was drawn. A colour with four distinct channels means a wrong
+component order fails loudly instead of plausibly.
+
+It uses a pbuffer, which is not a shortcut: Roblox imports
+`eglCreatePbufferSurface` alongside `eglCreateWindowSurface`, so offscreen
+surfaces are a path the engine itself takes.
+
+**What this settles:** Mesa, the EGL/GLES2 symbol resolution, and the
+classification in `symtab` all work. **What it does not settle:** there is still
+no window, and `ANativeWindow_*` — the thing that connects a surface to the
+engine — is entirely stubbed.
+
 ## 5. Order
 
 1. `ClassLoader.loadClass` / `findClass` and `Class.getClassLoader` — Roblox
    resolves classes by name at runtime and is asking for these now.
 2. `AAssetManager` over the APK zip (§3). Nothing renders before this.
 3. `Configuration` with desktop metrics.
-4. Host window + EGL surface (§4).
+4. Host window + EGL surface (§4). The GL half is done (§4a); what remains is
+   the window-system half — a real X11 or Wayland surface for
+   `eglCreateWindowSurface`.
 5. `ANativeWindow_*` over it.
 6. Call `initializeNativeCode`, then `onSurfaceCreatedNative` and
    `onSurfaceChangedNative`.

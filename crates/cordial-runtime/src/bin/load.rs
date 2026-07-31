@@ -15,6 +15,7 @@ struct Options {
     library: String,
     apk: Option<String>,
     read_asset: Option<String>,
+    gl_probe: bool,
     host_libc: bool,
     jni_onload: bool,
     dump_classes: Option<String>,
@@ -28,6 +29,7 @@ usage: cordial-load --lib-dir <dir> [options]
   --library <name>  object to load (default: libroblox.so)
   --apk <path>      APK to serve assets from; without it AAssetManager_open fails
   --read-asset <p>  read one asset through the AAsset API and report its size
+  --gl-probe        bring up GLES2 through the symbol table and read a pixel back
   --host-libc       also resolve libc from the host (ABI-unsafe; diagnostic only)
   --jni-onload      stand up a JavaVM and call JNI_OnLoad
   --dump-classes <f>  implies --jni-onload; write the Java classes Roblox asked
@@ -47,6 +49,7 @@ fn parse() -> Result<Options, String> {
         library: "libroblox.so".into(),
         apk: None,
         read_asset: None,
+        gl_probe: false,
         host_libc: false,
         jni_onload: false,
         dump_classes: None,
@@ -61,6 +64,7 @@ fn parse() -> Result<Options, String> {
             "--read-asset" => {
                 opt.read_asset = Some(args.next().ok_or("--read-asset needs a name")?)
             }
+            "--gl-probe" => opt.gl_probe = true,
             "--host-libc" => opt.host_libc = true,
             "--jni-onload" => opt.jni_onload = true,
             "--dump-classes" => {
@@ -139,6 +143,22 @@ fn main() -> ExitCode {
                     e.symbol,
                     e.source.label()
                 );
+            }
+        }
+    }
+
+    if opt.gl_probe {
+        match cordial_runtime::android::gl::probe(&table) {
+            Ok(r) => {
+                println!("\nGLES2 context is live:");
+                println!("  vendor    {}", r.vendor);
+                println!("  renderer  {}", r.renderer);
+                println!("  version   {}", r.version);
+                println!("  readback  {:02x?} — drew and read it back", r.pixel);
+            }
+            Err(e) => {
+                eprintln!("\nGL probe failed: {e}");
+                return ExitCode::FAILURE;
             }
         }
     }
