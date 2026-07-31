@@ -32,8 +32,12 @@ fn main() {
     println!("cargo:rustc-link-lib=dylib=dl");
     println!("cargo:rustc-link-lib=dylib=pthread");
 
-    println!("cargo:rerun-if-changed={}", native.join("shim.cpp").display());
-    println!("cargo:rerun-if-changed={}", native.join("jni_shim.cpp").display());
-    println!("cargo:rerun-if-changed={}", native.join("liblog.cpp").display());
-    println!("cargo:rerun-if-changed={}", native.join("CMakeLists.txt").display());
+    // Watch the whole native tree, not a hand-maintained list. A file missing
+    // from that list is not a build error — Cargo simply does not re-run this
+    // script, and the stale object from the previous build gets linked. That
+    // failure looks exactly like code that compiled but had no effect.
+    for entry in std::fs::read_dir(&native).expect("native/ is readable") {
+        let path = entry.expect("readable dir entry").path();
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
 }
