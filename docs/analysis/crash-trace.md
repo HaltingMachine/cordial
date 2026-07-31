@@ -175,3 +175,87 @@ retried.
   `initializeNativeCode` and no GameActivity at all. Same crash, same
   instruction, on a thread Roblox creates itself — so it is not an artefact of
   running two bring-ups together.
+
+---
+
+# Resolved: libjnivm handed unknown threads a null ENV
+
+The blocker was in Cordial, not in Roblox.
+
+`jnivm::VM::GetEnv()` is, in full:
+
+```cpp
+const std::shared_ptr<ENV>& VM::GetEnv() {
+    return jnienvs[pthread_self()];   // EnableJNIVMGC is on
+}
+```
+
+`jnienvs` is an `unordered_map<pthread_t, shared_ptr<ENV>>`, so `operator[]` on
+a thread the VM has never seen **default-constructs a null `shared_ptr`, inserts
+it, and returns a reference to it**. The caller gets `nullptr`, with no error
+raised anywhere.
+
+`cordial::process_env()` was exactly that call, and all thirteen JNI hooks in
+this build go through it. The engine invokes those hooks from threads it creates
+itself, so on every one of those threads the hooks ran with a null `ENV` — and
+the engine stored the null where it expected a `JNIEnv`. The field was never
+"not written": it was written, with the null we supplied.
+
+`AttachCurrentThread` is the entry point that *does* create an env for an
+unknown thread (`if (!nenv) nenv = nvm.CreateEnv();`) and finds the existing one
+when there is one, so `process_env()` now goes through it and the question of
+which thread it is called on stops mattering.
+
+The general form of this bug is worth remembering: **an `operator[]` on a map of
+per-thread state silently manufactures a null entry for any thread that was not
+registered.** It cannot fail loudly, and the damage surfaces arbitrarily far
+away, on whichever thread happened to be unlucky.
+
+## What it unblocked
+
+`nativeAppBridgeV2InitWithParams` now completes. The engine proceeds into real
+startup: it resolves the WebRTC audio classes and `NativeTextBoxInfo`, and makes
+two full passes over `NativeUserJavaInterface` and `NativeLocaleJavaInterface`.
+
+## Correction: the faulting call is not `FindClass`
+
+Earlier notes here read `callq *0x30(%rax)` as JNI `FindClass`, because `0x30`
+is `FindClass`'s slot in `JNINativeInterface`. That is very probably wrong. The
+full sequence is:
+
+```
+movq (%rdi),%rax          ; rdi = *(SingleSurfaceAppImpl + 0x400), NULL
+leaq -0x2c0(%rbp),%rsi    ; arg2 is a STACK ADDRESS
+movq %r15,%rdx
+callq *0x30(%rax)
+```
+
+`FindClass` takes a `const char*`; a pointer into the caller's own frame is the
+shape of a `std::string` or a struct being passed by address. So this is an
+ordinary **C++ virtual call, vtable slot 6**, on a null member — and `+0x400`
+holds a *subsystem pointer*, not a `JNIEnv`. Reading a raw offset as a JNI slot
+because the number matches is the same class of mistake as the `+0x400`/write
+coincidence recorded above.
+
+## The call chain, resolved
+
+```
+frame 0  libroblox+0x2ccd937                    (the virtual call above)
+frame 1  nativeAppBridgeStartLuaAppDM +0x17f
+frame 2  nativeGameGlobalInit +0xe64
+frame 3  nativeGameGlobalInit +0xd3c
+frame 4  nativeGameGlobalInit +0xbbb
+frame 5  libc start_thread
+```
+
+The thread is named `Main` and **the engine spawns it itself** from inside
+`nativeGameGlobalInit`; it then calls `nativeAppBridgeStartLuaAppDM` — the Lua
+app DataModel, which is what this platform actually renders — without waiting
+for us. Cordial calls `nativeAppBridgeV2StartAppWithParams` and hands over the
+surface only *after* its own `StartLuaAppDM` call, so the ordering is a live
+suspect: the engine's thread may be arriving at the app before the surface it
+depends on exists.
+
+The invoke interface is being used correctly by the engine, so this is not an
+attach problem: `CORDIAL_JNI_TRACE=1` records 30 `GetEnv` and 2
+`AttachCurrentThread` calls, all against our JavaVM.
