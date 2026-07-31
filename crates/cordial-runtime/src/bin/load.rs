@@ -32,7 +32,8 @@ usage: cordial-load --lib-dir <dir> [options]
   --apk <path>      APK to serve assets from; without it AAssetManager_open fails
   --read-asset <p>  read one asset through the AAsset API and report its size
   --gl-probe        bring up GLES2 through the symbol table and read a pixel back
-  --window <secs>   open a real window and render into it for <secs>
+  --window <secs>   GL PROBE ONLY: open a window and draw a gradient for <secs>.
+                    This is Cordial's own test pattern, not Roblox rendering.
   --host-libc       also resolve libc from the host (ABI-unsafe; diagnostic only)
   --jni-onload      stand up a JavaVM and call JNI_OnLoad
   --game-activity   implies --jni-onload; then call GameActivity.initializeNativeCode
@@ -164,7 +165,7 @@ fn main() -> ExitCode {
     if let Some(secs) = opt.window_seconds {
         match cordial_runtime::android::gl::probe_window(&table, secs) {
             Ok(r) => {
-                println!("\nrendered into a real window:");
+                println!("\nGL probe rendered into a real window (this is a test pattern, not Roblox):");
                 println!("  renderer  {}", r.renderer);
                 println!("  version   {}", r.version);
                 println!("  readback  {:02x?}", r.pixel);
