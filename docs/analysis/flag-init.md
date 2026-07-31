@@ -720,3 +720,52 @@ Stopping the static walk here deliberately. This is the point at which previous
 investigations on this binary started inferring, and eight consecutive inferences
 have been wrong. The next step is a watchpoint on that status word, not more
 disassembly.
+
+## §10. Answered — and not the blocker
+
+**Breakpoints inside `libroblox.so` do not work, and never have.** Cordial
+`mmap`s the library with its own bionic loader, so the system dynamic linker
+never registers it: lldb's `image list` never lists it, and
+`breakpoint set --address`/`--shlib` stay permanently `unresolved, hit count 0`.
+The only technique that works is writing `0xCC` into the target address with
+`memory write`, then on the trap rewinding `$pc` and restoring the original byte.
+
+This is worth knowing before anything else here: **any earlier claim in this repo
+of "I set a breakpoint in the engine" is suspect unless it used that method.**
+Breakpoints in Cordial's *own* code (`onFlagsFailed`, the Rust driver) resolve
+normally, and crash-stop backtraces are genuine — only breakpoints inside the
+mapped engine silently never fire.
+
+**What writes the failure status.** RTTI on `%rbx` at `0x29c5529` — not on
+`%rax`, whose first qword is a self-pointer rather than a vtable — gives:
+
+```
+std::__ndk1::__function::__func<
+    RBX::NativeDataModelManager::getFlagsFromEngine()::$_0, ... void()>
+```
+
+So the write comes from the completion lambda of
+**`RBX::NativeDataModelManager::getFlagsFromEngine()`**, not from generic flag
+glue. A sibling type exists for `initEngine()`'s lambda.
+
+**The watchpoint.** `+0x10` holds `2`, and is written exactly once for the whole
+run — to `11` (`0xb`) — from that lambda. Nothing else ever touches it, and no
+success value is ever written.
+
+**The success path exists but is never reached.** The success reporter has
+exactly one static caller in the entire 115 MB binary: `0x29c346d`, inside the
+real body of `nativePreloadFlagOverrides`, immediately after a *conditional*
+write of status `3` guarded by a byte at `[r15+0x288]`. The reporter itself is
+straight-line and unguarded, so if it were reached it would call
+`gameActivity_onFlagsLoaded`. Across five runs `onFlagsLoaded` is never resolved
+or called. So the success path is gated by something upstream inside
+`nativePreloadFlagOverrides` that this harness never satisfies — which is
+interesting, because `nativePreloadFlagOverrides` is a function Cordial *does*
+call, and whose payload format is still unknown.
+
+**Priority, stated plainly.** A parallel investigation confirmed that the flags
+verdict does *not* gate rendering (see `render-gate.md`): the crash address moves
+between paths while the verdict stays constant. Both results hold at once — the
+flag load really does fail, and that failure really does not block the frame. So
+this is a genuine defect worth fixing for correctness, but it is **not** the
+render blocker, and it should not be worked before the thread-race deadlock.

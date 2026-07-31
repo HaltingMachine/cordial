@@ -1,0 +1,11 @@
+[FLog::Output] All use of Roblox services must comply with Roblox's Terms of Use, Privacy Policy, Community Standards, and applicable laws. Processing of User personal information is limited to the purposes expressly permitted therein.
+2026-07-31T12:43:26.185Z,0.185449,97fff6c0,6,Warning [FLog::RobloxTelemetryFactory] create called with no factory callback set (pre-startup or post-shutdown)
+2026-07-31T12:43:26.185Z,0.185605,97fff6c0,6,Warning [FLog::ProfileTelemetry] Failed to create PerfData event, this is expected in unit tests but not in full builds of the client
+2026-07-31T12:43:26.210Z,0.210108,f79afa40,6,Info [FLog::JNIAppBridge] nativeAppBridgeV2Init:
+2026-07-31T12:43:26.210Z,0.210436,adeba6c0,6 [FLog::SingleSurfaceApp] initializeWithAppStarter
+2026-07-31T12:43:26.210Z,0.210458,adeba6c0,6 [FLog::SingleSurfaceApp] initializeSingleton
+2026-07-31T12:43:26.210Z,0.210581,adeba6c0,6 [FLog::Output] setAssetFolder ~/.cache/cordial/assets
+2026-07-31T12:43:26.210Z,0.210730,adeba6c0,6,Error [FLog::CreatorError] Error: boost::filesystem::canonical: No such file or directory: "~/.cache/cordial/android"
+2026-07-31T12:43:26.210Z,0.210836,f79afa40,6,Info [FLog::JNIAppBridge] nativeAppBridgeStartLuaAppDM: Calling initializeLuaAppWithLoggedInUser
+2026-07-31T12:43:26.210Z,0.210987,adeba6c0,6 [FLog::SingleSurfaceApp] initializeLuaAppWithLoggedInUser: (stage:None).
+2026-07-31T12:43:26.211Z,0.211003,adeba6c0,6 [FLog::SingleSurfaceApp] applyLocale
