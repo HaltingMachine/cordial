@@ -355,3 +355,283 @@ registration itself.** This rules it out as the missing piece.
    breakpoint/wrapper at `0x29c52cc`'s entry — printing `this`, `this->[0x10]`,
    and `this->[0x8]` at runtime, the same wrapper-based instrumentation
    technique `findings.md` §8.1 already used successfully for libc calls.
+
+---
+
+## 7. Follow-up session: `lldb` is available now, and it found a second, real bug
+
+`lldb` (`/home/linuxbrew/.linuxbrew/bin/lldb`) turned out to be present in this
+environment (§6's blocker assumed it was not). With `settings set
+target.disable-aslr true`, `libroblox.so` loads at a fixed address every run
+(`0x7fffefec0000` under the task's exact repro invocation), which makes raw
+breakpoint addresses reproducible run to run. This section only reports what
+was confirmed by breaking and inspecting live state — per this project's own
+hard-won lesson, static disassembly alone has repeatedly produced wrong
+conclusions here (see §3 below for a concrete instance of exactly that).
+
+### 7.1 The real, fixed bug: `NativeFlagsInitResult`'s constructor was never reachable
+
+`native/init_params.cpp` registered `NativeFlagsInitResult`'s constructor with:
+
+```cpp
+c->HookInstanceFunction(env, "<init>", &NativeFlagsInitResult::ctor);
+```
+
+This looks right, and §1's disassembly (`GetMethodID(class, "<init>", "(I)V")`
+then `NewObject`) looks like it should call it. **It never did.** The live JNI
+trace (`JNI_TRACE` build of `third_party/libjnivm`) showed, on every run before
+this fix:
+
+```
+[JNIVM]: Constructed Unresolved symbol, Class=`NativeFlagsInitResult`,
+    StaticMethod=`<init>`, Signature=`(I)Lcom/roblox/client/flags/NativeFlagsInitResult;`
+[JNIVM]: Call Unknown Static Function Class=`NativeFlagsInitResult` Method=`<init>` ...
+```
+
+i.e. libjnivm was looking for a **static** method literally named `<init>`
+whose signature has the **return type folded in**, not the instance
+constructor Cordial registered. The cause is in libjnivm itself
+(`third_party/libjnivm/src/jnivm/internal/method.cpp:13-24`,
+`jnivm::GetMethodID`):
+
+```cpp
+// Rewrite init to Static external function
+if(!isStatic && sname == "<init>") {
+    // strips everything after ')', appends "L<nativeprefix>;"
+    return GetMethodID<true, ReturnNull, AllowNative, trace>(env, cl, str0, ssig.data());
+}
+```
+
+Every *instance* `GetMethodID(cls, "<init>", sig)` call is unconditionally
+rewritten into a **static** lookup with signature `sig-up-to-')'` +
+`"L" + nativeprefix + ";"`. So `GetMethodID(class, "<init>", "(I)V")` actually
+resolves against `("<init>", "(I)Lcom/roblox/client/flags/NativeFlagsInitResult;")`,
+static. `HookInstanceFunction` can never register a match for that lookup —
+it registers an *instance* method with the *original* signature. The engine
+got back an auto-synthesized unresolved-symbol stub (which `defaultVal<jobject>`
+makes return null), called it, and treated the null/degenerate result as a
+reason to report `onFlagsFailed`.
+
+This is not specific to `NativeFlagsInitResult` — it is true of *every*
+`<init>` this codebase registers via a real `NewObject`/`GetMethodID` path from
+the engine's side. It happened not to matter elsewhere because every other
+class in `native/init_params.cpp` is constructed by *Cordial's own C++ code*
+calling a `Create()` factory directly (never through JNI dispatch), so the
+libjnivm rewrite was never exercised for them. `NativeFlagsInitResult` is
+the one class the *engine itself* constructs via `NewObject`, which is exactly
+why this only showed up here.
+
+**Fix applied:** register the constructor the same way this file's own
+`Create()` factories are shaped — as a plain **static** function taking
+`(ENV*, Class*, jint)` and returning `std::shared_ptr<NativeFlagsInitResult>`,
+via `c->Hook(env, "<init>", &NativeFlagsInitResult::ctor)` (not
+`HookInstanceFunction`). `Class::Hook` auto-detects "static" from the
+parameter types (second parameter `Class*`, not `Object*`/`jobject`), and its
+derived signature is exactly `"(I)L<nativeprefix>;"` — matching libjnivm's
+rewritten lookup. Confirmed live: the trace now reads
+`Found symbol ... StaticMethod=\`<init>\`` and
+`Call Static Function ... Method=\`<init>\`` (not "Unresolved"/"Unknown") —
+the constructor genuinely runs now, `NativeFlagsInitResult` is built with a
+real backing `JavaMap`, and its return value is a valid, non-null object
+reaching the caller. **`gameActivity_onFlagsFailed` still fires afterward
+(see §7.3) — this fix was necessary but not sufficient**, exactly as §6.3
+warned.
+
+Also fixed in the same pass: §2's confirmed live bug (the whole ClientSettings
+document being packed as a single array element) — `cordial_init_flags` now
+always builds a zero-length array, matching its own comment, regardless of
+whether `--client-settings` is set.
+
+### 7.2 `com.roblox.engine.jni.model.ClientLocalFlags` implemented; `readLocalFlags()` called
+
+A second investigation thread (a parallel review of the render/network path)
+found that `NativeGLInterface.readLocalFlags()` — `()Lcom/roblox/engine/jni/
+model/ClientLocalFlags;`, exported at `Java_com_roblox_engine_jni_
+NativeGLInterface_readLocalFlags` — is the engine's *offline* counterpart to
+fetching `ClientSettings` over the network: it reads whatever bundled/cached
+flag defaults the engine has and hands them back via the same `new` +
+repeated `add(name, value)` idiom `nativeInitializeNativeFlags` uses for its
+own result object. Nothing in the shipping dex calls it on the
+`ActivityNativeMain` chain Cordial drives (dex xref: its only caller is a
+different startup path), so it was entirely dead code here, and its Java
+counterpart class was completely unimplemented.
+
+Implemented `ClientLocalFlags` (dex-verified shape: `<init>()V`,
+`add(String,String)V`, `getAll()Lorg/json/JSONObject;`, `isEmpty()Z`,
+`size()I`) plus a minimal `org.json.JSONObject` stub, using the same
+static-factory `<init>` registration §7.1 established is required. Wired a
+`cordial_read_local_flags` bridge and call it right after
+`nativeInitializeNativeFlags`. **Result: it runs cleanly (no crash, no
+unresolved-symbol noise) but calls `add()` zero times** — this build has no
+bundled local flag defaults on disk, so the engine constructs an empty
+`ClientLocalFlags` and returns. `onFlagsFailed` is unaffected.
+
+### 7.3 The real trigger: `onFlagsFailed` fires from an unrelated background thread, confirmed by breakpoint
+
+§3's static disassembly identified a single, specific address
+(`libroblox+0x29c92eb`) as "the helper that calls `gameActivity_
+onFlagsFailed`", reached from one caller at `libroblox+0x29c553c`. **Both
+addresses were placed as raw hardware breakpoints and neither one was ever
+hit before the process crashed** — even though, in the same run without those
+breakpoints, `onFlagsFailed` demonstrably fired (Cordial's own hook printed
+`[roblox] flags FAILED`). This is exactly the kind of static-analysis error
+the top of this file warns about: the string-reference scan found *a*
+call site for the string `"gameActivity_onFlagsFailed"`, but not necessarily
+*the* one actually exercised at runtime by this code path.
+
+Breaking instead on Cordial's own hook —
+`cordial::NativeHelper::onFlagsFailed` (a real symbol in `cordial-load`,
+`nm`-verified, so no address guessing needed) — hits reliably, and its
+backtrace is unambiguous:
+
+```
+frame #0  cordial::NativeHelper::onFlagsFailed
+frame #1  jnivm::Wrap<...>::InstanceInvoke
+frame #2  jnivm::MDispatchBase2<void>::CallMethod
+frame #3  jnivm::MDispatchBase<void,jobject*>::CallMethod(..., va_list)
+frame #4  libroblox+0x68a6fe3
+frame #5  libroblox+0x29c8fff
+frame #6  libroblox+0x29c9349
+frame #7  libroblox+0x29c5541      <- return addr; matches §3's claimed
+                                       call site (0x29c553c) + 5 bytes exactly
+frame #8-10  libroblox (+0x1f9b850, +0x1f9b728, +0x1f9b5a7)
+frame #11 libc.so.6`start_thread + 921
+frame #12 libc.so.6`__clone3 + 44
+```
+
+**This call happens on a separate `pthread`, spawned via `start_thread`/
+`__clone3` — not on the thread that runs Cordial's sequential bring-up code
+(`nativeInitializeNativeFlags`, `readLocalFlags`, `nativeInitClientSettings`,
+etc. all run on the "calling" thread; this backtrace contains none of those
+frames).** §3's outer-caller address (frame #7, `0x29c553c`) is confirmed
+correct — the return address matches exactly — but §3's claim that the
+`onFlagsFailed`-reporting helper itself lives at `0x29c92eb` is off by one
+level of the call chain (frame #6 is closer to that address; the actual
+`GetMethodID`+`CallVoidMethod` pair is one level deeper, around
+`0x29c8fxx`/frame #5). More importantly: **this whole chain runs
+independently of, and after, whatever Cordial's own thread has done.**
+
+This was confirmed empirically, not just from one backtrace: `onFlagsFailed`
+fires with the *identical* character (same log line, same async-thread
+backtrace shape) across every combination tried in this session —
+`nativeInitializeNativeFlags` called with an empty array (correct) or the
+old buggy whole-document array; `readLocalFlags` called or not; and
+`nativeInitClientSettings` (§7.4) called with a real `ClientSettings`
+document, with all-empty arguments, or not called at all. **Nothing this
+session found how to influence changes whether or when `onFlagsFailed`
+fires.** That is consistent with §3's original conclusion — the trigger is
+gated on internal engine state this pass could not identify the origin of —
+now confirmed live rather than inferred from disassembly alone.
+
+### 7.4 `nativeInitClientSettings` / `nativePostClientSettingsLoadedInitialization3` — wired, with one new hazard found
+
+Per the architecture Roblox ships: these `NativeGLInterface` natives are not
+the engine asking Cordial for settings over JNI — they are the interface a
+**host app** uses to hand the engine settings *it* already fetched. Cordial
+is the host app here, so calling these directly (with real data, no forged
+HTTP responses) is the legitimate interface, not a workaround. Dex-verified
+descriptors:
+
+```
+nativeInitClientSettings(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)I
+nativeInitClientSettingsSigned(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)I
+nativeInitClientSettingsCached(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;J)I
+nativePostClientSettingsLoadedInitialization3(Ljava/util/List;)V
+```
+
+Implemented `cordial_init_client_settings` (unsigned variant only — deliberately
+not touching `...Signed`, since forging a signature would misrepresent real
+account/server state) and called it with the real `--client-settings` document
+in the middle argument, empty strings for the other two (their exact roles
+were not determined — see below). **It returns `1` — but that value is
+*not* a validation result**: it returns exactly `1` for every combination
+tried, including all three arguments empty. That is strong evidence the
+`int` is a synchronous request handle/"accepted for async processing" code,
+not a success/failure flag — consistent with §7.3's finding that the actual
+accept/reject decision happens later, on a different thread.
+
+**A new, real hazard found and *not* shipped enabled:**
+`nativePostClientSettingsLoadedInitialization3(List)`, called with an empty
+`java.util.ArrayList` (a new minimal `JavaList` stub, same static-factory
+`<init>` pattern), **crashes synchronously, immediately, on the calling
+thread** — verified live under `lldb`: `SIGSEGV`, fault address `0x8`, inside
+`libc.so.6\`_IO_fflush`, called from inside the engine's own implementation
+of this native. This is a *worse* regression than the pre-existing
+asynchronous crash (§3's `libroblox+0x2ccd937`, `SingleSurfaceAppImpl`'s null
+`JNIEnv`) — it happens earlier, synchronously, and on Cordial's own thread
+instead of an engine-internal one. **The call is implemented (`cordial_
+post_client_settings_loaded` / `game_activity::post_client_settings_loaded`)
+but gated behind `CORDIAL_TRY_POST_CLIENT_SETTINGS=1` and not run by
+default** — an empty list is evidently not what this native expects, and
+guessing further was not attempted this session (time-boxed). Whatever real
+list contents it wants remain undetermined.
+
+With `nativePostClientSettingsLoadedInitialization3` disabled, the crash
+reverts to the original, unrelated `0x2ccd937` (confirmed via the same
+breakpoint-on-`onFlagsFailed`-and-`continue` technique) — i.e. §7.4's changes,
+as shipped, introduce no new crash.
+
+### 7.5 `nativePreloadFlagOverrides` — a second real bug found, format still undetermined
+
+`--flag-overrides <f>` was **parsed but never wired to any native call at
+all** before this session — `opt.flag_overrides` existed as a CLI field with
+no corresponding call anywhere in `native/init_params.cpp` or `load.rs`. That
+fully explains §3's original "no extra logging" result: nothing was ever
+invoked. A `cordial_preload_flag_overrides` bridge (dex-verified descriptor
+`MainGameActivity.nativePreloadFlagOverrides(Ljava/lang/String;)V`, an
+*instance* native — second JNI argument is an Activity object, following
+`cordial_set_init_params`'s precedent of a bare placeholder `jnivm::Object`)
+is now wired and called with the file's raw contents.
+
+A second bug was caught in the same pass, while fixing the first: an initial
+version of the wiring re-read `opt.flag_overrides` **as if it were a file
+path** — but the option parser (`--flag-overrides` in `load.rs`'s argument
+loop) already reads the file at parse time and stores its *contents*, not
+its path. That re-read silently failed and passed an **empty string**
+through. Fixed to use the stored content directly; confirmed by checking the
+transmitted byte count matches the source file's size exactly.
+
+**With the call now genuinely delivering real bytes, still no observable
+effect was found**: tried a flat `{"FLogChannelName":"7", ...}` map (the
+shape suggested by the FLog-channel hypothesis in §3/crash-trace.md) — no new
+log lines, no change to the flags verdict or crash. **The correct JSON shape
+for this native remains undetermined.** What is now known for certain: the
+call itself is reachable and does not throw or crash with a small flat JSON
+object as input. Candidates not yet tried: the doubly-wrapped
+`{"applicationSettings":{...}}` shape the real `clientsettings.roblox.com`
+response uses (same shape as `/tmp/clientsettings.json`, which is ~1.2MB —
+worth trying whole, since "preload" suggests it may want the same document
+`nativeInitClientSettings` takes); a JSON array of flag names (mirroring
+`nativeInitializeNativeFlags`'s actual argument shape); or no JSON at all
+(a newline-separated list, as this file's own `--client-settings` help text
+describes for a *different*, unrelated option, which may be a hint about the
+project's own earlier assumptions rather than the engine's real expectation).
+
+### 7.6 Summary: what changed, what didn't
+
+**Fixed, verified live:**
+- `NativeFlagsInitResult`'s constructor now actually runs (§7.1) — this was a
+  real, confirmed bug (unreachable native constructor), not a hypothesis.
+- `cordial_init_flags` no longer packs the whole ClientSettings document as a
+  single array element (§7.1, closing §2/§6.1).
+- `readLocalFlags()` / `ClientLocalFlags` implemented and called (§7.2) —
+  runs cleanly, contributes nothing (no bundled local defaults in this build).
+- `nativeInitClientSettings` implemented and called with the real
+  `ClientSettings` document (§7.4) — runs cleanly, returns `1` (an accept
+  code, not validation) regardless of payload.
+- `--flag-overrides` is now actually wired to `nativePreloadFlagOverrides`
+  and delivers real bytes (§7.5) — it was previously a dead CLI option.
+- A new synchronous crash (`nativePostClientSettingsLoadedInitialization3`
+  with an empty `ArrayList`) was found and **not** shipped enabled (§7.4).
+
+**Not fixed — honest negative result:** `gameActivity_onFlagsFailed` still
+fires. It is confirmed, by breakpoint (not inference), to run on a separate
+pthread whose creation and decision-making this session could not trace back
+to any Cordial-controlled input — every synchronous call this session added
+or removed left its behaviour identical. The condition that "chooses failure
+over success" is internal engine state on that background thread, still not
+identified. The highest-leverage next step is the same as §6.4 named:
+tracing what spawns that pthread (breakpoint on `pthread_create`, or on the
+`start_thread` return addresses seen in §7.3's backtrace, `libroblox+
+0x1f9b5a7`/`+0x1f9b728`/`+0x1f9b850`, to find where that thread's *own*
+entry point is, not just its later call stack).
