@@ -14,6 +14,7 @@
 #include <jnivm.h>
 
 #include <cstdio>
+#include <sys/stat.h>
 #include <chrono>
 #include <cctype>
 #include <cstdlib>
@@ -90,6 +91,18 @@ public:
     }
 };
 
+/// `com.roblox.engine.jni.model.NativeTextBoxInfo`
+///
+/// The text-box state the on-screen keyboard would have edited. Desktop input
+/// never needs it, but it has to exist as a type for the `showKeyboard`
+/// descriptor to match.
+class NativeTextBoxInfo : public Object {
+public:
+    static void Register(ENV* env) {
+        env->GetClass<NativeTextBoxInfo>("com/roblox/engine/jni/model/NativeTextBoxInfo");
+    }
+};
+
 /// `com.roblox.engine.jni.NativeGLJavaInterface`
 ///
 /// The engine's main line back into Java: device parameters, keyboard, screen
@@ -104,10 +117,59 @@ public:
         return DeviceStaticParams::Create();
     }
 
+    // The on-screen keyboard. On desktop there is none: host key events reach the
+    // engine through the input path instead, so these are correctly no-ops rather
+    // than unimplemented. `showKeyboard` carries the text-box state the IME would
+    // have edited, which desktop input never needs.
+    // Signature is (JZ[BLcom/roblox/engine/jni/model/NativeTextBoxInfo;)V. libjnivm
+    // matches hooks on the descriptor derived from the C++ types, so `byte[]` has
+    // to be an Array<jbyte> and the last argument the real class — Object would
+    // produce Ljava/lang/Object; and silently never match.
+    static void showKeyboard(ENV*, Class*, jlong, jboolean,
+                             std::shared_ptr<jnivm::Array<jbyte>>,
+                             std::shared_ptr<NativeTextBoxInfo>) {}
+    static void hideKeyboard(ENV*, Class*) {}
+
+    // In-app purchases go through Google Play Billing, which does not exist here.
+    // Silently doing nothing is the honest behaviour: the alternative is
+    // pretending a purchase flow started and leaving the engine waiting for a
+    // result that never arrives.
+    static void promptNativePurchase(ENV*, Class*, jlong, std::shared_ptr<String>,
+                                     std::shared_ptr<String>) {}
+    static void promptNativePurchaseShort(ENV*, Class*, jlong, std::shared_ptr<String>) {}
+    static void promptNativePurchaseWithPayload(ENV*, Class*, jlong, std::shared_ptr<String>,
+                                                std::shared_ptr<String>) {}
+
+    static void exitGameWithError(ENV*, Class*, jint code) {
+        fprintf(stderr, "[roblox] exitGameWithError(%d)\n", code);
+    }
+    static void gameDidLeave(ENV*, Class*) {
+        // This is `onLeave` in the plugin event schema (spec §9a), and where
+        // "close when you leave an experience" hangs off. Both need core.
+        fprintf(stderr, "[roblox] gameDidLeave\n");
+    }
+    static void onAppShellReloadNeeded(ENV*, Class*) {}
+    static void listenToMotionEvents(ENV*, Class*, std::shared_ptr<String>) {}
+    static void screenOrientationChanged(ENV*, Class*, jint) {}
+    static void openNativeOverlay(ENV*, Class*, std::shared_ptr<String>,
+                                  std::shared_ptr<String>) {}
+
     static void Register(ENV* env) {
         env->GetClass<NativeGLJavaInterface>("com/roblox/engine/jni/NativeGLJavaInterface");
         auto c = env->GetClass("com/roblox/engine/jni/NativeGLJavaInterface");
         c->Hook(env, "getDeviceStaticParams", &NativeGLJavaInterface::getDeviceStaticParams);
+        c->Hook(env, "showKeyboard", &NativeGLJavaInterface::showKeyboard);
+        c->Hook(env, "hideKeyboard", &NativeGLJavaInterface::hideKeyboard);
+        c->Hook(env, "promptNativePurchase", &NativeGLJavaInterface::promptNativePurchase);
+        c->Hook(env, "promptNativePurchaseWithPayload",
+                &NativeGLJavaInterface::promptNativePurchaseWithPayload);
+        c->Hook(env, "exitGameWithError", &NativeGLJavaInterface::exitGameWithError);
+        c->Hook(env, "gameDidLeave", &NativeGLJavaInterface::gameDidLeave);
+        c->Hook(env, "onAppShellReloadNeeded", &NativeGLJavaInterface::onAppShellReloadNeeded);
+        c->Hook(env, "listenToMotionEvents", &NativeGLJavaInterface::listenToMotionEvents);
+        c->Hook(env, "screenOrientationChanged",
+                &NativeGLJavaInterface::screenOrientationChanged);
+        c->Hook(env, "openNativeOverlay", &NativeGLJavaInterface::openNativeOverlay);
     }
 };
 
@@ -214,6 +276,107 @@ public:
     }
 };
 
+/// The directory Roblox may write to.
+///
+/// On Android this is the app's private storage. Here it is per-instance, which
+/// is the mechanism the multi-account design rests on: two instances that never
+/// share a files directory can never share a session.
+/// See docs/design/instances-and-launch.md §4.
+const char* files_dir() {
+    static const std::string dir = [] {
+        if (const char* override = getenv("CORDIAL_FILES_DIR")) {
+            return std::string(override);
+        }
+        std::string base;
+        if (const char* xdg = getenv("XDG_DATA_HOME")) {
+            base = xdg;
+        } else if (const char* home = getenv("HOME")) {
+            base = std::string(home) + "/.local/share";
+        } else {
+            base = "/tmp";
+        }
+        auto path = base + "/cordial/instances/default/data";
+        // Roblox assumes the directory exists; on Android the platform made it.
+        std::string acc;
+        for (size_t i = 1; i <= path.size(); i++) {
+            if (i == path.size() || path[i] == '/') {
+                acc = path.substr(0, i);
+                mkdir(acc.c_str(), 0700);
+            }
+        }
+        return path;
+    }();
+    return dir.c_str();
+}
+
+/// `com.roblox.engine.jni.reporter.SessionReporterJavaInterface`
+///
+/// Crash and session telemetry. The reporting entry points are deliberately
+/// inert — Cordial is not going to forward a user's session data to an analytics
+/// endpoint on their behalf — but the getters have to answer, because the engine
+/// uses `getFilesDir` for real storage and not merely for reports.
+class SessionReporterJavaInterface : public Object {
+public:
+    static std::shared_ptr<String> getFilesDir(ENV*, Class*) { return str(files_dir()); }
+    static std::shared_ptr<String> getAppVersion(ENV*, Class*) { return str(""); }
+    static std::shared_ptr<String> getLastLoggedInUser(ENV*, Class*) { return str(""); }
+    static std::shared_ptr<String> getLastLoggedInUserId(ENV*, Class*) { return str(""); }
+
+    static void sendSessionReport(ENV*, Class*, std::shared_ptr<String>, std::shared_ptr<String>) {
+        // Inert on purpose. See the class comment.
+    }
+    static void setEventTrackingGoogleAnalytics(ENV*, Class*, std::shared_ptr<String>,
+                                                std::shared_ptr<String>,
+                                                std::shared_ptr<String>, jlong) {
+        // Likewise.
+    }
+
+    static void Register(ENV* env) {
+        env->GetClass<SessionReporterJavaInterface>(
+            "com/roblox/engine/jni/reporter/SessionReporterJavaInterface");
+        auto c = env->GetClass("com/roblox/engine/jni/reporter/SessionReporterJavaInterface");
+        c->Hook(env, "getFilesDir", &SessionReporterJavaInterface::getFilesDir);
+        c->Hook(env, "getAppVersion", &SessionReporterJavaInterface::getAppVersion);
+        c->Hook(env, "getLastLoggedInUser", &SessionReporterJavaInterface::getLastLoggedInUser);
+        c->Hook(env, "getLastLoggedInUserId", &SessionReporterJavaInterface::getLastLoggedInUserId);
+        c->Hook(env, "sendSessionReport", &SessionReporterJavaInterface::sendSessionReport);
+        c->Hook(env, "setEventTrackingGoogleAnalytics",
+                &SessionReporterJavaInterface::setEventTrackingGoogleAnalytics);
+    }
+};
+
+/// `com.roblox.engine.jni.video.VideoCodecCapability`
+class VideoCodecCapability : public Object {
+public:
+    static void Register(ENV* env) {
+        env->GetClass<VideoCodecCapability>("com/roblox/engine/jni/video/VideoCodecCapability");
+    }
+};
+
+/// `com.roblox.engine.jni.video.MediaCodecInfoUtils`
+///
+/// Hardware video codecs, which on Android come from MediaCodec. Cordial has no
+/// MediaCodec: `libmediandk` is entirely stubbed. Reporting none is correct
+/// rather than merely convenient — claiming a codec Cordial cannot decode would
+/// fail later, inside video playback, with no way back to this decision.
+class MediaCodecInfoUtils : public Object {
+public:
+    static std::shared_ptr<jnivm::Array<VideoCodecCapability>> getVideoCodecs(ENV*, Class*) {
+        return std::make_shared<jnivm::Array<VideoCodecCapability>>(0);
+    }
+    static jboolean hevcHardwareEncodingSupported(ENV*, Class*, jint, jint, jint) {
+        return false;
+    }
+
+    static void Register(ENV* env) {
+        env->GetClass<MediaCodecInfoUtils>("com/roblox/engine/jni/video/MediaCodecInfoUtils");
+        auto c = env->GetClass("com/roblox/engine/jni/video/MediaCodecInfoUtils");
+        c->Hook(env, "getVideoCodecs", &MediaCodecInfoUtils::getVideoCodecs);
+        c->Hook(env, "hevcHardwareEncodingSupported",
+                &MediaCodecInfoUtils::hevcHardwareEncodingSupported);
+    }
+};
+
 } // namespace cordial
 
 extern "C" void cordial_register_android_classes(void* env_ptr) {
@@ -222,10 +385,14 @@ extern "C" void cordial_register_android_classes(void* env_ptr) {
         return;
     }
     cordial::DeviceStaticParams::Register(env);
+    cordial::NativeTextBoxInfo::Register(env);
     cordial::NativeGLJavaInterface::Register(env);
     cordial::NativeLocaleJavaInterface::Register(env);
     cordial::NativeUserJavaInterface::Register(env);
     cordial::LoggingProtocol::Register(env);
+    cordial::SessionReporterJavaInterface::Register(env);
+    cordial::VideoCodecCapability::Register(env);
+    cordial::MediaCodecInfoUtils::Register(env);
     if (getenv("CORDIAL_JNI_TRACE")) {
         fprintf(stderr, "[classes] Cordial's Java side registered\n");
     }
