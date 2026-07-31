@@ -13,6 +13,8 @@ use cordial_runtime::{stubs, symtab};
 struct Options {
     lib_dir: String,
     library: String,
+    apk: Option<String>,
+    read_asset: Option<String>,
     host_libc: bool,
     jni_onload: bool,
     dump_classes: Option<String>,
@@ -24,6 +26,8 @@ usage: cordial-load --lib-dir <dir> [options]
 
   --lib-dir <dir>   directory holding the APK's lib/x86_64/ objects
   --library <name>  object to load (default: libroblox.so)
+  --apk <path>      APK to serve assets from; without it AAssetManager_open fails
+  --read-asset <p>  read one asset through the AAsset API and report its size
   --host-libc       also resolve libc from the host (ABI-unsafe; diagnostic only)
   --jni-onload      stand up a JavaVM and call JNI_OnLoad
   --dump-classes <f>  implies --jni-onload; write the Java classes Roblox asked
@@ -41,6 +45,8 @@ fn parse() -> Result<Options, String> {
     let mut opt = Options {
         lib_dir: String::new(),
         library: "libroblox.so".into(),
+        apk: None,
+        read_asset: None,
         host_libc: false,
         jni_onload: false,
         dump_classes: None,
@@ -51,6 +57,10 @@ fn parse() -> Result<Options, String> {
         match arg.as_str() {
             "--lib-dir" => opt.lib_dir = args.next().ok_or("--lib-dir needs a value")?,
             "--library" => opt.library = args.next().ok_or("--library needs a value")?,
+            "--apk" => opt.apk = Some(args.next().ok_or("--apk needs a path")?),
+            "--read-asset" => {
+                opt.read_asset = Some(args.next().ok_or("--read-asset needs a name")?)
+            }
             "--host-libc" => opt.host_libc = true,
             "--jni-onload" => opt.jni_onload = true,
             "--dump-classes" => {
@@ -79,6 +89,26 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+
+    if let Some(apk) = &opt.apk {
+        match cordial_runtime::android::asset::set_apk(std::path::Path::new(apk)) {
+            Ok(()) => println!("assets: {apk}"),
+            Err(e) => {
+                eprintln!("bad --apk: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+
+    if let Some(name) = &opt.read_asset {
+        match cordial_runtime::android::asset::probe(name) {
+            Ok(len) => println!("asset {name}: {len} bytes"),
+            Err(e) => {
+                eprintln!("asset {name}: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
 
     let table = symtab::build(opt.host_libc);
     let totals = table.totals();

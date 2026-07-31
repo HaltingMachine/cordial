@@ -11,3 +11,5 @@ path = "src/bin/load.rs"
 
 [dependencies]
 cordial-linker-sys = { path = "../cordial-linker-sys" }
+# Assets live in the APK, which is a zip.
+zip = { version = "2", default-features = false, features = ["deflate"] }

@@ -170,6 +170,7 @@ pub fn build(host_libc: bool) -> SymbolTable {
     let overrides: BTreeMap<&'static str, *mut c_void> = crate::bionic::function_overrides()
         .into_iter()
         .chain(crate::bionic::data_overrides())
+        .chain(crate::android::overrides())
         .collect();
 
     let mut host_libs = Vec::new();
