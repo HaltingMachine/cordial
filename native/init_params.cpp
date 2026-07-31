@@ -76,7 +76,7 @@ public:
     jlong lowMemoryKillerBackgroundAppThreshold = 0;
     jlong lowMemoryKillerForegroundAppThreshold = 0;
 
-    static std::shared_ptr<DeviceParams> Create(int width, int height) {
+    static std::shared_ptr<DeviceParams> Create(ENV* env, int width, int height) {
         auto p = std::make_shared<DeviceParams>();
         p->appBuildVariant = S("release");
         p->appVersion = S("");
@@ -95,6 +95,10 @@ public:
         p->displayResolution = S(res);
         p->displayPhysicalWidthPixels = width;
         p->displayPhysicalHeightPixels = height;
+        // Prime the class. Without this the object reaches Roblox with a null
+        // clazz, GetObjectClass falls back to FindClass("Invalid"), and every
+        // field read against it returns nothing.
+        to_jni(env, p);
         return p;
     }
 
@@ -123,7 +127,7 @@ public:
     jint viewportWidthMm = 338;
     jint viewportHeightMm = 190;
 
-    static std::shared_ptr<PlatformParams> Create(const char* assets, int width, int height) {
+    static std::shared_ptr<PlatformParams> Create(ENV* env, const char* assets, int width, int height) {
         auto p = std::make_shared<PlatformParams>();
         p->assetFolderPath = S(assets);
         // This is the desktop answer, and it is the point: keyboard and mouse
@@ -138,6 +142,7 @@ public:
         // screen held at arm's length.
         p->viewportWidthMm = static_cast<jint>(width * 25.4 / 96.0);
         p->viewportHeightMm = static_cast<jint>(height * 25.4 / 96.0);
+        to_jni(env, p);
         return p;
     }
 
@@ -162,7 +167,20 @@ public:
     jboolean isTablet = false;
     jboolean isVrDevice = false;
 
-    static std::shared_ptr<InitParams> Create(const char* assets, int width, int height) {
+
+    // AutoValue generates accessor methods, so the engine calls
+    // `initParams.platformParams()` rather than reading a field. These are the
+    // methods; the field hooks above stay for anything that does read directly.
+    std::shared_ptr<DeviceParams> get_deviceParams(ENV*) { return deviceParams; }
+    std::shared_ptr<PlatformParams> get_platformParams(ENV*) { return platformParams; }
+    std::shared_ptr<String> get_baseURL(ENV*) { return baseURL; }
+    std::shared_ptr<String> get_buildVariant(ENV*) { return buildVariant; }
+    std::shared_ptr<String> get_userAgent(ENV*) { return userAgent; }
+    jboolean get_isPotato(ENV*) { return isPotato; }
+    jboolean get_isTablet(ENV*) { return isTablet; }
+    jboolean get_isVrDevice(ENV*) { return isVrDevice; }
+
+    static std::shared_ptr<InitParams> Create(ENV* env, const char* assets, int width, int height) {
         auto p = std::make_shared<InitParams>();
         p->baseURL = S("https://www.roblox.com");
         p->buildVariant = S("release");
@@ -170,14 +188,15 @@ public:
         // string, not Cordial's: the service routes and gates on it, and a
         // fabricated one would be both untrue and likely rejected.
         p->userAgent = S("Roblox/Android");
-        p->deviceParams = DeviceParams::Create(width, height);
-        p->platformParams = PlatformParams::Create(assets, width, height);
+        p->deviceParams = DeviceParams::Create(env, width, height);
+        p->platformParams = PlatformParams::Create(env, assets, width, height);
         // "Potato" is Roblox's own name for a device below the quality floor.
         p->isPotato = false;
         // Tablet rather than phone: a desktop window is a large screen, and this
         // agrees with the XLARGE reported through AConfiguration.
         p->isTablet = true;
         p->isVrDevice = false;
+        to_jni(env, p);
         return p;
     }
 
@@ -190,9 +209,9 @@ public:
 #undef F
         // AutoValue exposes the fields through accessors as well, and the engine
         // uses whichever the generated class provided.
-#define G(name) c->HookInstanceGetterFunction(env, #name, &InitParams::name)
+#define G(name) c->HookInstanceFunction(env, #name, &InitParams::get_##name)
         G(baseURL); G(buildVariant); G(userAgent); G(deviceParams); G(platformParams);
-        G(vrContext); G(isPotato); G(isTablet); G(isVrDevice);
+        G(isPotato); G(isTablet); G(isVrDevice);
 #undef G
     }
 };
@@ -213,7 +232,19 @@ public:
     jboolean isUnder13 = false;
     jint membershipType = 0;
 
-    static std::shared_ptr<StartAppParams> Create(const char* assets, int width, int height,
+
+    std::shared_ptr<PlatformParams> get_platformParams(ENV*) { return platformParams; }
+    std::shared_ptr<Object> get_surface(ENV*) { return surface; }
+    std::shared_ptr<String> get_appStarterPlace(ENV*) { return appStarterPlace; }
+    std::shared_ptr<String> get_appStarterScript(ENV*) { return appStarterScript; }
+    std::shared_ptr<String> get_selectedTheme(ENV*) { return selectedTheme; }
+    std::shared_ptr<String> get_username(ENV*) { return username; }
+    jlong get_appUserId(ENV*) { return appUserId; }
+    jboolean get_isUnder13(ENV*) { return isUnder13; }
+    jint get_membershipType(ENV*) { return membershipType; }
+
+    static std::shared_ptr<StartAppParams> Create(ENV* env, const char* assets, int width,
+                                                  int height,
                                                   std::shared_ptr<Object> surface) {
         auto p = std::make_shared<StartAppParams>();
         // Empty starter place and script mean "the default app shell" rather than
@@ -223,11 +254,12 @@ public:
         p->appStarterScript = S("");
         p->selectedTheme = S("Dark");
         p->username = S("");
-        p->platformParams = PlatformParams::Create(assets, width, height);
+        p->platformParams = PlatformParams::Create(env, assets, width, height);
         p->surface = std::move(surface);
         p->appUserId = 0;
         p->isUnder13 = false;
         p->membershipType = 0;
+        to_jni(env, p);
         return p;
     }
 
@@ -239,15 +271,69 @@ public:
         F(platformParams); F(surface); F(vrContext); F(appUserId); F(isUnder13);
         F(membershipType);
 #undef F
-#define G(name) c->HookInstanceGetterFunction(env, #name, &StartAppParams::name)
+#define G(name) c->HookInstanceFunction(env, #name, &StartAppParams::get_##name)
         G(appStarterPlace); G(appStarterScript); G(selectedTheme); G(username);
-        G(platformParams); G(surface); G(vrContext); G(appUserId); G(isUnder13);
-        G(membershipType);
+        G(platformParams); G(surface); G(appUserId); G(isUnder13); G(membershipType);
 #undef G
     }
 };
 
+/// `android.util.DisplayMetrics`
+///
+/// The engine asks the Activity for these and reads `density` off the result.
+/// Android's density is the scale factor against 160 dpi — a desktop display at
+/// roughly 96 dpi is therefore *below* 1.0, not above it, and reporting a
+/// phone's 2.5-3.0 here would make the client lay itself out for a screen held
+/// at arm's length.
+class DisplayMetrics : public Object {
+public:
+    jfloat density = 1.0f;
+    jfloat scaledDensity = 1.0f;
+    jfloat xdpi = 96.0f;
+    jfloat ydpi = 96.0f;
+    jint densityDpi = 160;
+    jint widthPixels = 1280;
+    jint heightPixels = 720;
+
+    static std::shared_ptr<DisplayMetrics> Create(ENV* env, int width, int height) {
+        auto p = std::make_shared<DisplayMetrics>();
+        p->widthPixels = width;
+        p->heightPixels = height;
+        // 1.0 means "one density-independent pixel is one real pixel", which is
+        // what a desktop window wants: no scaling, no phone-sized controls.
+        p->density = 1.0f;
+        p->scaledDensity = 1.0f;
+        p->densityDpi = 160;
+        to_jni(env, p);
+        return p;
+    }
+
+    static void Register(ENV* env) {
+        env->GetClass<DisplayMetrics>("android/util/DisplayMetrics");
+        auto c = env->GetClass("android/util/DisplayMetrics");
+#define F(name) c->HookInstance(env, #name, &DisplayMetrics::name)
+        F(density); F(scaledDensity); F(xdpi); F(ydpi); F(densityDpi);
+        F(widthPixels); F(heightPixels);
+#undef F
+    }
+};
+
+/// Screen size the Activity reports. Kept next to `AConfiguration` and
+/// `PlatformParams`, which must agree with it.
+static int g_width = 1280;
+static int g_height = 720;
+
+void set_display_size(int width, int height) {
+    g_width = width;
+    g_height = height;
+}
+
+std::shared_ptr<Object> make_display_metrics(ENV* env) {
+    return DisplayMetrics::Create(env, g_width, g_height);
+}
+
 void register_init_params_classes(ENV* env) {
+    DisplayMetrics::Register(env);
     DeviceParams::Register(env);
     PlatformParams::Register(env);
     InitParams::Register(env);
@@ -268,7 +354,7 @@ int cordial_set_init_params(void* fn, const char* assets, int width, int height,
         return -1;
     }
     try {
-        auto params = cordial::InitParams::Create(assets, width, height);
+        auto params = cordial::InitParams::Create(env, assets, width, height);
         auto activity = std::make_shared<jnivm::Object>();
         reinterpret_cast<Call>(fn)(env->GetJNIEnv(),
                                    cordial::to_jni(env, activity),
@@ -425,7 +511,7 @@ int cordial_appbridge_init(void* fn, const char* assets, int width, int height, 
     }
     try {
         auto cls = env->GetClass("com/roblox/engine/jni/NativeGLInterface");
-        auto params = cordial::InitParams::Create(assets, width, height);
+        auto params = cordial::InitParams::Create(env, assets, width, height);
         reinterpret_cast<Call>(fn)(env->GetJNIEnv(),
                                    (jobject)cordial::to_jni(env, cls),
                                    (jobject)cordial::to_jni(env, params));
@@ -485,7 +571,7 @@ int cordial_appbridge_start_app(void* fn, const char* assets, int width, int hei
         // registering a second C++ class for the same Java name makes libjnivm throw.
         auto surface = std::static_pointer_cast<jnivm::Object>(
             std::make_shared<jnivm::Object>());
-        auto params = cordial::StartAppParams::Create(assets, width, height, surface);
+        auto params = cordial::StartAppParams::Create(env, assets, width, height, surface);
         reinterpret_cast<Call>(fn)(env->GetJNIEnv(),
                                    (jobject)cordial::to_jni(env, cls),
                                    (jobject)cordial::to_jni(env, params));
