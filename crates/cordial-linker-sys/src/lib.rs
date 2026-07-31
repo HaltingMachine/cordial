@@ -345,6 +345,24 @@ pub mod game_activity {
             n: usize,
         ) -> c_int;
         fn cordial_appbridge_call_bare(f: *mut c_void, err: *mut c_char, n: usize) -> c_int;
+        fn cordial_read_local_flags(f: *mut c_void, err: *mut c_char, n: usize) -> c_int;
+        fn cordial_init_client_settings(
+            f: *mut c_void,
+            a: *const c_char,
+            b: *const c_char,
+            c: *const c_char,
+            out_result: *mut c_int,
+            err: *mut c_char,
+            n: usize,
+        ) -> c_int;
+        fn cordial_post_client_settings_loaded(f: *mut c_void, err: *mut c_char, n: usize)
+            -> c_int;
+        fn cordial_preload_flag_overrides(
+            f: *mut c_void,
+            json: *const c_char,
+            err: *mut c_char,
+            n: usize,
+        ) -> c_int;
         fn cordial_activity_lifecycle(
             f: *mut c_void,
             activity: *const c_char,
@@ -404,6 +422,74 @@ pub mod game_activity {
             cordial_init_flags(
                 native,
                 json.as_ptr(),
+                err.as_mut_ptr() as *mut c_char,
+                err.len(),
+            )
+        };
+        if rc == 0 { Ok(()) } else { Err(take_err(err)) }
+    }
+
+    /// `NativeGLInterface.readLocalFlags()` — the offline counterpart to the
+    /// network `ClientSettings` fetch. Not on the `ActivityNativeMain` chain
+    /// Cordial drives (its only dex caller is a different startup path), so
+    /// nothing else here calls it unless a caller in `load.rs` does.
+    pub fn read_local_flags(native: *mut c_void) -> Result<(), String> {
+        let mut err = vec![0u8; 512];
+        // SAFETY: `native` is the exported JNI native; `err` is a live buffer.
+        let rc =
+            unsafe { cordial_read_local_flags(native, err.as_mut_ptr() as *mut c_char, err.len()) };
+        if rc == 0 { Ok(()) } else { Err(take_err(err)) }
+    }
+
+    /// `NativeGLInterface.nativeInitClientSettings(String, String, String)I` —
+    /// what the real app calls after fetching client settings itself. Cordial
+    /// *is* the host app in this architecture, so this is the legitimate
+    /// interface, not a workaround. Returns the engine's own `int` result
+    /// code, which is a better signal than anything printed to the log.
+    pub fn init_client_settings(native: *mut c_void, a: &str, b: &str, c: &str) -> Result<i32, String> {
+        let ca = CString::new(a).map_err(|e| e.to_string())?;
+        let cb = CString::new(b).map_err(|e| e.to_string())?;
+        let cc = CString::new(c).map_err(|e| e.to_string())?;
+        let mut err = vec![0u8; 512];
+        let mut out: c_int = 0;
+        // SAFETY: `native` is the exported JNI native; all buffers outlive the call.
+        let rc = unsafe {
+            cordial_init_client_settings(
+                native,
+                ca.as_ptr(),
+                cb.as_ptr(),
+                cc.as_ptr(),
+                &mut out as *mut c_int,
+                err.as_mut_ptr() as *mut c_char,
+                err.len(),
+            )
+        };
+        if rc == 0 { Ok(out) } else { Err(take_err(err)) }
+    }
+
+    /// `NativeGLInterface.nativePostClientSettingsLoadedInitialization3(List)V`
+    /// — the finishing step of the client-settings handshake, called with an
+    /// empty `ArrayList`.
+    pub fn post_client_settings_loaded(native: *mut c_void) -> Result<(), String> {
+        let mut err = vec![0u8; 512];
+        // SAFETY: as above.
+        let rc = unsafe {
+            cordial_post_client_settings_loaded(native, err.as_mut_ptr() as *mut c_char, err.len())
+        };
+        if rc == 0 { Ok(()) } else { Err(take_err(err)) }
+    }
+
+    /// `MainGameActivity.nativePreloadFlagOverrides(String)V` — takes whatever
+    /// JSON text is given and hands it straight through, so candidate shapes
+    /// can be compared by their effect on the flags verdict / JNI trace.
+    pub fn preload_flag_overrides(native: *mut c_void, json: &str) -> Result<(), String> {
+        let cs = CString::new(json).map_err(|e| e.to_string())?;
+        let mut err = vec![0u8; 512];
+        // SAFETY: `native` is the exported JNI native; `cs`/`err` outlive the call.
+        let rc = unsafe {
+            cordial_preload_flag_overrides(
+                native,
+                cs.as_ptr(),
                 err.as_mut_ptr() as *mut c_char,
                 err.len(),
             )

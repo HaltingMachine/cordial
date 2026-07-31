@@ -152,6 +152,35 @@ public:
     }
 };
 
+/// `java.util.ArrayList`, enough of it to hand the engine an (empty) `List`.
+///
+/// `nativePostClientSettingsLoadedInitialization3(List)` is the only reason
+/// this exists: it is the finishing step of the client-settings handshake,
+/// and whatever it iterates has to be a real, well-formed object rather than
+/// null or an unresolved stub. An empty list is the honest starting point —
+/// nothing here knows what real elements it would otherwise want.
+class JavaList : public Object {
+public:
+    jint size(ENV*) { return 0; }
+    jboolean isEmpty(ENV*) { return true; }
+    std::shared_ptr<Object> get(ENV*, jint) { return nullptr; }
+
+    static std::shared_ptr<JavaList> ctor(ENV* env, Class*) {
+        auto p = std::make_shared<JavaList>();
+        to_jni(env, p);
+        return p;
+    }
+
+    static void Register(ENV* env) {
+        env->GetClass<JavaList>("java/util/ArrayList");
+        auto c = env->GetClass("java/util/ArrayList");
+        c->Hook(env, "<init>", &JavaList::ctor);
+        c->HookInstanceFunction(env, "size", &JavaList::size);
+        c->HookInstanceFunction(env, "isEmpty", &JavaList::isEmpty);
+        c->HookInstanceFunction(env, "get", &JavaList::get);
+    }
+};
+
 /// `java.util.Locale`
 ///
 /// Reached as `configuration.getLocales().get(0)`. The engine reads all four
@@ -217,16 +246,43 @@ static std::shared_ptr<LocaleList> configuration_get_locales(ENV* env, Object*) 
 /// then `addBoolean` per flag. With the class unimplemented the native could not
 /// construct its result, so every flag load failed no matter what was passed in.
 /// That is what `onFlagsFailed` was reporting.
+///
+/// **The root cause, found only by watching the live JNI trace, not by reading
+/// disassembly:** libjnivm's own `GetMethodID` (`third_party/libjnivm/src/jnivm/
+/// internal/method.cpp`) rewrites every *instance* lookup of `"<init>"` into a
+/// **static** lookup before it ever consults the registered method table:
+///
+/// ```cpp
+/// // Rewrite init to Static external function
+/// if(!isStatic && sname == "<init>") {
+///     // strips everything after ')' and appends "L<nativeprefix>;"
+///     return GetMethodID<true, ...>(env, cl, str0, rewrittenSignature);
+/// }
+/// ```
+///
+/// So when the engine calls `GetMethodID(class, "<init>", "(I)V")`, libjnivm
+/// actually looks for a **static** method named `"<init>"` with signature
+/// `"(I)Lcom/roblox/client/flags/NativeFlagsInitResult;"` — a factory, not a
+/// constructor. Registering `ctor` with `HookInstanceFunction` (an *instance*
+/// hook, original `"(I)V"` signature) can never match that lookup. The engine
+/// got an unresolved-symbol stub back, called it, got a null/default object, and
+/// reported `onFlagsFailed` — nothing to do with the flag *contents* at all.
+/// Confirmed live: before this fix, the JNI trace showed
+/// `Constructed Unresolved symbol, Class=`NativeFlagsInitResult`,
+/// StaticMethod=`<init>`, Signature=`(I)Lcom/.../NativeFlagsInitResult;`
+/// immediately followed by `Call Unknown Static Function ... <init> ...` and
+/// then `gameActivity_onFlagsFailed`.
+///
+/// The fix follows the same static-factory idiom already used elsewhere in this
+/// file (`DeviceStaticParams::Create`, `JavaMap::Create`, etc.): register `ctor`
+/// as a plain static function taking `(ENV*, Class*, jint)`, which `Class::Hook`
+/// installs as a *static* method — its derived signature is exactly
+/// `"(I)L<nativeprefix>;"`, matching libjnivm's rewritten lookup.
 class NativeFlagsInitResult : public Object {
 public:
     jint providerId = 0;
     std::shared_ptr<JavaMap> cached;
 
-    /// Created on first use rather than in a constructor hook.
-    ///
-    /// libjnivm builds objects through its own allocation path, so a hook on
-    /// `<init>` does not reliably run — and a null map here is not a quiet
-    /// degradation: the engine calls `size()` on whatever it gets back.
     std::shared_ptr<JavaMap>& map(ENV* env) {
         if (!cached) {
             cached = JavaMap::Create(env);
@@ -234,9 +290,12 @@ public:
         return cached;
     }
 
-    void ctor(ENV* env, jint id) {
-        providerId = id;
-        map(env);
+    static std::shared_ptr<NativeFlagsInitResult> ctor(ENV* env, Class*, jint id) {
+        auto p = std::make_shared<NativeFlagsInitResult>();
+        p->providerId = id;
+        p->map(env);
+        to_jni(env, p);
+        return p;
     }
     void addBoolean(ENV* env, std::shared_ptr<String> name, jboolean value, jboolean) {
         if (name) {
@@ -257,7 +316,7 @@ public:
     static void Register(ENV* env) {
         env->GetClass<NativeFlagsInitResult>("com/roblox/client/flags/NativeFlagsInitResult");
         auto c = env->GetClass("com/roblox/client/flags/NativeFlagsInitResult");
-        c->HookInstanceFunction(env, "<init>", &NativeFlagsInitResult::ctor);
+        c->Hook(env, "<init>", &NativeFlagsInitResult::ctor);
         c->HookInstanceFunction(env, "addBoolean", &NativeFlagsInitResult::addBoolean);
         c->HookInstanceFunction(env, "getNativeFlagProviderId",
                                 &NativeFlagsInitResult::getNativeFlagProviderId);
@@ -265,6 +324,98 @@ public:
                                 &NativeFlagsInitResult::getBooleanCachedMap);
         c->HookInstanceFunction(env, "resolveFlagValue",
                                 &NativeFlagsInitResult::resolveFlagValue);
+    }
+};
+
+/// `org.json.JSONObject`
+///
+/// Just enough of it for `ClientLocalFlags.getAll()` to return something real
+/// instead of the unresolved-symbol default (null), which is not safe to hand
+/// back to engine code that might call methods on it.
+class JSONObject : public Object {
+public:
+    std::shared_ptr<JavaMap> cached;
+    std::shared_ptr<JavaMap>& map(ENV* env) {
+        if (!cached) {
+            cached = JavaMap::Create(env);
+        }
+        return cached;
+    }
+
+    static std::shared_ptr<JSONObject> ctor(ENV* env, Class*) {
+        auto p = std::make_shared<JSONObject>();
+        p->map(env);
+        to_jni(env, p);
+        return p;
+    }
+    jint length(ENV* env) { return static_cast<jint>(map(env)->entries.size()); }
+
+    static void Register(ENV* env) {
+        env->GetClass<JSONObject>("org/json/JSONObject");
+        auto c = env->GetClass("org/json/JSONObject");
+        c->Hook(env, "<init>", &JSONObject::ctor);
+        c->HookInstanceFunction(env, "length", &JSONObject::length);
+    }
+};
+
+/// `com.roblox.engine.jni.model.ClientLocalFlags`
+///
+/// The offline counterpart to the network `ClientSettings` fetch:
+/// `NativeGLInterface.readLocalFlags()` — implemented in the engine, exported
+/// as a plain native taking no arguments — reads whatever bundled/cached flag
+/// defaults the engine ships and hands them back wrapped in one of these,
+/// built the same way `NativeFlagsInitResult` is: `new ClientLocalFlags()`
+/// then repeated `add(name, value)`.
+///
+/// This class was entirely unimplemented, so any attempt at calling
+/// `readLocalFlags` from Cordial would fault or silently do nothing useful —
+/// nothing in the shipping dex ever called it either (the real app's only
+/// caller is a different, non-`ActivityNativeMain` startup path Cordial does
+/// not replicate), so this was dead on arrival either way.
+///
+/// The `<init>` registration uses the same static-factory idiom
+/// `NativeFlagsInitResult` needed above — libjnivm rewrites every *instance*
+/// `<init>` lookup into a *static* one with the return type folded into the
+/// signature, so an instance-hooked constructor can never be found.
+class ClientLocalFlags : public Object {
+public:
+    std::map<std::string, std::string> entries;
+
+    static std::shared_ptr<ClientLocalFlags> ctor(ENV* env, Class*) {
+        auto p = std::make_shared<ClientLocalFlags>();
+        to_jni(env, p);
+        return p;
+    }
+    void add(ENV*, std::shared_ptr<String> name, std::shared_ptr<String> value) {
+        if (name) {
+            entries[*name] = value ? *value : std::string();
+        }
+    }
+    jboolean isEmpty(ENV*) { return entries.empty(); }
+    jint size(ENV*) { return static_cast<jint>(entries.size()); }
+    std::shared_ptr<JSONObject> getAll(ENV* env) {
+        auto p = std::make_shared<JSONObject>();
+        auto& m = p->map(env)->entries;
+        for (auto& kv : entries) {
+            // JavaMap's cache stores jboolean; ClientLocalFlags' values are
+            // strings, so only presence/absence survives this bridge. Nothing
+            // downstream in this build reads getAll()'s contents (see the
+            // bridge function below), so this exists to make the call safe,
+            // not to carry real values through it.
+            m[kv.first] = true;
+        }
+        to_jni(env, p);
+        return p;
+    }
+
+    static void Register(ENV* env) {
+        env->GetClass<ClientLocalFlags>("com/roblox/engine/jni/model/ClientLocalFlags");
+        auto c = env->GetClass("com/roblox/engine/jni/model/ClientLocalFlags");
+        c->Hook(env, "<init>", &ClientLocalFlags::ctor);
+        c->HookInstanceFunction(env, "add", &ClientLocalFlags::add);
+        c->HookInstanceFunction(env, "isEmpty", &ClientLocalFlags::isEmpty);
+        c->HookInstanceFunction(env, "size", &ClientLocalFlags::size);
+        c->HookInstanceFunction(env, "getAll", &ClientLocalFlags::getAll);
     }
 };
 
@@ -611,7 +762,10 @@ void register_init_params_classes(ENV* env) {
     JavaLocale::Register(env);
     LocaleList::Register(env);
     JavaMap::Register(env);
+    JavaList::Register(env);
     NativeFlagsInitResult::Register(env);
+    JSONObject::Register(env);
+    ClientLocalFlags::Register(env);
     NativeHelper::Register(env);
     DisplayMetrics::Register(env);
     AppSurface::Register(env);
@@ -775,21 +929,177 @@ int cordial_init_flags(void* fn, const char* settings_json, char* err, size_t er
         // JSON here made the engine call addBoolean with the entire document as a
         // single flag name, which is exactly what the trace showed. The flag
         // *values* come from the engine's own load, not from this argument, so
-        // supplying a document here could never have fixed onFlagsFailed.
+        // supplying a document here could never have fixed onFlagsFailed (the
+        // real cause was the `<init>` registration bug documented on
+        // `NativeFlagsInitResult`, above).
         //
-        // An empty list is therefore correct: cache nothing up front. The
-        // parameter is kept so a caller can request specific names.
-        const bool have = settings_json && *settings_json;
-        auto arr = std::make_shared<jnivm::Array<jnivm::String>>(have ? 1 : 0);
-        if (have) {
-            // The object-array specialisation exposes Set rather than a raw
-            // element pointer; getArray() there is void*.
-            arr->Set(0, cordial::S_pub(settings_json));
-        }
+        // An empty list is therefore always correct here: cache nothing up
+        // front. The `settings_json` parameter is intentionally ignored now —
+        // it never held flag names, only a full settings document that had no
+        // valid use as an array element.
+        (void)settings_json;
+        auto arr = std::make_shared<jnivm::Array<jnivm::String>>(0);
         reinterpret_cast<Call>(fn)(
             env->GetJNIEnv(),
             (jclass)cordial::to_jni(env, cls),
             (jobjectArray)cordial::to_jni(env, arr));
+        return 0;
+    } catch (const std::exception& e) {
+        snprintf(err, err_len, "%s", e.what());
+        return -1;
+    } catch (...) {
+        snprintf(err, err_len, "non-standard C++ exception");
+        return -1;
+    }
+}
+
+} // extern "C"
+
+extern "C" {
+
+/// `NativeGLInterface.readLocalFlags()` — `()Lcom/roblox/engine/jni/model/ClientLocalFlags;`
+///
+/// The offline counterpart to the network `ClientSettings` fetch: the engine
+/// reads whatever bundled/cached flag defaults it has on disk and hands them
+/// back as a `ClientLocalFlags`, built the same `new` + repeated `add(name,
+/// value)` way `nativeInitializeNativeFlags` builds its result. Nothing in
+/// the shipping dex calls this on the `ActivityNativeMain` path Cordial
+/// drives — its only caller is a different startup path (`com/roblox/client/
+/// startup/a.l`, found by dex xref) that Cordial does not replicate — so it
+/// is otherwise dead code here. Calling it directly, with no argument and no
+/// forged network response, is legitimate: it is the engine's own exported
+/// native reading its own bundled state.
+int cordial_read_local_flags(void* fn, char* err, size_t err_len) {
+    using Call = jobject (*)(JNIEnv*, jclass);
+    auto* env = cordial::process_env();
+    if (!fn || !env) {
+        snprintf(err, err_len, "no JavaVM, or readLocalFlags is not exported");
+        return -1;
+    }
+    try {
+        auto cls = env->GetClass("com/roblox/engine/jni/NativeGLInterface");
+        reinterpret_cast<Call>(fn)(env->GetJNIEnv(), (jclass)cordial::to_jni(env, cls));
+        return 0;
+    } catch (const std::exception& e) {
+        snprintf(err, err_len, "%s", e.what());
+        return -1;
+    } catch (...) {
+        snprintf(err, err_len, "non-standard C++ exception");
+        return -1;
+    }
+}
+
+} // extern "C"
+
+extern "C" {
+
+/// `NativeGLInterface.nativeInitClientSettings(String, String, String)I` —
+/// `com/roblox/engine/jni/NativeGLInterface.nativeInitClientSettings
+/// (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)I` per the dex.
+///
+/// On Android this is what the app calls once it has fetched
+/// `https://clientsettings.roblox.com/...` itself — the engine does not fetch
+/// its own flags; its *host app* does, and hands the response to the engine
+/// through this native. Cordial *is* the host app in this architecture, so
+/// calling it directly, with Roblox's own real ClientSettings response body,
+/// is the legitimate interface, not a workaround: no HTTP stub, no forged
+/// server, no impersonation of `clientsettings.roblox.com`.
+///
+/// The three `String` parameters' exact roles were not able to be pinned
+/// down with confidence in this pass (see the accompanying report); this
+/// wrapper passes them through as given so the caller can supply candidates
+/// and read the `int` back, which is a far more reliable signal than
+/// anything printed to the log.
+int cordial_init_client_settings(void* fn, const char* a, const char* b, const char* c,
+                                 jint* out_result, char* err, size_t err_len) {
+    using Call = jint (*)(JNIEnv*, jclass, jstring, jstring, jstring);
+    auto* env = cordial::process_env();
+    if (!fn || !env) {
+        snprintf(err, err_len, "no JavaVM, or nativeInitClientSettings is not exported");
+        return -1;
+    }
+    try {
+        auto cls = env->GetClass("com/roblox/engine/jni/NativeGLInterface");
+        auto sa = cordial::S_pub(a ? a : "");
+        auto sb = cordial::S_pub(b ? b : "");
+        auto sc = cordial::S_pub(c ? c : "");
+        jint result = reinterpret_cast<Call>(fn)(
+            env->GetJNIEnv(),
+            (jclass)cordial::to_jni(env, cls),
+            (jstring)cordial::to_jni(env, sa),
+            (jstring)cordial::to_jni(env, sb),
+            (jstring)cordial::to_jni(env, sc));
+        if (out_result) {
+            *out_result = result;
+        }
+        return 0;
+    } catch (const std::exception& e) {
+        snprintf(err, err_len, "%s", e.what());
+        return -1;
+    } catch (...) {
+        snprintf(err, err_len, "non-standard C++ exception");
+        return -1;
+    }
+}
+
+/// `NativeGLInterface.nativePostClientSettingsLoadedInitialization3(List)V`
+///
+/// The finishing step of the client-settings handshake on the real app's
+/// side. Called with an empty `ArrayList` — the honest starting point, since
+/// nothing here knows what real elements the list would otherwise carry.
+int cordial_post_client_settings_loaded(void* fn, char* err, size_t err_len) {
+    using Call = void (*)(JNIEnv*, jclass, jobject);
+    auto* env = cordial::process_env();
+    if (!fn || !env) {
+        snprintf(err, err_len, "no JavaVM, or nativePostClientSettingsLoadedInitialization3 is not exported");
+        return -1;
+    }
+    try {
+        auto cls = env->GetClass("com/roblox/engine/jni/NativeGLInterface");
+        auto list = cordial::JavaList::ctor(env, nullptr);
+        reinterpret_cast<Call>(fn)(
+            env->GetJNIEnv(),
+            (jclass)cordial::to_jni(env, cls),
+            (jobject)cordial::to_jni(env, list));
+        return 0;
+    } catch (const std::exception& e) {
+        snprintf(err, err_len, "%s", e.what());
+        return -1;
+    } catch (...) {
+        snprintf(err, err_len, "non-standard C++ exception");
+        return -1;
+    }
+}
+
+} // extern "C"
+
+extern "C" {
+
+/// `MainGameActivity.nativePreloadFlagOverrides(String)V`
+///
+/// Takes one `String` per the dex descriptor
+/// (`com/roblox/client/startup/MainGameActivity.nativePreloadFlagOverrides
+/// (Ljava/lang/String;)V`). This wrapper hands whatever JSON text it is given
+/// straight through, unexamined, so the caller can experiment with candidate
+/// shapes (a flat `{"FlagName":"value"}` map vs. the doubly-wrapped
+/// `{"applicationSettings":{...}}` shape the real `ClientSettings` endpoint
+/// returns) and compare the resulting JNI trace / flags verdict.
+int cordial_preload_flag_overrides(void* fn, const char* json, char* err, size_t err_len) {
+    using Call = void (*)(JNIEnv*, jobject, jstring);
+    auto* env = cordial::process_env();
+    if (!fn || !env) {
+        snprintf(err, err_len, "no JavaVM, or nativePreloadFlagOverrides is not exported");
+        return -1;
+    }
+    try {
+        // An instance native (per `cordial_set_init_params`'s precedent just
+        // above): the second argument is an Activity instance, not the class.
+        auto activity = std::make_shared<jnivm::Object>();
+        auto s = cordial::S_pub(json ? json : "");
+        reinterpret_cast<Call>(fn)(
+            env->GetJNIEnv(),
+            (jobject)cordial::to_jni(env, activity),
+            (jstring)cordial::to_jni(env, s));
         return 0;
     } catch (const std::exception& e) {
         snprintf(err, err_len, "%s", e.what());

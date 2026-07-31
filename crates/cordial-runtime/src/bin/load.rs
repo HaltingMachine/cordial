@@ -459,6 +459,140 @@ fn main() -> ExitCode {
                                             }
                                         }
 
+                                        // `--flag-overrides <f>`: JSON handed
+                                        // straight through to
+                                        // nativePreloadFlagOverrides, so
+                                        // candidate payload shapes can be
+                                        // compared against their effect on the
+                                        // flags verdict and JNI trace. This was
+                                        // previously parsed but never actually
+                                        // wired to a call — the "no extra
+                                        // logging" result recorded earlier in
+                                        // docs/analysis/flag-init.md was
+                                        // therefore not a real negative
+                                        // result; nothing was ever invoked.
+                                        if let Some(json) = opt.flag_overrides.as_deref() {
+                                            // `opt.flag_overrides` already holds the
+                                            // *file contents* (read at argument-parsing
+                                            // time, below) — not a path. An earlier
+                                            // version of this call re-read it as if it
+                                            // were a path, which silently failed and
+                                            // passed an empty string through; that is
+                                            // almost certainly why the FLog-channel
+                                            // experiment recorded in
+                                            // docs/analysis/flag-init.md produced no
+                                            // extra logging. Fixed here.
+                                            if let Some(f) = lib.symbol(
+                                                "Java_com_roblox_client_startup_MainGameActivity_nativePreloadFlagOverrides",
+                                            ) {
+                                                match linker::game_activity::preload_flag_overrides(
+                                                    f, json,
+                                                ) {
+                                                    Ok(()) => println!(
+                                                        "  flag overrides preloaded ({} bytes)",
+                                                        json.len()
+                                                    ),
+                                                    Err(e) => println!(
+                                                        "  nativePreloadFlagOverrides failed: {e}"
+                                                    ),
+                                                }
+                                            } else {
+                                                println!(
+                                                    "  nativePreloadFlagOverrides not exported"
+                                                );
+                                            }
+                                        }
+
+                                        // The offline counterpart:
+                                        // `readLocalFlags()` makes the engine
+                                        // read whatever bundled/cached flag
+                                        // defaults it has on disk, with no
+                                        // network round trip and nothing
+                                        // impersonating Roblox's servers.
+                                        // Nothing on the `ActivityNativeMain`
+                                        // chain calls this in the real app —
+                                        // its only dex caller is a different
+                                        // startup path — so it is otherwise
+                                        // dead code here.
+                                        if let Some(f) = lib.symbol(
+                                            "Java_com_roblox_engine_jni_NativeGLInterface_readLocalFlags",
+                                        ) {
+                                            match linker::game_activity::read_local_flags(f) {
+                                                Ok(()) => println!("  local flags read"),
+                                                Err(e) => println!("  readLocalFlags failed: {e}"),
+                                            }
+                                        }
+
+                                        // The network counterpart, called the
+                                        // way the real app calls it: on
+                                        // Android, Cordial's role (the host
+                                        // app) is to fetch client settings and
+                                        // hand the response to the engine —
+                                        // the engine does not fetch its own.
+                                        // `--client-settings` supplies that
+                                        // real response body; the other two
+                                        // string arguments' roles were not
+                                        // pinned down with confidence, so
+                                        // empty strings are the honest
+                                        // starting point. The `int` the
+                                        // engine returns is logged directly —
+                                        // it is a far more reliable signal
+                                        // than the onFlagsFailed/onFlagsLoaded
+                                        // print, which comes from an
+                                        // unrelated async path.
+                                        if let Some(f) = lib.symbol(
+                                            "Java_com_roblox_engine_jni_NativeGLInterface_nativeInitClientSettings",
+                                        ) {
+                                            let settings = opt
+                                                .client_settings
+                                                .as_deref()
+                                                .and_then(|p| std::fs::read_to_string(p).ok())
+                                                .unwrap_or_default();
+                                            match linker::game_activity::init_client_settings(
+                                                f, "", &settings, "",
+                                            ) {
+                                                Ok(code) => println!(
+                                                    "  nativeInitClientSettings -> {code}"
+                                                ),
+                                                Err(e) => println!(
+                                                    "  nativeInitClientSettings failed: {e}"
+                                                ),
+                                            }
+                                        }
+                                        // NOT called by default: passing an
+                                        // empty `ArrayList` here reproducibly
+                                        // crashes synchronously, on this
+                                        // thread, inside libc's `_IO_fflush`
+                                        // (fault address 0x8 — a near-null
+                                        // pointer a small struct offset in),
+                                        // verified live under lldb. That is
+                                        // worse than the pre-existing
+                                        // asynchronous crash this session set
+                                        // out to leave alone, so this call is
+                                        // wired but disabled pending a real
+                                        // list argument. See the report for
+                                        // detail; set
+                                        // CORDIAL_TRY_POST_CLIENT_SETTINGS=1
+                                        // to re-enable it for experimentation.
+                                        if std::env::var_os(
+                                            "CORDIAL_TRY_POST_CLIENT_SETTINGS",
+                                        )
+                                        .is_some()
+                                        {
+                                            if let Some(f) = lib.symbol(
+                                                "Java_com_roblox_engine_jni_NativeGLInterface_nativePostClientSettingsLoadedInitialization3",
+                                            ) {
+                                                match linker::game_activity::post_client_settings_loaded(f) {
+                                                    Ok(()) => println!(
+                                                        "  postClientSettingsLoadedInitialization3 ok"
+                                                    ),
+                                                    Err(e) => println!(
+                                                        "  postClientSettingsLoadedInitialization3 failed: {e}"
+                                                    ),
+                                                }
+                                            }
+                                        }
+
                                         // Kicks the engine's initialisation once
                                         // everything it depends on is in place.
                                         if let Some(f) = lib.symbol(
