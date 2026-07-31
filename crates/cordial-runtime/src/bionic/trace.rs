@@ -7,8 +7,16 @@
 //! intercepted. That is a better instrument than a debugger here: it says what
 //! was called, with what, in order.
 //!
-//! Enabled with `--trace`. Off by default — it is loud and it slows everything
-//! down.
+//! Enabled with `CORDIAL_TRACE=1`. Off by default, and **not merely because it
+//! is loud**: `open64`, `openat`, `prctl` and `syscall` are variadic, and these
+//! wrappers declare them with fixed arity. That is not ABI-safe — the callee
+//! reads `al` for the vector-register count and walks the register save area
+//! differently — and turning this on has been observed to make Roblox abort
+//! where it otherwise runs. Treat any behaviour seen under it as suspect until
+//! reproduced without it.
+//!
+//! `CORDIAL_ANDROID_TRACE=1` is the safe counterpart: the Android API has no
+//! variadic entry points, so wrapping it changes nothing.
 
 use std::ffi::{c_char, c_int, c_long, c_void, CStr};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

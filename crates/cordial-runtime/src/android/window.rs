@@ -117,7 +117,14 @@ pub fn open(width: u32, height: u32, title: &str) -> Result<&'static HostWindow,
     let window = unsafe {
         let root = (xlib.default_root_window)(display);
         let w = (xlib.create_simple_window)(display, root, 0, 0, width, height, 0, 0, 0);
-        let name = CString::new(title).unwrap_or_default();
+        // XStoreName sets WM_NAME, which is XA_STRING — Latin-1, not UTF-8.
+        // An em dash here renders as mojibake, so the title is kept ASCII
+        // rather than encoded twice for a window caption.
+        let ascii: String = title
+            .chars()
+            .map(|c| if c.is_ascii() { c } else { '-' })
+            .collect();
+        let name = CString::new(ascii).unwrap_or_default();
         (xlib.store_name)(display, w, name.as_ptr());
         (xlib.map_window)(display, w);
         (xlib.flush)(display);
@@ -182,6 +189,7 @@ fn as_window(p: *mut c_void) -> Option<&'static HostWindow> {
 }
 
 extern "C" fn native_window_from_surface(_env: *mut c_void, _surface: *mut c_void) -> *mut c_void {
+    super::trace(format_args!("ANativeWindow_fromSurface"));
     // Cordial's Java `Surface` has no state of its own: there is one window and
     // the Surface object exists only so `onSurfaceCreatedNative`'s signature can
     // be satisfied. Returning the single window is therefore correct rather than

@@ -88,6 +88,7 @@ unsafe fn cstr(p: *const c_char) -> Option<String> {
 // ------------------------------------------------------------------- the API
 
 extern "C" fn asset_manager_from_java(_env: *mut c_void, _obj: *mut c_void) -> *mut c_void {
+    super::trace(format_args!("AAssetManager_fromJava"));
     // There is one asset manager per process and the Java object is Cordial's
     // own, so there is nothing to look up. Returning a non-null token matters:
     // Roblox checks it.

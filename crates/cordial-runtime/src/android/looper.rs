@@ -131,13 +131,30 @@ fn epoll_to_looper_events(events: u32) -> c_int {
     out
 }
 
+/// Give the calling thread a looper.
+///
+/// Android's framework prepares one on the UI thread before any application
+/// code runs, so `ALooper_forThread` never returns null there. AGDK relies on
+/// that: `initializeNativeCode` calls `forThread` and bails out immediately if
+/// it gets null, returning a zero handle with nothing logged.
+///
+/// Cordial has no framework doing this, so the thread that drives the Activity
+/// has to prepare its own looper first. `forThread` itself stays faithful —
+/// creating on demand there would paper over a real "this thread has no looper"
+/// error somewhere else.
+pub fn prepare_for_current_thread() -> bool {
+    Looper::prepare().is_some()
+}
+
 // ------------------------------------------------------------------- the API
 
 extern "C" fn looper_prepare(_opts: c_int) -> *mut c_void {
+    super::trace(format_args!("ALooper_prepare"));
     Looper::prepare().map_or(std::ptr::null_mut(), |l| l as *const Looper as *mut c_void)
 }
 
 extern "C" fn looper_for_thread() -> *mut c_void {
+    super::trace(format_args!("ALooper_forThread"));
     Looper::for_thread().map_or(std::ptr::null_mut(), |l| l as *const Looper as *mut c_void)
 }
 

@@ -101,6 +101,7 @@ struct Handle {
 }
 
 extern "C" fn config_new() -> *mut c_void {
+    super::trace(format_args!("AConfiguration_new"));
     Box::into_raw(Box::new(Handle { config: current() })) as *mut c_void
 }
 
@@ -116,6 +117,7 @@ extern "C" fn config_delete(config: *mut c_void) {
 /// encodes what the app supports. Cordial's answer does not depend on the APK —
 /// the screen is the screen — so this refreshes from the live values instead.
 extern "C" fn config_from_asset_manager(config: *mut c_void, _assets: *mut c_void) {
+    super::trace(format_args!("AConfiguration_fromAssetManager"));
     if config.is_null() {
         return;
     }

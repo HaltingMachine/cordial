@@ -19,6 +19,22 @@ pub mod looper;
 pub mod window;
 
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static TRACE: AtomicBool = AtomicBool::new(false);
+
+/// Log every Android API call. AGDK's `initializeNativeCode` returns a bare 0 on
+/// failure with nothing logged, so the only way to find where it stopped is to
+/// watch which of these it reached.
+pub fn set_trace(on: bool) {
+    TRACE.store(on, Ordering::Relaxed);
+}
+
+pub(crate) fn trace(args: std::fmt::Arguments<'_>) {
+    if TRACE.load(Ordering::Relaxed) {
+        eprintln!("[android] {args}");
+    }
+}
 
 /// Everything the Android layer implements so far.
 pub fn overrides() -> Vec<(&'static str, *mut c_void)> {

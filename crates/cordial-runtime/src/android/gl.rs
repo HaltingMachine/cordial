@@ -261,12 +261,7 @@ pub fn probe_window(
 ) -> Result<Report, String> {
     use crate::android::window;
 
-    // Titled for what it is. An earlier version said "Cordial", and a window
-    // that opens with the app's name and animates looks exactly like the app
-    // starting up — which this is not. It draws a gradient to prove EGL and
-    // GLES2 work through the symbol table; Roblox is not connected to it and
-    // has never rendered a pixel.
-    let host = window::open(1280, 720, "Cordial GL probe — not Roblox")?;
+    let host = window::open(1280, 720, &crate::window_title("GL probe"))?;
     let (w, h, _) = host.geometry();
     let api = Api::from_table(table)?;
 

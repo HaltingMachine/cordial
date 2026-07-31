@@ -233,7 +233,7 @@ pub mod jni {
 /// exported JNI native directly. The returned handle is what every later
 /// callback carries — surface creation, resize, input.
 pub mod game_activity {
-    use std::ffi::{c_char, c_void, CString};
+    use std::ffi::{c_char, c_int, c_void, CString};
 
     extern "C" {
         fn cordial_game_activity_init(
@@ -244,6 +244,39 @@ pub mod game_activity {
             err: *mut c_char,
             err_len: usize,
         ) -> i64;
+    }
+
+    extern "C" {
+        fn cordial_game_activity_start(
+            handle: i64,
+            width: c_int,
+            height: c_int,
+            format: c_int,
+            err: *mut c_char,
+            err_len: usize,
+        ) -> c_int;
+    }
+
+    /// Drive the Activity lifecycle and hand the engine its surface.
+    pub fn start(handle: i64, width: i32, height: i32, format: i32) -> Result<(), String> {
+        let mut err = vec![0u8; 512];
+        // SAFETY: `handle` came from `initialize`; `err` is a live buffer.
+        let rc = unsafe {
+            cordial_game_activity_start(
+                handle,
+                width,
+                height,
+                format,
+                err.as_mut_ptr() as *mut c_char,
+                err.len(),
+            )
+        };
+        if rc == 0 {
+            Ok(())
+        } else {
+            let end = err.iter().position(|&b| b == 0).unwrap_or(err.len());
+            Err(String::from_utf8_lossy(&err[..end]).into_owned())
+        }
     }
 
     pub fn initialize(

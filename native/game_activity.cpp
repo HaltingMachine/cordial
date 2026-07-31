@@ -177,3 +177,74 @@ long cordial_game_activity_init(void* fn, const char* internal_path, const char*
 }
 
 } // extern "C"
+
+extern "C" {
+
+/// Drive the Activity lifecycle and hand the engine its surface.
+///
+/// Android's order is onCreate, onStart, onResume, then the surface callbacks as
+/// the window becomes available. AGDK's natives are registered on the
+/// `GameActivity` class rather than exported, so they are reached through the
+/// JNI method table rather than `dlsym`.
+///
+/// Every call carries the handle `initializeNativeCode` returned.
+int cordial_game_activity_start(long handle, int width, int height, int format,
+                                char* err, size_t err_len) {
+    auto* env = cordial::process_env();
+    if (!env || handle == 0) {
+        snprintf(err, err_len, "no JavaVM, or initializeNativeCode gave no handle");
+        return -1;
+    }
+
+    try {
+        JNIEnv* jni = env->GetJNIEnv();
+        jclass cls = jni->FindClass("com/google/androidgamesdk/GameActivity");
+        if (!cls) {
+            snprintf(err, err_len, "GameActivity class is not registered");
+            return -1;
+        }
+
+        auto surface = std::make_shared<cordial::Surface>();
+        auto jsurface = reinterpret_cast<jobject>(surface.get());
+        auto activity = std::make_shared<cordial::GameActivity>();
+        auto jactivity = reinterpret_cast<jobject>(activity.get());
+
+        auto call_handle_only = [&](const char* name) {
+            jmethodID m = jni->GetMethodID(cls, name, "(J)V");
+            if (m) {
+                jni->CallVoidMethod(jactivity, m, (jlong)handle);
+            }
+            return m != nullptr;
+        };
+
+        // Lifecycle first: the engine sets up its renderer on resume and will
+        // ignore a surface that arrives before it is ready for one.
+        call_handle_only("onStartNative");
+        call_handle_only("onResumeNative");
+
+        if (jmethodID created = jni->GetMethodID(
+                cls, "onSurfaceCreatedNative", "(JLandroid/view/Surface;)V")) {
+            jni->CallVoidMethod(jactivity, created, (jlong)handle, jsurface);
+        } else {
+            snprintf(err, err_len, "onSurfaceCreatedNative is not registered");
+            return -1;
+        }
+
+        // Size and format come after creation, and this is the call that tells
+        // the engine how big its framebuffers must be.
+        if (jmethodID changed = jni->GetMethodID(
+                cls, "onSurfaceChangedNative", "(JLandroid/view/Surface;III)V")) {
+            jni->CallVoidMethod(jactivity, changed, (jlong)handle, jsurface,
+                                (jint)format, (jint)width, (jint)height);
+        }
+        return 0;
+    } catch (const std::exception& e) {
+        snprintf(err, err_len, "%s", e.what());
+        return -1;
+    } catch (...) {
+        snprintf(err, err_len, "non-standard C++ exception");
+        return -1;
+    }
+}
+
+} // extern "C"

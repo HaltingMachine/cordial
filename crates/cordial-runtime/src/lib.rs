@@ -7,6 +7,15 @@
 //!
 //! Nothing here runs Roblox yet. See docs/findings.md.
 
+/// Window title: name, version, and which graphics API is actually in use.
+///
+/// Roblox links GLES2 and EGL and only `dlopen`s Vulkan, so GLES is the path
+/// that has to work; naming it in the title means a screenshot says which
+/// backend produced it without anyone having to ask.
+pub fn window_title(backend: &str) -> String {
+    format!("Cordial {} ({backend})", env!("CARGO_PKG_VERSION"))
+}
+
 pub mod android;
 pub mod bionic;
 pub mod stubs;

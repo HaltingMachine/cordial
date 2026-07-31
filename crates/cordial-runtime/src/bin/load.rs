@@ -18,6 +18,7 @@ struct Options {
     gl_probe: bool,
     window_seconds: Option<u64>,
     game_activity: bool,
+    run_seconds: u64,
     host_libc: bool,
     jni_onload: bool,
     dump_classes: Option<String>,
@@ -36,7 +37,8 @@ usage: cordial-load --lib-dir <dir> [options]
                     This is Cordial's own test pattern, not Roblox rendering.
   --host-libc       also resolve libc from the host (ABI-unsafe; diagnostic only)
   --jni-onload      stand up a JavaVM and call JNI_OnLoad
-  --game-activity   implies --jni-onload; then call GameActivity.initializeNativeCode
+  --game-activity   implies --jni-onload; bring Roblox up and hand it a surface
+  --run <secs>      how long to let Roblox run after handover (default 15)
   --dump-classes <f>  implies --jni-onload; write the Java classes Roblox asked
                     for to <f> — the observed Phase 2 backlog
   -v, --verbose     list every symbol and how it resolved
@@ -45,7 +47,10 @@ env:
   MCPELAUNCHER_LINKER_VERBOSITY=<n>  bionic linker tracing (try 1 or 2)
   CORDIAL_STUB_ABORT=1               abort on the first unimplemented call
   CORDIAL_STUB_QUIET=1               do not report stub hits as they happen
-  CORDIAL_TRACE=1                    log libc calls Roblox makes (loud)
+  CORDIAL_TRACE=1                    log libc calls (WARNING: wraps variadic
+                                     functions with fixed-arity ones, which is
+                                     not ABI-safe — it changes behaviour)
+  CORDIAL_ANDROID_TRACE=1            log Android API calls (safe; no variadics)
 ";
 
 fn parse() -> Result<Options, String> {
@@ -57,6 +62,7 @@ fn parse() -> Result<Options, String> {
         gl_probe: false,
         window_seconds: None,
         game_activity: false,
+        run_seconds: 15,
         host_libc: false,
         jni_onload: false,
         dump_classes: None,
@@ -78,6 +84,10 @@ fn parse() -> Result<Options, String> {
             }
             "--host-libc" => opt.host_libc = true,
             "--jni-onload" => opt.jni_onload = true,
+            "--run" => {
+                let v = args.next().ok_or("--run needs a duration in seconds")?;
+                opt.run_seconds = v.parse().map_err(|_| "--run wants a number")?;
+            }
             "--game-activity" => {
                 opt.jni_onload = true;
                 opt.game_activity = true;
@@ -128,6 +138,8 @@ fn main() -> ExitCode {
             }
         }
     }
+
+    cordial_runtime::android::set_trace(std::env::var_os("CORDIAL_ANDROID_TRACE").is_some());
 
     let table = symtab::build(opt.host_libc);
     let totals = table.totals();
@@ -279,9 +291,48 @@ fn main() -> ExitCode {
                                 ))
                             )
                         });
+                        // Android's framework prepares the UI thread's looper
+                        // before any app code runs, and AGDK's
+                        // initializeNativeCode bails out with a zero handle if
+                        // ALooper_forThread returns null. Nothing else prepares
+                        // one here.
+                        if !cordial_runtime::android::looper::prepare_for_current_thread() {
+                            eprintln!("  could not prepare a looper for this thread");
+                            return ExitCode::FAILURE;
+                        }
+
                         println!("\ncalling GameActivity.initializeNativeCode");
                         match linker::game_activity::initialize(f, &files, &files, &files) {
-                            Ok(handle) => println!("  native handle {handle:#x}"),
+                            Ok(handle) => {
+                                println!("  native handle {handle:#x}");
+
+                                // The engine renders into an ANativeWindow, so
+                                // there has to be a real one before the surface
+                                // callbacks arrive.
+                                match cordial_runtime::android::window::open(
+                                    1280, 720, &cordial_runtime::window_title("OpenGL ES"),
+                                ) {
+                                    Err(e) => println!("  no window: {e}"),
+                                    Ok(w) => {
+                                        let (width, height, format) = w.geometry();
+                                        cordial_runtime::android::config::set_screen(width, height);
+                                        println!("  window {width}x{height}");
+                                        match linker::game_activity::start(
+                                            handle, width, height, format,
+                                        ) {
+                                            Ok(()) => {
+                                                println!("  surface handed to the engine");
+                                                let secs = opt.run_seconds;
+                                                println!("  running for {secs}s");
+                                                std::thread::sleep(
+                                                    std::time::Duration::from_secs(secs),
+                                                );
+                                            }
+                                            Err(e) => println!("  lifecycle failed: {e}"),
+                                        }
+                                    }
+                                }
+                            }
                             Err(e) => println!("  failed: {e}"),
                         }
                     }
