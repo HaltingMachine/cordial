@@ -15,6 +15,7 @@ struct Options {
     library: String,
     apk: Option<String>,
     read_asset: Option<String>,
+    client_settings: Option<String>,
     gl_probe: bool,
     window_seconds: Option<u64>,
     game_activity: bool,
@@ -32,6 +33,8 @@ usage: cordial-load --lib-dir <dir> [options]
   --library <name>  object to load (default: libroblox.so)
   --apk <path>      APK to serve assets from; without it AAssetManager_open fails
   --read-asset <p>  read one asset through the AAsset API and report its size
+  --client-settings <f>  Roblox ClientSettings JSON; the engine reports
+                    onFlagsFailed without it
   --gl-probe        bring up GLES2 through the symbol table and read a pixel back
   --window <secs>   GL PROBE ONLY: open a window and draw a gradient for <secs>.
                     This is Cordial's own test pattern, not Roblox rendering.
@@ -59,6 +62,7 @@ fn parse() -> Result<Options, String> {
         library: "libroblox.so".into(),
         apk: None,
         read_asset: None,
+        client_settings: None,
         gl_probe: false,
         window_seconds: None,
         game_activity: false,
@@ -76,6 +80,10 @@ fn parse() -> Result<Options, String> {
             "--apk" => opt.apk = Some(args.next().ok_or("--apk needs a path")?),
             "--read-asset" => {
                 opt.read_asset = Some(args.next().ok_or("--read-asset needs a name")?)
+            }
+            "--client-settings" => {
+                opt.client_settings =
+                    Some(args.next().ok_or("--client-settings needs a path")?)
             }
             "--gl-probe" => opt.gl_probe = true,
             "--window" => {
@@ -371,7 +379,12 @@ fn main() -> ExitCode {
                                         if let Some(f) = lib.symbol(
                                             "Java_com_roblox_client_flags_FlagJniInterface_nativeInitializeNativeFlags",
                                         ) {
-                                            match linker::game_activity::init_flags(f) {
+                                            let settings = opt
+                                                .client_settings
+                                                .as_deref()
+                                                .and_then(|p| std::fs::read_to_string(p).ok())
+                                                .unwrap_or_default();
+                                            match linker::game_activity::init_flags(f, &settings) {
                                                 Ok(()) => println!("  flags initialised"),
                                                 Err(e) => println!("  flag init failed: {e}"),
                                             }

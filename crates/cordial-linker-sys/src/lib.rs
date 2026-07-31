@@ -330,7 +330,12 @@ pub mod game_activity {
             n: usize,
         ) -> c_int;
         fn cordial_call_bare(f: *mut c_void, err: *mut c_char, n: usize) -> c_int;
-        fn cordial_init_flags(f: *mut c_void, err: *mut c_char, n: usize) -> c_int;
+        fn cordial_init_flags(
+            f: *mut c_void,
+            settings: *const c_char,
+            err: *mut c_char,
+            n: usize,
+        ) -> c_int;
         fn cordial_appbridge_init(
             f: *mut c_void,
             assets: *const c_char,
@@ -385,10 +390,18 @@ pub mod game_activity {
 
     /// `FlagJniInterface.nativeInitializeNativeFlags` — what `bootstrapTheApp`
     /// exists to reach. Without it the engine reports `onFlagsFailed` and stops.
-    pub fn init_flags(native: *mut c_void) -> Result<(), String> {
+    pub fn init_flags(native: *mut c_void, settings_json: &str) -> Result<(), String> {
+        let json = CString::new(settings_json).map_err(|e| e.to_string())?;
         let mut err = vec![0u8; 512];
-        // SAFETY: `native` is the exported JNI native; `err` is a live buffer.
-        let rc = unsafe { cordial_init_flags(native, err.as_mut_ptr() as *mut c_char, err.len()) };
+        // SAFETY: `native` is the exported JNI native; both buffers outlive the call.
+        let rc = unsafe {
+            cordial_init_flags(
+                native,
+                json.as_ptr(),
+                err.as_mut_ptr() as *mut c_char,
+                err.len(),
+            )
+        };
         if rc == 0 { Ok(()) } else { Err(take_err(err)) }
     }
 

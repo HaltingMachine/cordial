@@ -613,7 +613,7 @@ extern "C" {
 /// An empty array means "no overrides": the engine falls back to the defaults
 /// compiled into it. That is the honest starting point — inventing flag values
 /// would change engine behaviour in ways nothing here could account for.
-int cordial_init_flags(void* fn, char* err, size_t err_len) {
+int cordial_init_flags(void* fn, const char* settings_json, char* err, size_t err_len) {
     using Call = jobject (*)(JNIEnv*, jclass, jobjectArray);
     auto* env = cordial::process_env();
     if (!fn || !env) {
@@ -622,11 +622,21 @@ int cordial_init_flags(void* fn, char* err, size_t err_len) {
     }
     try {
         auto cls = env->GetClass("com/roblox/client/flags/FlagJniInterface");
-        auto empty = std::make_shared<jnivm::Array<jnivm::String>>(0);
+
+        // Roblox's ClientSettings document, as the client itself fetches it:
+        // {"applicationSettings": {"FFlagX": "True", ...}}. An empty array made
+        // the engine report flagCount = 0 and then fail — it wants the real set.
+        const bool have = settings_json && *settings_json;
+        auto arr = std::make_shared<jnivm::Array<jnivm::String>>(have ? 1 : 0);
+        if (have) {
+            // The object-array specialisation exposes Set rather than a raw
+            // element pointer; getArray() there is void*.
+            arr->Set(0, cordial::S_pub(settings_json));
+        }
         reinterpret_cast<Call>(fn)(
             env->GetJNIEnv(),
             (jclass)cordial::to_jni(env, cls),
-            (jobjectArray)cordial::to_jni(env, empty));
+            (jobjectArray)cordial::to_jni(env, arr));
         return 0;
     } catch (const std::exception& e) {
         snprintf(err, err_len, "%s", e.what());
