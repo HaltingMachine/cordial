@@ -16,6 +16,7 @@ struct Options {
     apk: Option<String>,
     read_asset: Option<String>,
     gl_probe: bool,
+    window_seconds: Option<u64>,
     host_libc: bool,
     jni_onload: bool,
     dump_classes: Option<String>,
@@ -30,6 +31,7 @@ usage: cordial-load --lib-dir <dir> [options]
   --apk <path>      APK to serve assets from; without it AAssetManager_open fails
   --read-asset <p>  read one asset through the AAsset API and report its size
   --gl-probe        bring up GLES2 through the symbol table and read a pixel back
+  --window <secs>   open a real window and render into it for <secs>
   --host-libc       also resolve libc from the host (ABI-unsafe; diagnostic only)
   --jni-onload      stand up a JavaVM and call JNI_OnLoad
   --dump-classes <f>  implies --jni-onload; write the Java classes Roblox asked
@@ -50,6 +52,7 @@ fn parse() -> Result<Options, String> {
         apk: None,
         read_asset: None,
         gl_probe: false,
+        window_seconds: None,
         host_libc: false,
         jni_onload: false,
         dump_classes: None,
@@ -65,6 +68,10 @@ fn parse() -> Result<Options, String> {
                 opt.read_asset = Some(args.next().ok_or("--read-asset needs a name")?)
             }
             "--gl-probe" => opt.gl_probe = true,
+            "--window" => {
+                let v = args.next().ok_or("--window needs a duration in seconds")?;
+                opt.window_seconds = Some(v.parse().map_err(|_| "--window wants a number")?);
+            }
             "--host-libc" => opt.host_libc = true,
             "--jni-onload" => opt.jni_onload = true,
             "--dump-classes" => {
@@ -143,6 +150,21 @@ fn main() -> ExitCode {
                     e.symbol,
                     e.source.label()
                 );
+            }
+        }
+    }
+
+    if let Some(secs) = opt.window_seconds {
+        match cordial_runtime::android::gl::probe_window(&table, secs) {
+            Ok(r) => {
+                println!("\nrendered into a real window:");
+                println!("  renderer  {}", r.renderer);
+                println!("  version   {}", r.version);
+                println!("  readback  {:02x?}", r.pixel);
+            }
+            Err(e) => {
+                eprintln!("\nwindow render failed: {e}");
+                return ExitCode::FAILURE;
             }
         }
     }

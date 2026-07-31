@@ -1,6 +1,8 @@
 # The path to a frame
 
-**Status:** mapped, not built. This is the remaining core of Phase 2.
+**Status:** the graphics and window halves are built and proven. What remains is
+wiring them to Roblox — `AConfiguration`, `ClassLoader`, and the
+`initializeNativeCode` / `onSurfaceCreatedNative` call sequence.
 
 Everything below is read from the shipping APK with `tools/dex_method.py`, not
 inferred from AGDK's source — the signatures change between AGDK versions and
@@ -110,10 +112,25 @@ It uses a pbuffer, which is not a shortcut: Roblox imports
 `eglCreatePbufferSurface` alongside `eglCreateWindowSurface`, so offscreen
 surfaces are a path the engine itself takes.
 
-**What this settles:** Mesa, the EGL/GLES2 symbol resolution, and the
-classification in `symtab` all work. **What it does not settle:** there is still
-no window, and `ANativeWindow_*` — the thing that connects a surface to the
-engine — is entirely stubbed.
+## 4b. And into a real window
+
+`cordial-load --window 3` opens an X11 window, creates an EGL surface on it with
+`eglCreateWindowSurface`, and renders an animated clear at 60 fps with real
+buffer swaps. `ANativeWindow_*` is implemented over that window — nine of the ten
+entry points, all resolving to the window the engine will actually draw into.
+
+It animates rather than clearing once on purpose: a static colour cannot be told
+apart from a window the compositor painted itself, and a changing one can.
+
+X11 is loaded with `dlopen`, not linked, so the loader and asset paths still work
+on a machine with no display — CI, a container, a remote shell. "No window" is a
+runtime condition, which is what it actually is.
+
+**What this settles:** Mesa, EGL/GLES2 resolution, `symtab` classification, the
+window system, and `ANativeWindow_*`. **What it does not:** none of this is
+connected to Roblox yet. The engine has not been asked to render anything —
+`initializeNativeCode` has never been called, because it still needs
+`AConfiguration` and a `Surface` object on the Java side.
 
 ## 5. Order
 

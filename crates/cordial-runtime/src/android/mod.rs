@@ -5,7 +5,7 @@
 //! | Group | Functions | State |
 //! |---|---|---|
 //! | `AAsset*` | 6 | implemented — see [`asset`] |
-//! | `ANativeWindow_*` | 10 | stubbed; needs a host window and EGL surface |
+//! | `ANativeWindow_*` | 10 | implemented over an X11 window — see [`window`] |
 //! | `ALooper_*` | 7 | stubbed |
 //! | `AConfiguration_*` | 9 | stubbed |
 //!
@@ -14,10 +14,13 @@
 
 pub mod asset;
 pub mod gl;
+pub mod window;
 
 use std::ffi::c_void;
 
 /// Everything the Android layer implements so far.
 pub fn overrides() -> Vec<(&'static str, *mut c_void)> {
-    asset::overrides()
+    let mut v = asset::overrides();
+    v.extend(window::overrides());
+    v
 }

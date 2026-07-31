@@ -32,6 +32,7 @@ const EGL_WIDTH: i32 = 0x3057;
 const EGL_HEIGHT: i32 = 0x3056;
 const EGL_SURFACE_TYPE: i32 = 0x3033;
 const EGL_PBUFFER_BIT: i32 = 0x0001;
+const EGL_WINDOW_BIT: i32 = 0x0004;
 const EGL_RENDERABLE_TYPE: i32 = 0x3040;
 const EGL_OPENGL_ES2_BIT: i32 = 0x0004;
 const EGL_RED_SIZE: i32 = 0x3024;
@@ -55,6 +56,8 @@ struct Api {
     initialize: extern "C" fn(Display, *mut i32, *mut i32) -> u32,
     choose_config: extern "C" fn(Display, *const i32, *mut Config, i32, *mut i32) -> u32,
     create_pbuffer: extern "C" fn(Display, Config, *const i32) -> Surface,
+    create_window_surface: extern "C" fn(Display, Config, u64, *const i32) -> Surface,
+    swap_buffers: extern "C" fn(Display, Surface) -> u32,
     create_context: extern "C" fn(Display, Config, Context, *const i32) -> Context,
     make_current: extern "C" fn(Display, Surface, Surface, Context) -> u32,
     get_error: extern "C" fn() -> i32,
@@ -105,6 +108,8 @@ impl Api {
             initialize: get!("eglInitialize"),
             choose_config: get!("eglChooseConfig"),
             create_pbuffer: get!("eglCreatePbufferSurface"),
+            create_window_surface: get!("eglCreateWindowSurface"),
+            swap_buffers: get!("eglSwapBuffers"),
             create_context: get!("eglCreateContext"),
             make_current: get!("eglMakeCurrent"),
             get_error: get!("eglGetError"),
@@ -240,6 +245,112 @@ pub fn probe(table: &symtab::SymbolTable) -> Result<Report, String> {
         vendor: report_strings.0,
         renderer: report_strings.1,
         version: report_strings.2,
+        pixel,
+    })
+}
+
+/// Open a host window and render into it through `eglCreateWindowSurface`.
+///
+/// This is the same path Roblox takes — `ANativeWindow_fromSurface` returns the
+/// window created here, and the engine's EGL surface is built on it. The pbuffer
+/// probe proves the GL stack; this proves the *window system* half, which is the
+/// part that cannot be tested headless.
+pub fn probe_window(
+    table: &symtab::SymbolTable,
+    seconds: u64,
+) -> Result<Report, String> {
+    use crate::android::window;
+
+    let host = window::open(1280, 720, "Cordial")?;
+    let (w, h, _) = host.geometry();
+    let api = Api::from_table(table)?;
+
+    // The X display, not EGL_DEFAULT_DISPLAY: the surface has to belong to the
+    // same connection as the window it is created on.
+    let display = (api.get_display)(host.egl_native_display());
+    if display.is_null() {
+        return Err("eglGetDisplay rejected the X display".into());
+    }
+
+    let (mut major, mut minor) = (0, 0);
+    if (api.initialize)(display, &mut major, &mut minor) == 0 {
+        return Err(format!("eglInitialize failed ({:#x})", (api.get_error)()));
+    }
+
+    let config_attribs = [
+        EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
+        EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
+        EGL_RED_SIZE, 8,
+        EGL_GREEN_SIZE, 8,
+        EGL_BLUE_SIZE, 8,
+        EGL_ALPHA_SIZE, 8,
+        EGL_NONE,
+    ];
+    let mut config: Config = std::ptr::null_mut();
+    let mut count = 0;
+    if (api.choose_config)(display, config_attribs.as_ptr(), &mut config, 1, &mut count) == 0
+        || count == 0
+    {
+        return Err("no EGL config with a GLES2-capable window surface".into());
+    }
+
+    let surface = (api.create_window_surface)(
+        display,
+        config,
+        host.egl_native_window(),
+        std::ptr::null(),
+    );
+    if surface.is_null() {
+        return Err(format!("eglCreateWindowSurface failed ({:#x})", (api.get_error)()));
+    }
+
+    let context_attribs = [EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE];
+    let context = (api.create_context)(display, config, EGL_NO_CONTEXT, context_attribs.as_ptr());
+    if context.is_null() {
+        return Err(format!("eglCreateContext failed ({:#x})", (api.get_error)()));
+    }
+    if (api.make_current)(display, surface, surface, context) == 0 {
+        return Err(format!("eglMakeCurrent failed ({:#x})", (api.get_error)()));
+    }
+
+    let strings = (
+        api.string(GL_VENDOR),
+        api.string(GL_RENDERER),
+        api.string(GL_VERSION),
+    );
+
+    // Animate rather than clearing once. A static colour cannot be told apart
+    // from a window the compositor painted itself; a changing one can.
+    const FRAMES_PER_SECOND: u64 = 60;
+    let total = seconds * FRAMES_PER_SECOND;
+    let mut pixel = [0u8; 4];
+    (api.viewport)(0, 0, w, h);
+
+    for frame in 0..total.max(1) {
+        let t = frame as f32 / FRAMES_PER_SECOND as f32;
+        (api.clear_color)(0.2 + 0.2 * t.sin(), 0.4, 0.6 + 0.2 * t.cos(), 1.0);
+        (api.clear)(GL_COLOR_BUFFER_BIT);
+
+        if frame == 0 {
+            (api.read_pixels)(
+                w / 2, h / 2, 1, 1,
+                GL_RGBA, GL_UNSIGNED_BYTE,
+                pixel.as_mut_ptr() as *mut c_void,
+            );
+        }
+        if (api.swap_buffers)(display, surface) == 0 {
+            return Err(format!("eglSwapBuffers failed ({:#x})", (api.get_error)()));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1000 / FRAMES_PER_SECOND));
+    }
+
+    (api.terminate)(display);
+    host.close();
+
+    Ok(Report {
+        vendor: strings.0,
+        renderer: strings.1,
+        version: strings.2,
         pixel,
     })
 }
