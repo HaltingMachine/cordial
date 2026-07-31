@@ -35,6 +35,8 @@ std::shared_ptr<String> S(const char* v) {
 }
 } // namespace
 
+std::shared_ptr<String> S_pub(const char* v) { return S(v); }
+
 /// `com.roblox.engine.jni.model.DeviceParams`
 class DeviceParams : public Object {
 public:
@@ -198,6 +200,88 @@ int cordial_set_init_params(void* fn, const char* assets, int width, int height,
         reinterpret_cast<Call>(fn)(env->GetJNIEnv(),
                                    reinterpret_cast<jobject>(activity.get()),
                                    reinterpret_cast<jobject>(params.get()));
+        return 0;
+    } catch (const std::exception& e) {
+        snprintf(err, err_len, "%s", e.what());
+        return -1;
+    } catch (...) {
+        snprintf(err, err_len, "non-standard C++ exception");
+        return -1;
+    }
+}
+
+} // extern "C"
+
+extern "C" {
+
+/// `JNIAAssetManagerSetup.initNative(AssetManager)` — a *static* native, so the
+/// second argument is the class rather than an instance.
+///
+/// This is how the engine gets its asset manager. Without it the engine has no
+/// way to read its own content, which is why nothing downstream ever starts:
+/// no assets, no app shell, no reason to open a socket or draw a frame.
+int cordial_asset_manager_init(void* fn, char* err, size_t err_len) {
+    using Call = void (*)(JNIEnv*, jclass, jobject);
+    auto* env = cordial::process_env();
+    if (!fn || !env) {
+        snprintf(err, err_len, "no JavaVM, or initNative is not exported");
+        return -1;
+    }
+    try {
+        auto cls = env->GetClass("com/roblox/client/JNIAAssetManagerSetup");
+        auto assets = std::make_shared<jnivm::Object>();
+        reinterpret_cast<Call>(fn)(env->GetJNIEnv(),
+                                   reinterpret_cast<jclass>(cls.get()),
+                                   reinterpret_cast<jobject>(assets.get()));
+        return 0;
+    } catch (const std::exception& e) {
+        snprintf(err, err_len, "%s", e.what());
+        return -1;
+    } catch (...) {
+        snprintf(err, err_len, "non-standard C++ exception");
+        return -1;
+    }
+}
+
+/// `LocalStorageManager.initStorageManagerNativeV3(AssetManager, String, String)`
+int cordial_storage_init(void* fn, const char* a, const char* b, char* err, size_t err_len) {
+    using Call = void (*)(JNIEnv*, jclass, jobject, jstring, jstring);
+    auto* env = cordial::process_env();
+    if (!fn || !env) {
+        snprintf(err, err_len, "no JavaVM, or the storage native is not exported");
+        return -1;
+    }
+    try {
+        auto cls = env->GetClass("com/roblox/client/LocalStorageManager");
+        auto assets = std::make_shared<jnivm::Object>();
+        auto s1 = cordial::S_pub(a);
+        auto s2 = cordial::S_pub(b);
+        reinterpret_cast<Call>(fn)(env->GetJNIEnv(),
+                                   reinterpret_cast<jclass>(cls.get()),
+                                   reinterpret_cast<jobject>(assets.get()),
+                                   reinterpret_cast<jstring>(s1.get()),
+                                   reinterpret_cast<jstring>(s2.get()));
+        return 0;
+    } catch (const std::exception& e) {
+        snprintf(err, err_len, "%s", e.what());
+        return -1;
+    } catch (...) {
+        snprintf(err, err_len, "non-standard C++ exception");
+        return -1;
+    }
+}
+
+/// A native taking only `(JNIEnv*, jobject)` — `nativeRetryInit`.
+int cordial_call_bare(void* fn, char* err, size_t err_len) {
+    using Call = void (*)(JNIEnv*, jobject);
+    auto* env = cordial::process_env();
+    if (!fn || !env) {
+        snprintf(err, err_len, "no JavaVM, or the native is not exported");
+        return -1;
+    }
+    try {
+        auto obj = std::make_shared<jnivm::Object>();
+        reinterpret_cast<Call>(fn)(env->GetJNIEnv(), reinterpret_cast<jobject>(obj.get()));
         return 0;
     } catch (const std::exception& e) {
         snprintf(err, err_len, "%s", e.what());

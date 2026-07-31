@@ -320,6 +320,59 @@ pub mod game_activity {
         }
     }
 
+    extern "C" {
+        fn cordial_asset_manager_init(f: *mut c_void, err: *mut c_char, n: usize) -> c_int;
+        fn cordial_storage_init(
+            f: *mut c_void,
+            a: *const c_char,
+            b: *const c_char,
+            err: *mut c_char,
+            n: usize,
+        ) -> c_int;
+        fn cordial_call_bare(f: *mut c_void, err: *mut c_char, n: usize) -> c_int;
+    }
+
+    fn take_err(err: Vec<u8>) -> String {
+        let end = err.iter().position(|&b| b == 0).unwrap_or(err.len());
+        String::from_utf8_lossy(&err[..end]).into_owned()
+    }
+
+    /// `JNIAAssetManagerSetup.initNative` — hands the engine its asset manager.
+    pub fn asset_manager_init(native: *mut c_void) -> Result<(), String> {
+        let mut err = vec![0u8; 512];
+        // SAFETY: `native` is the exported JNI native; `err` is a live buffer.
+        let rc = unsafe {
+            cordial_asset_manager_init(native, err.as_mut_ptr() as *mut c_char, err.len())
+        };
+        if rc == 0 { Ok(()) } else { Err(take_err(err)) }
+    }
+
+    /// `LocalStorageManager.initStorageManagerNativeV3`.
+    pub fn storage_init(native: *mut c_void, a: &str, b: &str) -> Result<(), String> {
+        let ca = CString::new(a).map_err(|e| e.to_string())?;
+        let cb = CString::new(b).map_err(|e| e.to_string())?;
+        let mut err = vec![0u8; 512];
+        // SAFETY: as above; both paths outlive the call.
+        let rc = unsafe {
+            cordial_storage_init(
+                native,
+                ca.as_ptr(),
+                cb.as_ptr(),
+                err.as_mut_ptr() as *mut c_char,
+                err.len(),
+            )
+        };
+        if rc == 0 { Ok(()) } else { Err(take_err(err)) }
+    }
+
+    /// A native taking nothing but the JNI pair — `nativeRetryInit`.
+    pub fn call_bare(native: *mut c_void) -> Result<(), String> {
+        let mut err = vec![0u8; 512];
+        // SAFETY: as above.
+        let rc = unsafe { cordial_call_bare(native, err.as_mut_ptr() as *mut c_char, err.len()) };
+        if rc == 0 { Ok(()) } else { Err(take_err(err)) }
+    }
+
     pub fn initialize(
         native: *mut c_void,
         internal_path: &str,

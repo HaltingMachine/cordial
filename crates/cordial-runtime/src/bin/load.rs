@@ -317,10 +317,39 @@ fn main() -> ExitCode {
                                         let (width, height, format) = w.geometry();
                                         cordial_runtime::android::config::set_screen(width, height);
                                         println!("  window {width}x{height}");
-                                        // The engine renders its own app shell,
-                                        // so it needs the app bridge before it
-                                        // will draw anything at all.
                                         cordial_runtime::android::config::set_screen(width, height);
+
+                                        // The engine's own init sequence, in the
+                                        // order MainGameActivity.onCreate runs it.
+                                        // Without the asset manager the engine
+                                        // cannot read its own content, which is
+                                        // why nothing downstream ever starts —
+                                        // no app shell, no network, no frame.
+                                        let files = files.clone();
+                                        let steps: Vec<(&str, Box<dyn Fn(*mut std::ffi::c_void) -> Result<(), String>>)> = vec![
+                                            (
+                                                "Java_com_roblox_client_JNIAAssetManagerSetup_initNative",
+                                                Box::new(linker::game_activity::asset_manager_init),
+                                            ),
+                                            (
+                                                "Java_com_roblox_client_LocalStorageManager_initStorageManagerNativeV3",
+                                                Box::new(move |f| {
+                                                    linker::game_activity::storage_init(f, &files, &files)
+                                                }),
+                                            ),
+                                        ];
+                                        for (name, run) in steps {
+                                            match lib.symbol(name) {
+                                                None => println!("  {name} not exported"),
+                                                Some(f) => match run(f) {
+                                                    Ok(()) => println!(
+                                                        "  {} ok",
+                                                        name.rsplit('_').next().unwrap_or(name)
+                                                    ),
+                                                    Err(e) => println!("  {name} failed: {e}"),
+                                                },
+                                            }
+                                        }
                                         if let Some(p) = lib.symbol(
                                             "Java_com_roblox_client_startup_MainGameActivity_nativeAppBridgeSetInitParams",
                                         ) {
@@ -332,6 +361,17 @@ fn main() -> ExitCode {
                                             ) {
                                                 Ok(()) => println!("  init params set"),
                                                 Err(e) => println!("  init params failed: {e}"),
+                                            }
+                                        }
+
+                                        // Kicks the engine's initialisation once
+                                        // everything it depends on is in place.
+                                        if let Some(f) = lib.symbol(
+                                            "Java_com_roblox_client_startup_MainGameActivity_nativeRetryInit",
+                                        ) {
+                                            match linker::game_activity::call_bare(f) {
+                                                Ok(()) => println!("  retryInit ok"),
+                                                Err(e) => println!("  retryInit failed: {e}"),
                                             }
                                         }
 
