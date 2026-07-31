@@ -152,6 +152,35 @@ public:
     }
 };
 
+/// `java.util.Locale`
+///
+/// Reached as `configuration.getLocales().get(0)`. The engine reads all four
+/// components; script and variant are legitimately empty for a plain en-US.
+class JavaLocale : public Object {
+public:
+    std::shared_ptr<String> getLanguage(ENV*) { return S("en"); }
+    std::shared_ptr<String> getCountry(ENV*) { return S("US"); }
+    std::shared_ptr<String> getScript(ENV*) { return S(""); }
+    std::shared_ptr<String> getVariant(ENV*) { return S(""); }
+    std::shared_ptr<String> toString(ENV*) { return S("en_US"); }
+
+    static std::shared_ptr<JavaLocale> Create(ENV* env) {
+        auto p = std::make_shared<JavaLocale>();
+        to_jni(env, p);
+        return p;
+    }
+
+    static void Register(ENV* env) {
+        env->GetClass<JavaLocale>("java/util/Locale");
+        auto c = env->GetClass("java/util/Locale");
+        c->HookInstanceFunction(env, "getLanguage", &JavaLocale::getLanguage);
+        c->HookInstanceFunction(env, "getCountry", &JavaLocale::getCountry);
+        c->HookInstanceFunction(env, "getScript", &JavaLocale::getScript);
+        c->HookInstanceFunction(env, "getVariant", &JavaLocale::getVariant);
+        c->HookInstanceFunction(env, "toString", &JavaLocale::toString);
+    }
+};
+
 /// `android.os.LocaleList`
 ///
 /// `Configuration.getLocales()` returns one and the engine immediately asks it
@@ -160,6 +189,7 @@ class LocaleList : public Object {
 public:
     jint size(ENV*) { return 1; }
     jboolean isEmpty(ENV*) { return false; }
+    std::shared_ptr<JavaLocale> get(ENV* env, jint) { return JavaLocale::Create(env); }
 
     static std::shared_ptr<LocaleList> Create(ENV* env) {
         auto p = std::make_shared<LocaleList>();
@@ -172,6 +202,7 @@ public:
         auto c = env->GetClass("android/os/LocaleList");
         c->HookInstanceFunction(env, "size", &LocaleList::size);
         c->HookInstanceFunction(env, "isEmpty", &LocaleList::isEmpty);
+        c->HookInstanceFunction(env, "get", &LocaleList::get);
     }
 };
 
@@ -577,6 +608,7 @@ static void hook_activity_resources(ENV* env, const char* klass) {
 }
 
 void register_init_params_classes(ENV* env) {
+    JavaLocale::Register(env);
     LocaleList::Register(env);
     JavaMap::Register(env);
     NativeFlagsInitResult::Register(env);
