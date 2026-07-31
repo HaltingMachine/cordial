@@ -340,6 +340,14 @@ pub mod game_activity {
             n: usize,
         ) -> c_int;
         fn cordial_appbridge_call_bare(f: *mut c_void, err: *mut c_char, n: usize) -> c_int;
+        fn cordial_appbridge_start_app(
+            f: *mut c_void,
+            assets: *const c_char,
+            w: c_int,
+            h: c_int,
+            err: *mut c_char,
+            n: usize,
+        ) -> c_int;
     }
 
     fn take_err(err: Vec<u8>) -> String {
@@ -415,6 +423,30 @@ pub mod game_activity {
         // SAFETY: as above.
         let rc = unsafe {
             cordial_appbridge_call_bare(native, err.as_mut_ptr() as *mut c_char, err.len())
+        };
+        if rc == 0 { Ok(()) } else { Err(take_err(err)) }
+    }
+
+    /// `nativeAppBridgeV2StartAppWithParams` — the call that hands the engine
+    /// its window. Everything before it is setup.
+    pub fn appbridge_start_app(
+        native: *mut c_void,
+        assets: &str,
+        width: i32,
+        height: i32,
+    ) -> Result<(), String> {
+        let a = CString::new(assets).map_err(|e| e.to_string())?;
+        let mut err = vec![0u8; 512];
+        // SAFETY: `native` is the exported JNI native; `a` outlives the call.
+        let rc = unsafe {
+            cordial_appbridge_start_app(
+                native,
+                a.as_ptr(),
+                width,
+                height,
+                err.as_mut_ptr() as *mut c_char,
+                err.len(),
+            )
         };
         if rc == 0 { Ok(()) } else { Err(take_err(err)) }
     }

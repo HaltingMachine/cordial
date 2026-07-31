@@ -1,0 +1,12 @@
+[FLog::Output] All use of Roblox services must comply with Roblox's Terms of Use, Privacy Policy, Community Standards, and applicable laws. Processing of User personal information is limited to the purposes expressly permitted therein.
+2026-07-31T10:41:50.036Z,0.036924,65c8aa00,6,Info [FLog::JNIAppBridge] nativeAppBridgeV2Init:
+2026-07-31T10:41:50.037Z,0.037124,1cd2a6c0,6 [FLog::SingleSurfaceApp] initializeWithAppStarter
+2026-07-31T10:41:50.037Z,0.037136,1cd2a6c0,6 [FLog::SingleSurfaceApp] initializeSingleton
+2026-07-31T10:41:50.037Z,0.037228,1cd2a6c0,6 [FLog::Output] setAssetFolder 
+2026-07-31T10:41:50.037Z,0.037296,1cd2a6c0,6 [FLog::Error] Error: The path '' does not exist
+2026-07-31T10:41:50.037Z,0.037467,65c8aa00,6,Info [FLog::JNIAppBridge] nativeAppBridgeV2StartApp:
+2026-07-31T10:41:50.037Z,0.037509,1cd2a6c0,6 [FLog::SingleSurfaceApp] startLuaApp: (stage:None).
+2026-07-31T10:41:50.037Z,0.037512,1cd2a6c0,6 [FLog::SingleSurfaceApp] returnToLuaApp: (stage:None).
+2026-07-31T10:41:50.037Z,0.037514,1cd2a6c0,6 [FLog::SingleSurfaceApp] setStage: (stage:LuaApp)
+2026-07-31T10:41:50.037Z,0.037738,1cd2a6c0,6 [FLog::SingleSurfaceApp] userDidLogin
+2026-07-31T10:41:50.037Z,0.037742,1cd2a6c0,6 [FLog::SingleSurfaceApp] applyLocale

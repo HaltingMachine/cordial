@@ -20,6 +20,7 @@
 #include <string>
 
 namespace cordial {
+class Surface;
 
 /// Convert a C++ object into a `jobject` the way libjnivm expects.
 ///
@@ -196,12 +197,61 @@ public:
     }
 };
 
-class InitParams;
+/// `com.roblox.engine.jni.autovalue.StartAppParams`
+///
+/// What actually delivers the surface. `nativeAppBridgeV2StartAppWithParams`
+/// takes one of these and its `surface` field is the window the engine renders
+/// into — a completely separate path from AGDK's `onSurfaceCreatedNative`
+/// lifecycle, which disassembly shows structurally cannot produce a frame here.
+class StartAppParams : public Object {
+public:
+    std::shared_ptr<String> appStarterPlace, appStarterScript, selectedTheme, username;
+    std::shared_ptr<PlatformParams> platformParams;
+    std::shared_ptr<Object> surface;
+    std::shared_ptr<Object> vrContext;
+    jlong appUserId = 0;
+    jboolean isUnder13 = false;
+    jint membershipType = 0;
+
+    static std::shared_ptr<StartAppParams> Create(const char* assets, int width, int height,
+                                                  std::shared_ptr<Object> surface) {
+        auto p = std::make_shared<StartAppParams>();
+        // Empty starter place and script mean "the default app shell" rather than
+        // a specific experience. Naming one here would launch straight into a
+        // game, which is not what a cold start does.
+        p->appStarterPlace = S("");
+        p->appStarterScript = S("");
+        p->selectedTheme = S("Dark");
+        p->username = S("");
+        p->platformParams = PlatformParams::Create(assets, width, height);
+        p->surface = std::move(surface);
+        p->appUserId = 0;
+        p->isUnder13 = false;
+        p->membershipType = 0;
+        return p;
+    }
+
+    static void Register(ENV* env) {
+        env->GetClass<StartAppParams>("com/roblox/engine/jni/autovalue/StartAppParams");
+        auto c = env->GetClass("com/roblox/engine/jni/autovalue/StartAppParams");
+#define F(name) c->HookInstance(env, #name, &StartAppParams::name)
+        F(appStarterPlace); F(appStarterScript); F(selectedTheme); F(username);
+        F(platformParams); F(surface); F(vrContext); F(appUserId); F(isUnder13);
+        F(membershipType);
+#undef F
+#define G(name) c->HookInstanceGetterFunction(env, #name, &StartAppParams::name)
+        G(appStarterPlace); G(appStarterScript); G(selectedTheme); G(username);
+        G(platformParams); G(surface); G(vrContext); G(appUserId); G(isUnder13);
+        G(membershipType);
+#undef G
+    }
+};
 
 void register_init_params_classes(ENV* env) {
     DeviceParams::Register(env);
     PlatformParams::Register(env);
     InitParams::Register(env);
+    StartAppParams::Register(env);
 }
 
 } // namespace cordial
@@ -404,6 +454,41 @@ int cordial_appbridge_call_bare(void* fn, char* err, size_t err_len) {
     try {
         auto cls = env->GetClass("com/roblox/engine/jni/NativeGLInterface");
         reinterpret_cast<Call>(fn)(env->GetJNIEnv(), (jobject)cordial::to_jni(env, cls));
+        return 0;
+    } catch (const std::exception& e) {
+        snprintf(err, err_len, "%s", e.what());
+        return -1;
+    } catch (...) {
+        snprintf(err, err_len, "non-standard C++ exception");
+        return -1;
+    }
+}
+
+} // extern "C"
+
+extern "C" {
+
+/// `NativeGLInterface.nativeAppBridgeV2StartAppWithParams(StartAppParams)`
+///
+/// The call that hands the engine its window. Everything before it is setup.
+int cordial_appbridge_start_app(void* fn, const char* assets, int width, int height, char* err,
+                                size_t err_len) {
+    using Call = void (*)(JNIEnv*, jobject, jobject);
+    auto* env = cordial::process_env();
+    if (!fn || !env) {
+        snprintf(err, err_len, "no JavaVM, or StartAppWithParams is not exported");
+        return -1;
+    }
+    try {
+        auto cls = env->GetClass("com/roblox/engine/jni/NativeGLInterface");
+        // Reuses the android/view/Surface type registered in game_activity.cpp —
+        // registering a second C++ class for the same Java name makes libjnivm throw.
+        auto surface = std::static_pointer_cast<jnivm::Object>(
+            std::make_shared<jnivm::Object>());
+        auto params = cordial::StartAppParams::Create(assets, width, height, surface);
+        reinterpret_cast<Call>(fn)(env->GetJNIEnv(),
+                                   (jobject)cordial::to_jni(env, cls),
+                                   (jobject)cordial::to_jni(env, params));
         return 0;
     } catch (const std::exception& e) {
         snprintf(err, err_len, "%s", e.what());

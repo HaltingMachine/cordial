@@ -388,6 +388,28 @@ fn main() -> ExitCode {
                                             }
                                         }
 
+                                        // Globals first. Disassembly of the
+                                        // ActivityNativeMain chain gives this
+                                        // order, and calling StartLuaAppDM
+                                        // without them crashes on a null JNIEnv
+                                        // the engine expects to have been stored
+                                        // by the globals init.
+                                        for name in [
+                                            "Java_com_roblox_engine_jni_NativeGLInterface_nativeGameGlobalInit",
+                                            "Java_com_roblox_engine_jni_NativeGLInterface_nativeUpdateAdapterInit",
+                                        ] {
+                                            match lib.symbol(name) {
+                                                None => println!("  {name} not exported"),
+                                                Some(f) => match linker::game_activity::appbridge_call_bare(f) {
+                                                    Ok(()) => println!(
+                                                        "  {} ok",
+                                                        name.rsplit('_').next().unwrap_or(name)
+                                                    ),
+                                                    Err(e) => println!("  {name} failed: {e}"),
+                                                },
+                                            }
+                                        }
+
                                         // The app bridge proper. ActivitySplash —
                                         // the only launcher Activity — defaults
                                         // to ActivityNativeMain, not the AGDK
@@ -404,12 +426,26 @@ fn main() -> ExitCode {
                                                 Err(e) => println!("  app bridge init failed: {e}"),
                                             }
                                         }
+                                        if std::env::var_os("CORDIAL_SKIP_LUA_DM").is_none() {
                                         if let Some(f) = lib.symbol(
                                             "Java_com_roblox_engine_jni_NativeGLInterface_nativeAppBridgeStartLuaAppDM",
                                         ) {
                                             match linker::game_activity::appbridge_call_bare(f) {
                                                 Ok(()) => println!("  Lua app DataModel started"),
                                                 Err(e) => println!("  StartLuaAppDM failed: {e}"),
+                                            }
+                                        }
+                                        }
+
+                                        // And the call that delivers the surface.
+                                        if let Some(f) = lib.symbol(
+                                            "Java_com_roblox_engine_jni_NativeGLInterface_nativeAppBridgeV2StartAppWithParams",
+                                        ) {
+                                            match linker::game_activity::appbridge_start_app(
+                                                f, &apk_path, width, height,
+                                            ) {
+                                                Ok(()) => println!("  app started with surface"),
+                                                Err(e) => println!("  StartApp failed: {e}"),
                                             }
                                         }
 
