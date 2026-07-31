@@ -75,8 +75,16 @@ host against the host GPU — the shape Cordial is aiming at. Its *sequencing* i
 therefore more relevant ground truth than the Waydroid capture, particularly for
 the EGL/surface handshake the futex is likely waiting on.
 
-Worth doing, and worth recording in the commit which of the two kinds of
-observation produced any given fact.
+**The rule is uniform, and applies to Roblox exactly as it does to Sober.**
+Roblox is proprietary too. Sober was built by observing it, and nobody treats
+Sober as tainted for that — it is ordinary interoperability work. Earlier notes
+here implied Sober needed extra caution *because* it is proprietary; that was
+inconsistent, since the same would then condemn Sober itself, and Cordial's own
+Waydroid capture of Roblox along with it.
+
+One rule, applied to any binary: **observe freely, do not transcribe.**
+
+Worth recording in the commit which kind of observation produced any given fact.
 
 ## The blocker, as precisely as it is known
 
