@@ -17,6 +17,7 @@ pub fn window_title(backend: &str) -> String {
 }
 
 pub mod android;
+pub mod client_settings;
 pub mod bionic;
 pub mod stubs;
 pub mod symtab;

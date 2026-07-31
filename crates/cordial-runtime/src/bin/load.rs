@@ -490,6 +490,12 @@ fn main() -> ExitCode {
                                         if let Some(f) = lib.symbol(
                                             "Java_com_roblox_client_flags_FlagJniInterface_nativeInitializeNativeFlags",
                                         ) {
+                                            // Flag NAMES, not the settings
+                                            // document — the engine loads
+                                            // values itself. Feeding the
+                                            // document here was a bug once
+                                            // already, so it is deliberately
+                                            // NOT client_settings::load().
                                             let settings = opt
                                                 .client_settings
                                                 .as_deref()
@@ -585,13 +591,46 @@ fn main() -> ExitCode {
                                         if let Some(f) = lib.symbol(
                                             "Java_com_roblox_engine_jni_NativeGLInterface_nativeInitClientSettings",
                                         ) {
-                                            let settings = opt
-                                                .client_settings
-                                                .as_deref()
-                                                .and_then(|p| std::fs::read_to_string(p).ok())
+                                            // Cordial is the host app, so
+                                            // Cordial does the fetch the app
+                                            // would do. Cached on disk, so a
+                                            // repeat launch is not a repeat
+                                            // request.
+                                            let settings =
+                                                cordial_runtime::client_settings::load(
+                                                    opt.client_settings.as_deref(),
+                                                )
                                                 .unwrap_or_default();
+                                            println!(
+                                                "  client settings: {} bytes",
+                                                settings.len()
+                                            );
+                                            // Which of the three strings is the
+                                            // settings document is not
+                                            // established — the descriptor is
+                                            // (String,String,String)I and the
+                                            // engine's only clue is a
+                                            // "ParseFailure on overrides" log
+                                            // string, so one of the others is
+                                            // an overrides document. Selectable
+                                            // rather than guessed, so the
+                                            // question can be settled by
+                                            // running it.
+                                            let pos = std::env::var("CORDIAL_CS_POS")
+                                                .ok()
+                                                .and_then(|v| v.parse::<u8>().ok())
+                                                .unwrap_or(0);
+                                            let (a, b, c) = match pos {
+                                                1 => ("", settings.as_str(), ""),
+                                                2 => ("", "", settings.as_str()),
+                                                // Established by experiment:
+                                                // the document goes first, and
+                                                // 0 comes back. See
+                                                // client_settings.rs.
+                                                _ => (settings.as_str(), "", ""),
+                                            };
                                             match linker::game_activity::init_client_settings(
-                                                f, "", &settings, "",
+                                                f, a, b, c,
                                             ) {
                                                 Ok(code) => println!(
                                                     "  nativeInitClientSettings -> {code}"
