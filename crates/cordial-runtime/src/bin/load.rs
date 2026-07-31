@@ -16,6 +16,7 @@ struct Options {
     apk: Option<String>,
     read_asset: Option<String>,
     client_settings: Option<String>,
+    flag_overrides: Option<String>,
     gl_probe: bool,
     window_seconds: Option<u64>,
     game_activity: bool,
@@ -35,6 +36,10 @@ usage: cordial-load --lib-dir <dir> [options]
   --read-asset <p>  read one asset through the AAsset API and report its size
   --client-settings <f>  newline-free list of flag names to pre-cache.
                     NOT the ClientSettings document — the engine loads values itself
+  --flag-overrides <f>  JSON of FastFlag overrides, passed to
+                    nativePreloadFlagOverrides. Setting FLog* channels here turns
+                    on the engine's own logging, which is the only view into what
+                    it thinks is wrong
   --gl-probe        bring up GLES2 through the symbol table and read a pixel back
   --window <secs>   GL PROBE ONLY: open a window and draw a gradient for <secs>.
                     This is Cordial's own test pattern, not Roblox rendering.
@@ -63,6 +68,7 @@ fn parse() -> Result<Options, String> {
         apk: None,
         read_asset: None,
         client_settings: None,
+        flag_overrides: None,
         gl_probe: false,
         window_seconds: None,
         game_activity: false,
@@ -80,6 +86,12 @@ fn parse() -> Result<Options, String> {
             "--apk" => opt.apk = Some(args.next().ok_or("--apk needs a path")?),
             "--read-asset" => {
                 opt.read_asset = Some(args.next().ok_or("--read-asset needs a name")?)
+            }
+            "--flag-overrides" => {
+                let p = args.next().ok_or("--flag-overrides needs a path")?;
+                opt.flag_overrides = Some(
+                    std::fs::read_to_string(&p).map_err(|e| format!("{p}: {e}"))?,
+                );
             }
             "--client-settings" => {
                 opt.client_settings =

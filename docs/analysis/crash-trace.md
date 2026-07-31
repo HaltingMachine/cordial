@@ -2,6 +2,36 @@
 
 **Status:** the fault is precisely located; its cause is not.
 
+## The faulting object is `SingleSurfaceAppImpl`
+
+Identified by reading its vtable's RTTI at the crash, not by inference:
+
+```
+(lldb) # at the fault, %rbx is the object
+vtable  = *(void**)rbx            = 0x7ffff691aab8
+typeinfo = *(void**)(vtable - 8)  = 0x7ffff691ab30
+name     = *(char**)(typeinfo + 8) -> "20SingleSurfaceAppImpl"
+```
+
+So the engine's single-surface application object holds a null `JNIEnv*` at
+`+0x400` and faults calling `FindClass` through it.
+
+Related types in the binary: `16SingleSurfaceApp`, `17ISingleSurfaceApp`,
+`20SingleSurfaceAppImpl`, and a Lua-side `App.SingleSurfaceAppLayer`. The class
+has its own logging channel, `FLog::SingleSurfaceApp`, with messages including
+`applyLocale`, `destroyLuaApp`, `replaceCurrentDataModel` and `destroy
+controllers` — which is a good map of what it is responsible for.
+
+**This is the single most useful fact for anyone continuing.** The question is no
+longer "what is that struct" but "what initialises `SingleSurfaceAppImpl`'s JNI
+environment, and when".
+
+An attempt to turn on `FLog::SingleSurfaceApp` by passing `FLogSingleSurfaceApp`
+and friends to `nativePreloadFlagOverrides` produced no extra output — either the
+override format is different or FLog is not routed to `__android_log_print` in
+this build. Worth another attempt; the engine narrating itself would be worth
+more than any amount of further disassembly.
+
 ## Verified
 
 The engine faults on its game thread (`thread #4`, named `Main`) at
