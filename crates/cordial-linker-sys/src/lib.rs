@@ -233,7 +233,7 @@ pub mod jni {
 /// exported JNI native directly. The returned handle is what every later
 /// callback carries — surface creation, resize, input.
 pub mod game_activity {
-    use std::ffi::{c_char, c_void, CString};
+    use std::ffi::{c_char, c_int, c_void, CString};
 
     extern "C" {
         fn cordial_game_activity_init(
@@ -244,6 +244,38 @@ pub mod game_activity {
             err: *mut c_char,
             err_len: usize,
         ) -> i64;
+    }
+
+    extern "C" {
+        fn cordial_roblox_call_string(
+            f: *mut c_void,
+            value: *const c_char,
+            err: *mut c_char,
+            err_len: usize,
+        ) -> c_int;
+    }
+
+    /// Call a Roblox native that takes one Java string — `nativeSetAssetPath`,
+    /// `nativePreloadFlagOverrides`.
+    pub fn call_with_string(native: *mut c_void, value: &str) -> Result<(), String> {
+        let v = CString::new(value).map_err(|e| e.to_string())?;
+        let mut err = vec![0u8; 512];
+        // SAFETY: `native` is an exported JNI native with this signature; `v`
+        // outlives the call.
+        let rc = unsafe {
+            cordial_roblox_call_string(
+                native,
+                v.as_ptr(),
+                err.as_mut_ptr() as *mut c_char,
+                err.len(),
+            )
+        };
+        if rc == 0 {
+            Ok(())
+        } else {
+            let end = err.iter().position(|&b| b == 0).unwrap_or(err.len());
+            Err(String::from_utf8_lossy(&err[..end]).into_owned())
+        }
     }
 
     pub fn initialize(

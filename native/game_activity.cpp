@@ -111,7 +111,21 @@ public:
     }
 };
 
+/// `com.roblox.client.startup.MainGameActivity`
+///
+/// Roblox's own Activity, and the `thiz` its startup natives expect. Passing a
+/// `GameActivity` instead is not a near-miss: the native side asks the object
+/// for its class and looks methods up on it, so the wrong type resolves to
+/// nothing and it dereferences the result.
+class MainGameActivity : public Object {
+public:
+    static void Register(ENV* env) {
+        env->GetClass<MainGameActivity>("com/roblox/client/startup/MainGameActivity");
+    }
+};
+
 void register_game_activity_classes(ENV* env) {
+    MainGameActivity::Register(env);
     ClassLoader::Register(env);
     AssetManager::Register(env);
     Configuration::Register(env);
@@ -122,6 +136,35 @@ void register_game_activity_classes(ENV* env) {
 } // namespace cordial
 
 extern "C" {
+
+/// Call a Roblox native taking a single Java string.
+///
+/// On Android these run from `MainGameActivity.onCreate`, *before*
+/// `GameActivity.onCreate` reaches `initializeNativeCode`. Order matters: the
+/// engine reads the asset path during initialisation, so setting it afterwards
+/// is the same as never setting it.
+int cordial_roblox_call_string(void* fn, const char* value, char* err, size_t err_len) {
+    using Call = void (*)(JNIEnv*, jobject, jstring);
+    auto* env = cordial::process_env();
+    if (!fn || !env) {
+        snprintf(err, err_len, "no JavaVM or the native is not exported");
+        return -1;
+    }
+    try {
+        auto activity = std::make_shared<cordial::MainGameActivity>();
+        auto arg = cordial::jstr(value);
+        reinterpret_cast<Call>(fn)(env->GetJNIEnv(),
+                                   reinterpret_cast<jobject>(activity.get()),
+                                   reinterpret_cast<jstring>(arg.get()));
+        return 0;
+    } catch (const std::exception& e) {
+        snprintf(err, err_len, "%s", e.what());
+        return -1;
+    } catch (...) {
+        snprintf(err, err_len, "non-standard C++ exception");
+        return -1;
+    }
+}
 
 /// Call `initializeNativeCode` and return its handle, or 0.
 ///

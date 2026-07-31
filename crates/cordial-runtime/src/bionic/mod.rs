@@ -18,6 +18,8 @@
 
 use std::ffi::{c_char, c_int, c_void, CStr};
 
+pub mod fs;
+pub mod stdio;
 pub mod pthread;
 pub mod trace;
 
@@ -51,6 +53,10 @@ pub fn function_overrides() -> Vec<(&'static str, *mut c_void)> {
     ];
     // Synchronisation primitives whose bionic layout differs from glibc's.
     v.extend(pthread::overrides());
+    // bionic's legacy __sF stdio handles, translated onto glibc's streams.
+    v.extend(stdio::overrides());
+    // Paths Android guarantees and a desktop does not have.
+    v.extend(fs::overrides());
     // Android's liblog — Roblox's own account of what it is doing.
     v.extend(liblog_overrides());
     // A silent abort costs more debugging time than these wrappers cost anything.
@@ -92,6 +98,12 @@ pub fn data_overrides() -> Vec<(&'static str, *mut c_void)> {
 /// function wrapped to remap the pointer onto the host's real stream, which is
 /// only worth building once something is observed using it.
 static LEGACY_SF: [[u8; LEGACY_FILE_SIZE]; 3] = [[0; LEGACY_FILE_SIZE]; 3];
+
+/// Address range of `__sF`, so [`stdio`] can recognise a pointer into it.
+pub fn legacy_sf_range() -> std::ops::Range<usize> {
+    let start = std::ptr::addr_of!(LEGACY_SF) as usize;
+    start..start + LEGACY_FILE_SIZE * 3
+}
 
 /// `sizeof(struct __sFILE)` in pre-M bionic on LP64. Only the total matters: the
 /// array has to span the addresses a legacy caller would compute.

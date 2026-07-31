@@ -278,6 +278,30 @@ fn main() -> ExitCode {
                                 ))
                             )
                         });
+                        // Android runs these from MainGameActivity.onCreate,
+                        // before GameActivity.onCreate reaches
+                        // initializeNativeCode. The engine reads the asset path
+                        // during init, so setting it after would be the same as
+                        // not setting it at all.
+                        let apk = opt.apk.clone().unwrap_or_default();
+                        for (name, value) in [
+                            ("Java_com_roblox_client_startup_MainGameActivity_nativeSetAssetPath",
+                             apk.as_str()),
+                            ("Java_com_roblox_client_startup_MainGameActivity_nativePreloadFlagOverrides",
+                             "{}"),
+                        ] {
+                            match lib.symbol(name) {
+                                None => println!("  {name} is not exported"),
+                                Some(p) => match linker::game_activity::call_with_string(p, value) {
+                                    Ok(()) => println!(
+                                        "  {} ok",
+                                        name.rsplit('_').next().unwrap_or(name)
+                                    ),
+                                    Err(e) => println!("  {name} failed: {e}"),
+                                },
+                            }
+                        }
+
                         println!("\ncalling GameActivity.initializeNativeCode");
                         match linker::game_activity::initialize(f, &files, &files, &files) {
                             Ok(handle) => println!("  native handle {handle:#x}"),
