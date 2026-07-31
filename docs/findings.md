@@ -336,8 +336,10 @@ this took several runs to see; with it, one.
   where the ABI happens to agree. The divergences above are the ones found *so
   far*, by running until something broke; the file, directory and signal
   structures have not been exercised at all yet because nothing has opened a file.
-- **85 symbols remain stubbed**, almost all of `libandroid.so`, `libmediandk.so`
-  and `liblog.so` — the Android APIs proper, which is Phase 2's work.
+- **49 symbols remain stubbed**, down from 85. `libandroid.so` is complete
+  (31/31): assets, configuration, looper and window. What is left is
+  `libmediandk` (33 — video decode, off the startup path), `libjnigraphics` (3)
+  and 13 libc residuals.
 
 ## 7. Sources
 
