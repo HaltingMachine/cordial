@@ -189,12 +189,18 @@ fn as_window(p: *mut c_void) -> Option<&'static HostWindow> {
 }
 
 extern "C" fn native_window_from_surface(_env: *mut c_void, _surface: *mut c_void) -> *mut c_void {
-    super::trace(format_args!("ANativeWindow_fromSurface"));
     // Cordial's Java `Surface` has no state of its own: there is one window and
     // the Surface object exists only so `onSurfaceCreatedNative`'s signature can
     // be satisfied. Returning the single window is therefore correct rather than
     // a simplification.
-    handle()
+    let w = handle();
+    // The returned pointer is traced, not just the call. A null here means the
+    // engine was handed nothing to render into and every later step will fail
+    // for a reason that looks unrelated — and "the Surface has no native peer"
+    // is exactly the kind of plausible diagnosis that has been wrong before on
+    // this engine. Printing the value settles it instead of inviting the guess.
+    super::trace(format_args!("ANativeWindow_fromSurface -> {w:?}"));
+    w
 }
 
 extern "C" fn native_window_acquire(window: *mut c_void) {

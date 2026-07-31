@@ -317,3 +317,61 @@ it is not a fix and should not be counted as progress.
 
 **How to judge a fix from here:** not by how far Cordial's own log gets, which
 is a race. By the crash address moving, and by the flags verdict line changing.
+
+---
+
+# The surface is fine — a disconfirmed fix
+
+An RTTI/breakpoint trace of the second crash site (`libroblox+0x240462b`, fault
+address `0x140`) established the object graph precisely:
+
+```
+SingleSurfaceApp        (static facade, RTTI "16SingleSurfaceApp")
+  +0x20 -> SingleSurfaceAppImpl   (RTTI "20SingleSurfaceAppImpl", same object as before)
+             +0x400 = 0          (the earlier crash's field)
+             +0x410 = .bss addr  (POPULATED)
+             +0x430 = 0          (this crash's field: null `this`)
+```
+
+The useful part is `+0x410`. A *neighbouring* slot in the same
+`+0x3c0..+0x440` block — the block the constructor zeroes as one unit — is
+populated. So that block is a **table of independent delegate pointers**, and
+only some get filled during a run. This is selective failure, not an
+uninitialised lump, which means each null slot has its own cause and none of
+them is evidence about the others.
+
+## The proposed fix was wrong
+
+The accompanying inference was that `AppSurface` (`native/init_params.cpp`) is a
+bare typed placeholder for `android.view.Surface` with no native window behind
+it, so the engine cannot resolve `StartAppParams.surface` into a real window and
+leaves the delegate null. The recommendation was to give it a real native peer.
+
+**Disconfirmed by running it.** With `CORDIAL_ANDROID_TRACE=1`:
+
+```
+[android] ANativeWindow_fromSurface -> 0x55fd52fb4e18
+```
+
+The engine does call `ANativeWindow_fromSurface` on that Surface, and Cordial
+returns a real, non-null `ANativeWindow` backed by the open X11 window. The
+surface handoff works. Backing `AppSurface` with "a real native peer" would have
+been effort spent on a component that is already correct.
+
+This is the seventh confident diagnosis on this binary to fail on contact, and
+it failed the same way as the others: the reasoning was sound, the code it
+described really is a placeholder, and the conclusion still did not hold —
+because the placeholder is sufficient. `ANativeWindow_fromSurface` is Cordial's
+own implementation, so the Java `Surface` never needed state; the window is
+resolved on our side regardless of what the object contains.
+
+The trace now prints the returned pointer, not just the call, so this specific
+question can never again be answered by inference.
+
+## What it leaves
+
+The engine takes the window and then does nothing with it — no
+`setBuffersGeometry`, no `getWidth`/`getHeight`, no EGL. It has a valid window
+and stops anyway, which puts the remaining suspicion back on engine *state*
+rather than on the surface: most likely the client settings it is still waiting
+for.
