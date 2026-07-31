@@ -748,6 +748,27 @@ fn main() -> ExitCode {
                                             println!("  activity lifecycle: {fired}/9 fired");
                                         }
 
+                                        // `CORDIAL_AGDK_ONLY=1` skips the whole
+                                        // Roblox-specific App Bridge chain below
+                                        // (nativeGameGlobalInit through
+                                        // nativeAppBridgeV2StartAppWithParams) so
+                                        // the raw AGDK `GameActivity` surface
+                                        // lifecycle can be exercised on its own,
+                                        // without the App Bridge's own
+                                        // known-crashing `SingleSurfaceAppImpl`
+                                        // null-pointer fault (see
+                                        // docs/analysis/crash-trace.md) killing
+                                        // the process before the AGDK callbacks
+                                        // below ever run. This isolates "does the
+                                        // AGDK path alone provoke new
+                                        // ANativeWindow_*/EGL calls" from that
+                                        // unrelated bug.
+                                        let agdk_only = std::env::var_os("CORDIAL_AGDK_ONLY").is_some();
+                                        if agdk_only {
+                                            println!("  CORDIAL_AGDK_ONLY: skipping the App Bridge chain");
+                                        }
+                                        let apk_path = asset_folder(&opt.apk);
+                                        if !agdk_only {
                                         // Globals first. Disassembly of the
                                         // ActivityNativeMain chain gives this
                                         // order, and calling StartLuaAppDM
@@ -775,7 +796,6 @@ fn main() -> ExitCode {
                                         // to ActivityNativeMain, not the AGDK
                                         // MainGameActivity, and this is the chain
                                         // that actually brings the client up.
-                                        let apk_path = asset_folder(&opt.apk);
                                         if let Some(f) = lib.symbol(
                                             "Java_com_roblox_engine_jni_NativeGLInterface_nativeAppBridgeV2InitWithParams",
                                         ) {
@@ -797,66 +817,180 @@ fn main() -> ExitCode {
                                         }
                                         }
 
-                                        // And the call that delivers the surface.
-                                        if let Some(f) = lib.symbol(
-                                            "Java_com_roblox_engine_jni_NativeGLInterface_nativeAppBridgeV2StartAppWithParams",
-                                        ) {
-                                            match linker::game_activity::appbridge_start_app(
-                                                f, &apk_path, width, height,
-                                            ) {
-                                                Ok(()) => println!("  app started with surface"),
-                                                Err(e) => println!("  StartApp failed: {e}"),
-                                            }
-                                        }
+                                        } // !agdk_only
 
-                                        match linker::game_activity::start(
-                                            handle, width, height, format,
-                                        ) {
-                                            Ok(()) => {
-                                                println!("  surface handed to the engine");
-                                                let secs = opt.run_seconds;
-                                                println!("  pumping the looper for {secs}s");
-                                                // Android's UI thread runs the
-                                                // message loop; AGDK put its
-                                                // pipes on this thread's looper.
-                                                cordial_runtime::android::looper::pump(
-                                                    std::time::Duration::from_secs(secs),
-                                                );
-                                                if std::env::var_os("CORDIAL_COUNT_GL").is_some() {
-                                                    // What each thread is blocked on. A game thread
-                                                    // waiting on a socket, a futex, or nothing at all
-                                                    // are three different problems.
-                                                    println!("\n  threads:");
-                                                    if let Ok(dir) = std::fs::read_dir("/proc/self/task") {
-                                                        for e in dir.flatten() {
-                                                            let p = e.path();
-                                                            let name = std::fs::read_to_string(p.join("comm"))
-                                                                .unwrap_or_default().trim().to_string();
-                                                            let wchan = std::fs::read_to_string(p.join("wchan"))
-                                                                .unwrap_or_default().trim().to_string();
-                                                            let state = std::fs::read_to_string(p.join("stat"))
-                                                                .ok()
-                                                                .and_then(|s| s.rsplit(')').next()
-                                                                    .and_then(|r| r.split_whitespace().next())
-                                                                    .map(str::to_string))
-                                                                .unwrap_or_default();
-                                                            println!("    {name:<18} state={state:<2} wchan={wchan}");
-                                                        }
-                                                    }
-                                                    println!(
-                                                        "  looper polls: {}",
-                                                        cordial_runtime::android::looper::POLLS
-                                                            .load(std::sync::atomic::Ordering::Relaxed)
-                                                    );
-                                                    println!("\n  graphics calls Roblox made:");
-                                                    for (name, n) in
-                                                        cordial_runtime::android::glcount::report()
-                                                    {
-                                                        println!("    {name:<24} {n}");
+                                        // From here on, everything that can
+                                        // reach into Roblox's own blocking code
+                                        // (the App Bridge's
+                                        // nativeAppBridgeV2StartAppWithParams,
+                                        // and every AGDK GameActivity surface
+                                        // callback) runs on a SEPARATE thread,
+                                        // while THIS thread — the one that
+                                        // prepared the looper AGDK/the engine's
+                                        // internals register their fds and
+                                        // pipes on — does nothing but pump it,
+                                        // continuously, for the whole run.
+                                        //
+                                        // Runtime evidence (lldb, ASLR
+                                        // disabled) is why: at the moment the
+                                        // process previously died, this exact
+                                        // driving thread was not crashed and
+                                        // not returned — it was parked in a
+                                        // blocking `futex(FUTEX_WAIT_BITSET)`
+                                        // syscall (rdi=futex word, rsi=0x89,
+                                        // r10=NULL timeout — an unbounded wait)
+                                        // several frames deep inside
+                                        // `cordial_appbridge_start_app`
+                                        // (load.rs:824 in the old, sequential
+                                        // version), while a *different* thread
+                                        // named `Main` sat in
+                                        // `cordial_runtime::android::looper::
+                                        // looper_poll_once`'s `epoll_wait(-1,
+                                        // ...)` — alive and waiting, not the
+                                        // "already exited" AGDK worker thread
+                                        // disassembly predicted. One thread
+                                        // blocked without pumping, one pumping
+                                        // with nothing to service it: exactly
+                                        // Android's "the UI thread must not
+                                        // block, because it is also the thread
+                                        // that drains the queue" hazard.
+                                        // Un-inverting that — driving from a
+                                        // worker thread, pumping from this one
+                                        // — is the concrete fix that hazard
+                                        // implies, not a guess.
+                                        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+                                        let apk_path_worker = apk_path.clone();
+                                        std::thread::spawn(move || {
+                                            if !agdk_only {
+                                                // And the call that delivers the surface.
+                                                if let Some(f) = lib.symbol(
+                                                    "Java_com_roblox_engine_jni_NativeGLInterface_nativeAppBridgeV2StartAppWithParams",
+                                                ) {
+                                                    match linker::game_activity::appbridge_start_app(
+                                                        f, &apk_path_worker, width, height,
+                                                    ) {
+                                                        Ok(()) => println!("  app started with surface"),
+                                                        Err(e) => println!("  StartApp failed: {e}"),
                                                     }
                                                 }
                                             }
-                                            Err(e) => println!("  lifecycle failed: {e}"),
+
+                                            // The AGDK `GameActivity` surface
+                                            // lifecycle, driven step by step in
+                                            // Android's real order. No pumping
+                                            // *here* any more — this thread does
+                                            // not own the looper the engine's fds
+                                            // are registered on, so a pump call
+                                            // made here would only spin up a
+                                            // second, empty, thread-local looper
+                                            // and service nothing. The real
+                                            // pumping happens concurrently on the
+                                            // thread that spawned this one.
+                                            for (label, step) in [
+                                                ("onStartNative", "onStartNative"),
+                                                ("onResumeNative", "onResumeNative"),
+                                            ] {
+                                                match linker::game_activity::lifecycle_handle_only(handle, step) {
+                                                    Ok(()) => println!("  {label} ok"),
+                                                    Err(e) => println!("  {label} failed: {e}"),
+                                                }
+                                            }
+
+                                            match linker::game_activity::surface_created(handle) {
+                                                Ok(()) => println!("  onSurfaceCreatedNative ok"),
+                                                Err(e) => println!("  onSurfaceCreatedNative failed: {e}"),
+                                            }
+
+                                            match linker::game_activity::surface_changed(handle, format, width, height) {
+                                                Ok(()) => println!(
+                                                    "  onSurfaceChangedNative(format={format}, {width}x{height}) ok"
+                                                ),
+                                                Err(e) => println!("  onSurfaceChangedNative failed: {e}"),
+                                            }
+
+                                            match linker::game_activity::surface_redraw_needed(handle) {
+                                                Ok(()) => println!("  onSurfaceRedrawNeededNative ok"),
+                                                Err(e) => println!("  onSurfaceRedrawNeededNative failed: {e}"),
+                                            }
+
+                                            match linker::game_activity::window_focus_changed(handle, true) {
+                                                Ok(()) => println!("  onWindowFocusChangedNative(true) ok"),
+                                                Err(e) => println!("  onWindowFocusChangedNative failed: {e}"),
+                                            }
+
+                                            match linker::game_activity::lifecycle_handle_only(
+                                                handle, "onWindowInsetsChangedNative",
+                                            ) {
+                                                Ok(()) => println!("  onWindowInsetsChangedNative ok"),
+                                                Err(e) => println!("  onWindowInsetsChangedNative failed: {e}"),
+                                            }
+
+                                            println!("  driving thread: done delivering the sequence");
+                                            let _ = done_tx.send(());
+                                            // If any call above blocked forever,
+                                            // this thread simply never gets
+                                            // here — which is itself the
+                                            // observation, and the process exits
+                                            // via `_exit` regardless of whether
+                                            // this thread is still parked.
+                                        });
+
+                                        let secs = opt.run_seconds;
+                                        println!("  pumping the looper for {secs}s (concurrently with the driving thread)");
+                                        // Android's UI thread runs the message
+                                        // loop; AGDK put its pipes on this
+                                        // thread's looper, and this thread never
+                                        // blocks on anything Roblox does, so it
+                                        // can service that looper the whole time.
+                                        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+                                        let mut driving_done = false;
+                                        while std::time::Instant::now() < deadline {
+                                            cordial_runtime::android::looper::pump(
+                                                std::time::Duration::from_millis(100),
+                                            );
+                                            if !driving_done && done_rx.try_recv().is_ok() {
+                                                driving_done = true;
+                                                println!("  driving thread finished with {secs}s of pumping still to go");
+                                            }
+                                        }
+                                        if !driving_done {
+                                            println!(
+                                                "  driving thread NEVER finished the sequence in {secs}s — it is still blocked somewhere in libroblox"
+                                            );
+                                        }
+
+                                        if std::env::var_os("CORDIAL_COUNT_GL").is_some() {
+                                            // What each thread is blocked on. A game thread
+                                            // waiting on a socket, a futex, or nothing at all
+                                            // are three different problems.
+                                            println!("\n  threads:");
+                                            if let Ok(dir) = std::fs::read_dir("/proc/self/task") {
+                                                for e in dir.flatten() {
+                                                    let p = e.path();
+                                                    let name = std::fs::read_to_string(p.join("comm"))
+                                                        .unwrap_or_default().trim().to_string();
+                                                    let wchan = std::fs::read_to_string(p.join("wchan"))
+                                                        .unwrap_or_default().trim().to_string();
+                                                    let state = std::fs::read_to_string(p.join("stat"))
+                                                        .ok()
+                                                        .and_then(|s| s.rsplit(')').next()
+                                                            .and_then(|r| r.split_whitespace().next())
+                                                            .map(str::to_string))
+                                                        .unwrap_or_default();
+                                                    println!("    {name:<18} state={state:<2} wchan={wchan}");
+                                                }
+                                            }
+                                            println!(
+                                                "  looper polls: {}",
+                                                cordial_runtime::android::looper::POLLS
+                                                    .load(std::sync::atomic::Ordering::Relaxed)
+                                            );
+                                            println!("\n  graphics calls Roblox made:");
+                                            for (name, n) in
+                                                cordial_runtime::android::glcount::report()
+                                            {
+                                                println!("    {name:<24} {n}");
+                                            }
                                         }
                                     }
                                 }

@@ -247,36 +247,117 @@ pub mod game_activity {
     }
 
     extern "C" {
-        fn cordial_game_activity_start(
+        fn cordial_game_activity_handle_only(
             handle: i64,
+            native_name: *const c_char,
+            err: *mut c_char,
+            err_len: usize,
+        ) -> c_int;
+        fn cordial_game_activity_surface_created(handle: i64, err: *mut c_char, err_len: usize) -> c_int;
+        fn cordial_game_activity_surface_changed(
+            handle: i64,
+            format: c_int,
             width: c_int,
             height: c_int,
-            format: c_int,
+            err: *mut c_char,
+            err_len: usize,
+        ) -> c_int;
+        fn cordial_game_activity_surface_redraw_needed(
+            handle: i64,
+            err: *mut c_char,
+            err_len: usize,
+        ) -> c_int;
+        fn cordial_game_activity_window_focus_changed(
+            handle: i64,
+            focused: c_int,
             err: *mut c_char,
             err_len: usize,
         ) -> c_int;
     }
 
-    /// Drive the Activity lifecycle and hand the engine its surface.
-    pub fn start(handle: i64, width: i32, height: i32, format: i32) -> Result<(), String> {
-        let mut err = vec![0u8; 512];
-        // SAFETY: `handle` came from `initialize`; `err` is a live buffer.
-        let rc = unsafe {
-            cordial_game_activity_start(
-                handle,
-                width,
-                height,
-                format,
-                err.as_mut_ptr() as *mut c_char,
-                err.len(),
-            )
-        };
+    fn game_activity_err(rc: c_int, err: Vec<u8>) -> Result<(), String> {
         if rc == 0 {
             Ok(())
         } else {
             let end = err.iter().position(|&b| b == 0).unwrap_or(err.len());
             Err(String::from_utf8_lossy(&err[..end]).into_owned())
         }
+    }
+
+    /// One `GameActivity` native taking only `(J)V` — `onStartNative`,
+    /// `onResumeNative`, `onPauseNative`, `onStopNative`,
+    /// `onSurfaceDestroyedNative`, `onWindowInsetsChangedNative`.
+    pub fn lifecycle_handle_only(handle: i64, native_name: &str) -> Result<(), String> {
+        let name = CString::new(native_name).map_err(|e| e.to_string())?;
+        let mut err = vec![0u8; 512];
+        // SAFETY: `handle` came from `initialize`; `name`/`err` outlive the call.
+        let rc = unsafe {
+            cordial_game_activity_handle_only(
+                handle,
+                name.as_ptr(),
+                err.as_mut_ptr() as *mut c_char,
+                err.len(),
+            )
+        };
+        game_activity_err(rc, err)
+    }
+
+    /// `onSurfaceCreatedNative` — the engine's first look at a real window.
+    pub fn surface_created(handle: i64) -> Result<(), String> {
+        let mut err = vec![0u8; 512];
+        // SAFETY: `handle` came from `initialize`; `err` is a live buffer.
+        let rc = unsafe {
+            cordial_game_activity_surface_created(handle, err.as_mut_ptr() as *mut c_char, err.len())
+        };
+        game_activity_err(rc, err)
+    }
+
+    /// `onSurfaceChangedNative(format, width, height)` — what tells the engine
+    /// how big its framebuffers have to be.
+    pub fn surface_changed(handle: i64, format: i32, width: i32, height: i32) -> Result<(), String> {
+        let mut err = vec![0u8; 512];
+        // SAFETY: as above.
+        let rc = unsafe {
+            cordial_game_activity_surface_changed(
+                handle,
+                format,
+                width,
+                height,
+                err.as_mut_ptr() as *mut c_char,
+                err.len(),
+            )
+        };
+        game_activity_err(rc, err)
+    }
+
+    /// `onSurfaceRedrawNeededNative` — the "draw a frame now" nudge some
+    /// engines wait for in addition to `onSurfaceChanged`.
+    pub fn surface_redraw_needed(handle: i64) -> Result<(), String> {
+        let mut err = vec![0u8; 512];
+        // SAFETY: as above.
+        let rc = unsafe {
+            cordial_game_activity_surface_redraw_needed(
+                handle,
+                err.as_mut_ptr() as *mut c_char,
+                err.len(),
+            )
+        };
+        game_activity_err(rc, err)
+    }
+
+    /// `onWindowFocusChangedNative(hasFocus)`. Not previously driven at all.
+    pub fn window_focus_changed(handle: i64, focused: bool) -> Result<(), String> {
+        let mut err = vec![0u8; 512];
+        // SAFETY: as above.
+        let rc = unsafe {
+            cordial_game_activity_window_focus_changed(
+                handle,
+                if focused { 1 } else { 0 },
+                err.as_mut_ptr() as *mut c_char,
+                err.len(),
+            )
+        };
+        game_activity_err(rc, err)
     }
 
     extern "C" {

@@ -192,78 +192,211 @@ long cordial_game_activity_init(void* fn, const char* internal_path, const char*
 
 } // extern "C"
 
+namespace cordial {
+
+/// One `jobject` `thiz` for every `GameActivity` native call in the process.
+/// Real Android calls all of these against the same Activity instance; handing
+/// out a fresh object per call would be a gratuitous difference from what the
+/// engine actually receives, and there is exactly one Activity in this process
+/// to model.
+static std::shared_ptr<cordial::GameActivity>& shared_activity(jnivm::ENV* env) {
+    static std::shared_ptr<cordial::GameActivity> activity;
+    if (!activity) {
+        activity = std::make_shared<cordial::GameActivity>();
+        cordial::to_jni(env, activity);
+    }
+    return activity;
+}
+
+/// The `jobject` `surface` argument threaded through `onSurfaceCreatedNative`,
+/// `onSurfaceChangedNative` and `onSurfaceRedrawNeededNative`. Android hands the
+/// same `Surface` to all three for one surface's lifetime — a fresh object per
+/// call would let an engine that compares Surface identity (e.g. "is this a
+/// resize of the surface I already have, or a new one?") see every call as an
+/// unrelated new surface. Cleared by `onSurfaceDestroyedNative`.
+static std::shared_ptr<jnivm::Object>& current_surface(jnivm::ENV* env, bool make_new) {
+    static std::shared_ptr<jnivm::Object> surface;
+    if (make_new || !surface) {
+        surface = std::make_shared<jnivm::Object>();
+        cordial::to_jni(env, surface);
+    }
+    return surface;
+}
+
+/// Look up one of `GameActivity`'s registered natives by name.
+///
+/// Called directly rather than through `GetMethodID`/`CallVoidMethod`, because
+/// libjnivm's method lookup deliberately excludes RegisterNatives methods:
+/// `AllowNative == (bool)namesp->native` is false for an ordinary `GetMethodID`,
+/// and `CallVoidMethod` dispatches on `nativehandle`, which `RegisterNatives`
+/// never sets. Going through JNI silently finds nothing and does nothing —
+/// which is exactly what it did.
+///
+/// `RegisterNatives` does keep the raw function pointers, so this looks them up
+/// there and the caller casts to the signature AGDK registered.
+static void* game_activity_native(jnivm::ENV* env, const char* name) {
+    auto cls = env->GetClass("com/google/androidgamesdk/GameActivity");
+    if (!cls) {
+        return nullptr;
+    }
+    std::lock_guard<std::mutex> lock(cls->mtx);
+    auto it = cls->natives.find(name);
+    return it == cls->natives.end() ? nullptr : it->second;
+}
+
+} // namespace cordial
+
 extern "C" {
 
-/// Drive the Activity lifecycle and hand the engine its surface.
-///
-/// Android's order is onCreate, onStart, onResume, then the surface callbacks as
-/// the window becomes available. AGDK's natives are registered on the
-/// `GameActivity` class rather than exported, so they are reached through the
-/// JNI method table rather than `dlsym`.
-///
-/// Every call carries the handle `initializeNativeCode` returned.
-int cordial_game_activity_start(long handle, int width, int height, int format,
-                                char* err, size_t err_len) {
+/// A `GameActivity` native taking only `(JNIEnv*, jobject, jlong)` — every
+/// lifecycle stage that carries no other state: `onStartNative`,
+/// `onResumeNative`, `onPauseNative`, `onStopNative`, `onSurfaceDestroyedNative`,
+/// `onWindowInsetsChangedNative`. One wrapper for all of them rather than one
+/// per name, since the shape is identical and the name is the only thing that
+/// varies.
+int cordial_game_activity_handle_only(long handle, const char* native_name, char* err,
+                                      size_t err_len) {
     auto* env = cordial::process_env();
     if (!env || handle == 0) {
         snprintf(err, err_len, "no JavaVM, or initializeNativeCode gave no handle");
         return -1;
     }
-
     try {
-        JNIEnv* jni = env->GetJNIEnv();
-        auto cls = env->GetClass("com/google/androidgamesdk/GameActivity");
-        if (!cls) {
-            snprintf(err, err_len, "GameActivity class is not registered");
+        auto f = cordial::game_activity_native(env, native_name);
+        if (!f) {
+            snprintf(err, err_len, "%s was never registered", native_name);
             return -1;
         }
-
-        // The natives are called directly rather than through GetMethodID and
-        // CallVoidMethod, because libjnivm's method lookup deliberately excludes
-        // them: `AllowNative == (bool)namesp->native` is false for an ordinary
-        // GetMethodID, and CallVoidMethod dispatches on `nativehandle`, which
-        // RegisterNatives never sets. Going through JNI silently finds nothing
-        // and does nothing — which is exactly what it did.
-        //
-        // RegisterNatives does keep the raw function pointers, so this looks them
-        // up there and calls them with the signatures AGDK registered.
-        auto native = [&](const char* name) -> void* {
-            std::lock_guard<std::mutex> lock(cls->mtx);
-            auto it = cls->natives.find(name);
-            return it == cls->natives.end() ? nullptr : it->second;
-        };
-
-        auto surface = std::make_shared<jnivm::Object>();
-        auto jsurface = cordial::to_jni(env, surface);
-        auto activity = std::make_shared<cordial::GameActivity>();
-        auto jactivity = cordial::to_jni(env, activity);
-
         using HandleOnly = void (*)(JNIEnv*, jobject, jlong);
-        using SurfaceFn = void (*)(JNIEnv*, jobject, jlong, jobject);
-        using SurfaceChangedFn = void (*)(JNIEnv*, jobject, jlong, jobject, jint, jint, jint);
-
-        // Lifecycle first: the engine builds its renderer on resume and ignores a
-        // surface that arrives before it is ready for one.
-        if (auto f = native("onStartNative")) {
-            reinterpret_cast<HandleOnly>(f)(jni, jactivity, (jlong)handle);
+        auto jactivity = cordial::to_jni(env, cordial::shared_activity(env));
+        reinterpret_cast<HandleOnly>(f)(env->GetJNIEnv(), jactivity, (jlong)handle);
+        if (native_name && std::string(native_name) == "onSurfaceDestroyedNative") {
+            // The surface this handle owned is gone; the next created/changed
+            // call must not hand out the stale one.
+            cordial::current_surface(env, true);
         }
-        if (auto f = native("onResumeNative")) {
-            reinterpret_cast<HandleOnly>(f)(jni, jactivity, (jlong)handle);
-        }
+        return 0;
+    } catch (const std::exception& e) {
+        snprintf(err, err_len, "%s", e.what());
+        return -1;
+    } catch (...) {
+        snprintf(err, err_len, "non-standard C++ exception");
+        return -1;
+    }
+}
 
-        auto created = native("onSurfaceCreatedNative");
-        if (!created) {
+/// `onSurfaceCreatedNative(J Landroid/view/Surface;)V` — the engine's first
+/// look at a real window. Establishes the `Surface` object that
+/// `onSurfaceChangedNative`/`onSurfaceRedrawNeededNative` reuse until the next
+/// `onSurfaceDestroyedNative`.
+int cordial_game_activity_surface_created(long handle, char* err, size_t err_len) {
+    auto* env = cordial::process_env();
+    if (!env || handle == 0) {
+        snprintf(err, err_len, "no JavaVM, or initializeNativeCode gave no handle");
+        return -1;
+    }
+    try {
+        auto f = cordial::game_activity_native(env, "onSurfaceCreatedNative");
+        if (!f) {
             snprintf(err, err_len, "onSurfaceCreatedNative was never registered");
             return -1;
         }
-        reinterpret_cast<SurfaceFn>(created)(jni, jactivity, (jlong)handle, jsurface);
+        using SurfaceFn = void (*)(JNIEnv*, jobject, jlong, jobject);
+        auto jactivity = cordial::to_jni(env, cordial::shared_activity(env));
+        auto jsurface = cordial::to_jni(env, cordial::current_surface(env, /*make_new=*/true));
+        reinterpret_cast<SurfaceFn>(f)(env->GetJNIEnv(), jactivity, (jlong)handle, jsurface);
+        return 0;
+    } catch (const std::exception& e) {
+        snprintf(err, err_len, "%s", e.what());
+        return -1;
+    } catch (...) {
+        snprintf(err, err_len, "non-standard C++ exception");
+        return -1;
+    }
+}
 
-        // Size and format come after creation; this is what tells the engine how
-        // big its framebuffers have to be.
-        if (auto f = native("onSurfaceChangedNative")) {
-            reinterpret_cast<SurfaceChangedFn>(f)(jni, jactivity, (jlong)handle, jsurface,
-                                                  (jint)format, (jint)width, (jint)height);
+/// `onSurfaceChangedNative(J Landroid/view/Surface;III)V` — the call that
+/// tells the engine the drawable's format/width/height. Without this an engine
+/// that waits for an explicit size can hold a window it believes is 0x0.
+int cordial_game_activity_surface_changed(long handle, int format, int width, int height,
+                                          char* err, size_t err_len) {
+    auto* env = cordial::process_env();
+    if (!env || handle == 0) {
+        snprintf(err, err_len, "no JavaVM, or initializeNativeCode gave no handle");
+        return -1;
+    }
+    try {
+        auto f = cordial::game_activity_native(env, "onSurfaceChangedNative");
+        if (!f) {
+            snprintf(err, err_len, "onSurfaceChangedNative was never registered");
+            return -1;
         }
+        using SurfaceChangedFn = void (*)(JNIEnv*, jobject, jlong, jobject, jint, jint, jint);
+        auto jactivity = cordial::to_jni(env, cordial::shared_activity(env));
+        auto jsurface = cordial::to_jni(env, cordial::current_surface(env, /*make_new=*/false));
+        reinterpret_cast<SurfaceChangedFn>(f)(env->GetJNIEnv(), jactivity, (jlong)handle, jsurface,
+                                              (jint)format, (jint)width, (jint)height);
+        return 0;
+    } catch (const std::exception& e) {
+        snprintf(err, err_len, "%s", e.what());
+        return -1;
+    } catch (...) {
+        snprintf(err, err_len, "non-standard C++ exception");
+        return -1;
+    }
+}
+
+/// `onSurfaceRedrawNeededNative(J Landroid/view/Surface;)V` — Android's "the
+/// compositor needs a frame now, before you get another normal draw slot" nudge
+/// (used for e.g. rotation). Harmless to send once after `onSurfaceChanged`;
+/// some engines treat it as the actual go-ahead to present a frame.
+int cordial_game_activity_surface_redraw_needed(long handle, char* err, size_t err_len) {
+    auto* env = cordial::process_env();
+    if (!env || handle == 0) {
+        snprintf(err, err_len, "no JavaVM, or initializeNativeCode gave no handle");
+        return -1;
+    }
+    try {
+        auto f = cordial::game_activity_native(env, "onSurfaceRedrawNeededNative");
+        if (!f) {
+            snprintf(err, err_len, "onSurfaceRedrawNeededNative was never registered");
+            return -1;
+        }
+        using SurfaceFn = void (*)(JNIEnv*, jobject, jlong, jobject);
+        auto jactivity = cordial::to_jni(env, cordial::shared_activity(env));
+        auto jsurface = cordial::to_jni(env, cordial::current_surface(env, /*make_new=*/false));
+        reinterpret_cast<SurfaceFn>(f)(env->GetJNIEnv(), jactivity, (jlong)handle, jsurface);
+        return 0;
+    } catch (const std::exception& e) {
+        snprintf(err, err_len, "%s", e.what());
+        return -1;
+    } catch (...) {
+        snprintf(err, err_len, "non-standard C++ exception");
+        return -1;
+    }
+}
+
+/// `onWindowFocusChangedNative(J Z)V`. Not previously driven at all — several
+/// AGDK-based engines gate their first draw on focus (`hasFocus == true`) in
+/// addition to having a sized surface, since a backgrounded/unfocused window is
+/// not supposed to render.
+int cordial_game_activity_window_focus_changed(long handle, int focused, char* err,
+                                               size_t err_len) {
+    auto* env = cordial::process_env();
+    if (!env || handle == 0) {
+        snprintf(err, err_len, "no JavaVM, or initializeNativeCode gave no handle");
+        return -1;
+    }
+    try {
+        auto f = cordial::game_activity_native(env, "onWindowFocusChangedNative");
+        if (!f) {
+            snprintf(err, err_len, "onWindowFocusChangedNative was never registered");
+            return -1;
+        }
+        using FocusFn = void (*)(JNIEnv*, jobject, jlong, jboolean);
+        auto jactivity = cordial::to_jni(env, cordial::shared_activity(env));
+        reinterpret_cast<FocusFn>(f)(env->GetJNIEnv(), jactivity, (jlong)handle,
+                                     (jboolean)(focused ? JNI_TRUE : JNI_FALSE));
         return 0;
     } catch (const std::exception& e) {
         snprintf(err, err_len, "%s", e.what());
