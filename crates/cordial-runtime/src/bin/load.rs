@@ -420,6 +420,31 @@ fn main() -> ExitCode {
                             return ExitCode::FAILURE;
                         }
 
+                        // Client settings before initializeNativeCode.
+                        // The engine's flags verdict is reported from a thread
+                        // that initializeNativeCode starts, and it was arriving
+                        // before any later delivery could possibly matter --
+                        // every ordering tried downstream of this point still
+                        // lost the race, because the decision had already been
+                        // made. This is the last position that is actually
+                        // earlier than the decision.
+                        if let Some(f) = lib.symbol(
+                            "Java_com_roblox_engine_jni_NativeGLInterface_nativeInitClientSettings",
+                        ) {
+                            let settings = cordial_runtime::client_settings::load(
+                                opt.client_settings.as_deref(),
+                            )
+                            .unwrap_or_default();
+                            match linker::game_activity::init_client_settings(
+                                f, &settings, "", "",
+                            ) {
+                                Ok(code) => {
+                                    println!("  early client settings ({} bytes) -> {code}", settings.len())
+                                }
+                                Err(e) => println!("  early client settings failed: {e}"),
+                            }
+                        }
+
                         println!("\ncalling GameActivity.initializeNativeCode");
                         match linker::game_activity::initialize(f, &files, &files, &files) {
                             Ok(handle) => {
@@ -482,6 +507,113 @@ fn main() -> ExitCode {
                                                 Err(e) => println!("  init params failed: {e}"),
                                             }
                                         }
+
+                                        // Client settings BEFORE the flag
+                                        // calls. The engine reports its flags
+                                        // verdict once, early, and the first
+                                        // "flags FAILED" was arriving before
+                                        // nativeInitClientSettings had been
+                                        // called at all -- the settings were
+                                        // being delivered after the decision
+                                        // they were supposed to inform.
+                                        // The network counterpart, called the
+                                        // way the real app calls it: on
+                                        // Android, Cordial's role (the host
+                                        // app) is to fetch client settings and
+                                        // hand the response to the engine —
+                                        // the engine does not fetch its own.
+                                        // `--client-settings` supplies that
+                                        // real response body; the other two
+                                        // string arguments' roles were not
+                                        // pinned down with confidence, so
+                                        // empty strings are the honest
+                                        // starting point. The `int` the
+                                        // engine returns is logged directly —
+                                        // it is a far more reliable signal
+                                        // than the onFlagsFailed/onFlagsLoaded
+                                        // print, which comes from an
+                                        // unrelated async path.
+                                        if let Some(f) = lib.symbol(
+                                            "Java_com_roblox_engine_jni_NativeGLInterface_nativeInitClientSettings",
+                                        ) {
+                                            // Cordial is the host app, so
+                                            // Cordial does the fetch the app
+                                            // would do. Cached on disk, so a
+                                            // repeat launch is not a repeat
+                                            // request.
+                                            let settings =
+                                                cordial_runtime::client_settings::load(
+                                                    opt.client_settings.as_deref(),
+                                                )
+                                                .unwrap_or_default();
+                                            println!(
+                                                "  client settings: {} bytes",
+                                                settings.len()
+                                            );
+                                            // Which of the three strings is the
+                                            // settings document is not
+                                            // established — the descriptor is
+                                            // (String,String,String)I and the
+                                            // engine's only clue is a
+                                            // "ParseFailure on overrides" log
+                                            // string, so one of the others is
+                                            // an overrides document. Selectable
+                                            // rather than guessed, so the
+                                            // question can be settled by
+                                            // running it.
+                                            let pos = std::env::var("CORDIAL_CS_POS")
+                                                .ok()
+                                                .and_then(|v| v.parse::<u8>().ok())
+                                                .unwrap_or(0);
+                                            let (a, b, c) = match pos {
+                                                1 => ("", settings.as_str(), ""),
+                                                2 => ("", "", settings.as_str()),
+                                                // Established by experiment:
+                                                // the document goes first, and
+                                                // 0 comes back. See
+                                                // client_settings.rs.
+                                                _ => (settings.as_str(), "", ""),
+                                            };
+                                            match linker::game_activity::init_client_settings(
+                                                f, a, b, c,
+                                            ) {
+                                                Ok(code) => println!(
+                                                    "  nativeInitClientSettings -> {code}"
+                                                ),
+                                                Err(e) => println!(
+                                                    "  nativeInitClientSettings failed: {e}"
+                                                ),
+                                            }
+                                        }
+                                        // NOT called by default: passing an
+                                        // empty `ArrayList` here reproducibly
+                                        // crashes synchronously, on this
+                                        // thread, inside libc's `_IO_fflush`
+                                        // (fault address 0x8 — a near-null
+                                        // pointer a small struct offset in),
+                                        // verified live under lldb. That is
+                                        // worse than the pre-existing
+                                        // asynchronous crash this session set
+                                        // out to leave alone, so this call is
+                                        // wired but disabled pending a real
+                                        // list argument. See the report for
+                                        // detail. It is unconditional now:
+                                        // that crash was a CONSEQUENCE of the
+                                        // settings not being accepted, and with
+                                        // nativeInitClientSettings returning 0
+                                        // this call succeeds.
+                                            if let Some(f) = lib.symbol(
+                                                "Java_com_roblox_engine_jni_NativeGLInterface_nativePostClientSettingsLoadedInitialization3",
+                                            ) {
+                                                match linker::game_activity::post_client_settings_loaded(f) {
+                                                    Ok(()) => println!(
+                                                        "  postClientSettingsLoadedInitialization3 ok"
+                                                    ),
+                                                    Err(e) => println!(
+                                                        "  postClientSettingsLoadedInitialization3 failed: {e}"
+                                                    ),
+                                                }
+                                            }
 
                                         // Flags before anything else asks for
                                         // them: bootstrapTheApp's whole job is to
@@ -571,108 +703,6 @@ fn main() -> ExitCode {
                                             }
                                         }
 
-                                        // The network counterpart, called the
-                                        // way the real app calls it: on
-                                        // Android, Cordial's role (the host
-                                        // app) is to fetch client settings and
-                                        // hand the response to the engine —
-                                        // the engine does not fetch its own.
-                                        // `--client-settings` supplies that
-                                        // real response body; the other two
-                                        // string arguments' roles were not
-                                        // pinned down with confidence, so
-                                        // empty strings are the honest
-                                        // starting point. The `int` the
-                                        // engine returns is logged directly —
-                                        // it is a far more reliable signal
-                                        // than the onFlagsFailed/onFlagsLoaded
-                                        // print, which comes from an
-                                        // unrelated async path.
-                                        if let Some(f) = lib.symbol(
-                                            "Java_com_roblox_engine_jni_NativeGLInterface_nativeInitClientSettings",
-                                        ) {
-                                            // Cordial is the host app, so
-                                            // Cordial does the fetch the app
-                                            // would do. Cached on disk, so a
-                                            // repeat launch is not a repeat
-                                            // request.
-                                            let settings =
-                                                cordial_runtime::client_settings::load(
-                                                    opt.client_settings.as_deref(),
-                                                )
-                                                .unwrap_or_default();
-                                            println!(
-                                                "  client settings: {} bytes",
-                                                settings.len()
-                                            );
-                                            // Which of the three strings is the
-                                            // settings document is not
-                                            // established — the descriptor is
-                                            // (String,String,String)I and the
-                                            // engine's only clue is a
-                                            // "ParseFailure on overrides" log
-                                            // string, so one of the others is
-                                            // an overrides document. Selectable
-                                            // rather than guessed, so the
-                                            // question can be settled by
-                                            // running it.
-                                            let pos = std::env::var("CORDIAL_CS_POS")
-                                                .ok()
-                                                .and_then(|v| v.parse::<u8>().ok())
-                                                .unwrap_or(0);
-                                            let (a, b, c) = match pos {
-                                                1 => ("", settings.as_str(), ""),
-                                                2 => ("", "", settings.as_str()),
-                                                // Established by experiment:
-                                                // the document goes first, and
-                                                // 0 comes back. See
-                                                // client_settings.rs.
-                                                _ => (settings.as_str(), "", ""),
-                                            };
-                                            match linker::game_activity::init_client_settings(
-                                                f, a, b, c,
-                                            ) {
-                                                Ok(code) => println!(
-                                                    "  nativeInitClientSettings -> {code}"
-                                                ),
-                                                Err(e) => println!(
-                                                    "  nativeInitClientSettings failed: {e}"
-                                                ),
-                                            }
-                                        }
-                                        // NOT called by default: passing an
-                                        // empty `ArrayList` here reproducibly
-                                        // crashes synchronously, on this
-                                        // thread, inside libc's `_IO_fflush`
-                                        // (fault address 0x8 — a near-null
-                                        // pointer a small struct offset in),
-                                        // verified live under lldb. That is
-                                        // worse than the pre-existing
-                                        // asynchronous crash this session set
-                                        // out to leave alone, so this call is
-                                        // wired but disabled pending a real
-                                        // list argument. See the report for
-                                        // detail; set
-                                        // CORDIAL_TRY_POST_CLIENT_SETTINGS=1
-                                        // to re-enable it for experimentation.
-                                        if std::env::var_os(
-                                            "CORDIAL_TRY_POST_CLIENT_SETTINGS",
-                                        )
-                                        .is_some()
-                                        {
-                                            if let Some(f) = lib.symbol(
-                                                "Java_com_roblox_engine_jni_NativeGLInterface_nativePostClientSettingsLoadedInitialization3",
-                                            ) {
-                                                match linker::game_activity::post_client_settings_loaded(f) {
-                                                    Ok(()) => println!(
-                                                        "  postClientSettingsLoadedInitialization3 ok"
-                                                    ),
-                                                    Err(e) => println!(
-                                                        "  postClientSettingsLoadedInitialization3 failed: {e}"
-                                                    ),
-                                                }
-                                            }
-                                        }
 
                                         // Kicks the engine's initialisation once
                                         // everything it depends on is in place.

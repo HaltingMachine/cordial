@@ -635,3 +635,40 @@ tracing what spawns that pthread (breakpoint on `pthread_create`, or on the
 `start_thread` return addresses seen in §7.3's backtrace, `libroblox+
 0x1f9b5a7`/`+0x1f9b728`/`+0x1f9b850`, to find where that thread's *own*
 entry point is, not just its later call stack).
+
+---
+
+## §8. Client settings are not what the flags verdict depends on
+
+Cordial now fetches Roblox's real client-settings document and the engine accepts
+it: `nativeInitClientSettings` returns `0`, and
+`nativePostClientSettingsLoadedInitialization3` then succeeds. (That call used to
+crash synchronously in `_IO_fflush`; the crash was a *consequence* of the
+settings not being accepted, not a bad `List`, and it went away on its own once
+`nativeInitClientSettings` started returning `0`. It is now unconditional.)
+
+The verdict is still `onFlagsFailed`.
+
+Three orderings were tried, each strictly earlier than the last:
+
+| when the settings are delivered | result |
+|---|---|
+| after the flag calls (original) | `flags FAILED` before the call |
+| before the flag calls | `flags FAILED` still first |
+| **before `initializeNativeCode`** — `-> 0` | `flags FAILED` unchanged |
+
+The third is the decisive one. The settings are parsed and accepted before the
+engine's own bring-up even starts, and the verdict does not move. So this is not
+a race that a better ordering can win, and **the flags verdict does not depend on
+the client-settings document.**
+
+That is worth stating plainly because two independent investigations converged on
+client settings as the likely root cause of `onFlagsFailed`, and the reasoning
+was good: flags *are* client settings, the document really was missing, and the
+fetch really was never happening. It was still wrong. The work it produced is
+real — the CA bundle, the asset folder, the fetch, the call contract — but none
+of it is the answer to this question.
+
+What remains unexplained: `onFlagsFailed` arrives on a background thread, early,
+with a full and valid flag set already installed. Whatever it is testing, it is
+not "do I have flags".
