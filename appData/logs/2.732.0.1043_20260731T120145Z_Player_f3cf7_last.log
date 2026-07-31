@@ -1,0 +1,12 @@
+[FLog::Output] All use of Roblox services must comply with Roblox's Terms of Use, Privacy Policy, Community Standards, and applicable laws. Processing of User personal information is limited to the purposes expressly permitted therein.
+2026-07-31T12:01:45.042Z,0.042941,f79afa00,6,Info [FLog::JNIAppBridge] nativeAppBridgeV2Init:
+2026-07-31T12:01:45.043Z,0.043118,af1056c0,6 [FLog::SingleSurfaceApp] initializeWithAppStarter
+2026-07-31T12:01:45.043Z,0.043130,af1056c0,6 [FLog::SingleSurfaceApp] initializeSingleton
+2026-07-31T12:01:45.043Z,0.043482,af1056c0,6 [FLog::Output] setAssetFolder /tmp/claude-1001/-var-home-user-Projects-cordial/00000000-0000-0000-0000-000000000000/scratchpad/apk/base.apk
+2026-07-31T12:01:45.043Z,0.043609,af1056c0,6 [FLog::Error] Error: '/tmp/claude-1001/-var-home-user-Projects-cordial/00000000-0000-0000-0000-000000000000/scratchpad/apk/base.apk' is not a directory
+2026-07-31T12:01:45.043Z,0.043668,f79afa00,6,Info [FLog::JNIAppBridge] nativeAppBridgeV2StartApp:
+2026-07-31T12:01:45.088Z,0.088313,af1056c0,6 [FLog::SingleSurfaceApp] startLuaApp: (stage:None).
+2026-07-31T12:01:45.088Z,0.088356,af1056c0,6 [FLog::SingleSurfaceApp] returnToLuaApp: (stage:None).
+2026-07-31T12:01:45.088Z,0.088359,af1056c0,6 [FLog::SingleSurfaceApp] setStage: (stage:LuaApp)
+2026-07-31T12:01:45.098Z,0.098775,af1056c0,6 [FLog::SingleSurfaceApp] userDidLogin
+2026-07-31T12:01:45.098Z,0.098816,af1056c0,6 [FLog::SingleSurfaceApp] applyLocale
