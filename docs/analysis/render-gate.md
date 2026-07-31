@@ -356,3 +356,77 @@ target.
 | Exactly one direct call site to `eglCreateWindowSurface` in the binary, and its full backward call chain to a GPU-tier device cache | Verified (direct-call scan of all of `.text`) | Raw `E8` opcode scan, cross-checked at each hop |
 | That device-cache function's own caller is indirect and not identified | Verified absence (zero direct callers) / open question for its trigger | Same scan; cannot see vtable/fn-ptr calls |
 | The App Bridge V2 path (`ActivityNativeMain`/`vi/e`), not `MainGameActivity`, is what feeds a real `Surface` into rendering | High confidence, not fully proven | This session's native-side chain (§2) is consistent with, but not directly wired to, `app-bridge.md`'s independent dex-bytecode chain; the missing link is named explicitly above |
+
+---
+
+# The flags verdict does not gate rendering
+
+Confirmed at runtime, and it retires a line of investigation that consumed most
+of a day.
+
+**Evidence.** `onFlagsFailed` fires twice per run and execution continues
+extensively afterwards — `nativeGameGlobalInit`, `nativeUpdateAdapterInit`, the
+full `InitParams`/`PlatformParams` reflection, the app bridge, and
+`ANativeWindow_fromSurface`. If the verdict gated the downstream work, the
+downstream work would not run.
+
+**The decisive argument** is that the crash address *moves* while the verdict
+stays constant: `libroblox+0x2ccd912` (fault `0x0`) on the full path,
+`libroblox+0x240462b` (fault `0x140`) under `CORDIAL_SKIP_LUA_DM=1`, with flags
+reported `FAILED` in both. A branch conditioned on "flags failed" would fault at
+the same address every time. A race does exactly this.
+
+So `onFlagsFailed` is a complaint, not a gate. The name misled three separate
+investigations, including two that converged on it independently.
+
+# There are three threads named `Main`
+
+Not one. `thread backtrace all` distinguishes:
+
+1. Cordial's driving thread,
+2. the AGDK looper-service thread,
+3. a third thread the engine spawns from `nativeGameGlobalInit`.
+
+Thread 3 is the one that both reports `onFlagsFailed` *and* later segfaults —
+but in a **different** part of its own bring-up, not in the flags-report chain,
+which returns cleanly. Backtraces that "obviously" referred to the same thread
+were not necessarily doing so, and every earlier note in this repo that says
+"the engine's `Main` thread" should be read with that ambiguity in mind.
+
+# No EGL or GL call ever happens
+
+Read out of the paused process at the moment of the SIGSEGV, from Cordial's own
+counters:
+
+```
+eglCreateWindowSurface 0   eglMakeCurrent 0   eglSwapBuffers 0
+glClear 0   glDrawArrays 0   glDrawElements 0   glCompileShader 0   glTexImage2D 0
+```
+
+`ANativeWindow_fromSurface` is called once, returns a real non-null window, and
+nothing follows it — no `acquire`, no `getWidth`/`getHeight`, no
+`setBuffersGeometry`.
+
+# What actually blocks the first frame
+
+At the moment of death, the driving thread is **not** crashed. It is blocked in
+a syscall, deep inside Roblox's own code, synchronously underneath
+`cordial_appbridge_start_app`. It never returns, so it never reaches the
+get-or-create-graphics-device path that would call `eglCreateWindowSurface`.
+
+It dies because thread 3 segfaults first, and a SIGSEGV on any thread kills the
+process.
+
+So the render blocker is a **cross-thread race inside the engine's own bring-up**
+— thread 3 reaching into an engine object that the driving thread has not
+finished populating — and not any missing API, missing asset, or missing flag.
+
+That reframes the remaining work. The question is no longer "what have we not
+implemented"; it is **"why is the driving thread blocked, and what is it waiting
+for?"** A strong candidate worth testing first: on Android these calls are made
+*from* the UI thread, which is also the thread that pumps the looper. Cordial
+calls `StartAppWithParams` from its driving thread and that thread then blocks
+inside the call — so if the engine is waiting on work it posted to the looper,
+nobody is draining it, and the wait cannot end. Pumping the looper from another
+thread, or making the call from a thread that is not the pump, would test that
+directly.
