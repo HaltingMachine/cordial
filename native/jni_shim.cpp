@@ -5,6 +5,7 @@
 #include <jnivm.h>
 
 extern "C" void cordial_register_android_classes(void* env);
+namespace cordial { void register_game_activity_classes(jnivm::ENV* env); }
 
 #include <cstddef>
 #include <cstdio>
@@ -120,6 +121,7 @@ void* cordial_jni_create_vm() {
     g_vm = std::make_unique<jnivm::VM>();
     // Cordial's Java side, before Roblox can ask for any of it.
     cordial_register_android_classes(g_vm->GetEnv().get());
+    cordial::register_game_activity_classes(g_vm->GetEnv().get());
     g_real_vm = g_vm->GetJavaVM();
     g_real_iface = g_real_vm->functions;
 

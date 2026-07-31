@@ -9,3 +9,4 @@ compile_commands.json
 *.apk
 /apk/
 /native/lib/
+.flatpak-builder/

@@ -1,0 +1,67 @@
+# Flatpak manifest for Cordial.
+#
+# Flatpak is the primary distribution target (spec §11), which is why the plugin
+# directory is `~/.var/app/org.cordial.Cordial/data/plugins/` and drag-and-drop
+# is the install path rather than a convenience.
+#
+# Build:
+#     packaging/build-flatpak.sh
+#
+# Two things about the permission set are deliberate and should not drift:
+#
+#   * There is no `--filesystem=host` and no `--talk-name=org.freedesktop.Flatpak`.
+#     The second in particular is arbitrary command execution on the host, which
+#     would hand every plugin the sandbox escape the capability model exists to
+#     prevent — below the level any broker can see. See ADR-002 §2.
+#   * `--device=dri` and the display sockets are the whole of what the runtime
+#     needs. Camera, screenshot and filesystem access are never held by Cordial
+#     on a plugin's behalf; they are granted per-plugin at runtime through
+#     portals, revocably (spec §7).
+
+app-id: org.cordial.Cordial
+runtime: org.freedesktop.Platform
+runtime-version: '25.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+  - org.freedesktop.Sdk.Extension.llvm20
+command: cordial-load
+
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/llvm20/bin
+  prepend-ld-library-path: /usr/lib/sdk/llvm20/lib
+  env:
+    # AOSP bionic does not build with GCC — it uses C11 _Atomic inside C++
+    # headers, which is a Clang extension. See docs/base-evaluation.md §2.1.
+    CC: clang
+    CXX: clang++
+    CARGO_HOME: /run/build/cordial/cargo
+
+finish-args:
+  # GPU. Roblox's Android build needs GLES2 + EGL; Vulkan is dlopen'd and
+  # optional (docs/findings.md §5).
+  - --device=dri
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  # An online game.
+  - --share=network
+  - --socket=pulseaudio
+  # Roblox's own data lives under the app's data directory, per instance.
+  - --persist=.cordial
+
+modules:
+  - name: cordial
+    buildsystem: simple
+    build-options:
+      build-args:
+        # Cargo fetches crates and the build pulls AOSP bionic as a submodule.
+        # A release manifest must vendor both and drop this — network access at
+        # build time makes the result unreproducible, and Flathub rejects it.
+        - --share=network
+    build-commands:
+      - cargo build --release --offline || cargo build --release
+      - install -Dm755 target/release/cordial-load /app/bin/cordial-load
+    sources:
+      - type: dir
+        path: ..

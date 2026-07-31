@@ -17,6 +17,7 @@ struct Options {
     read_asset: Option<String>,
     gl_probe: bool,
     window_seconds: Option<u64>,
+    game_activity: bool,
     host_libc: bool,
     jni_onload: bool,
     dump_classes: Option<String>,
@@ -34,6 +35,7 @@ usage: cordial-load --lib-dir <dir> [options]
   --window <secs>   open a real window and render into it for <secs>
   --host-libc       also resolve libc from the host (ABI-unsafe; diagnostic only)
   --jni-onload      stand up a JavaVM and call JNI_OnLoad
+  --game-activity   implies --jni-onload; then call GameActivity.initializeNativeCode
   --dump-classes <f>  implies --jni-onload; write the Java classes Roblox asked
                     for to <f> — the observed Phase 2 backlog
   -v, --verbose     list every symbol and how it resolved
@@ -53,6 +55,7 @@ fn parse() -> Result<Options, String> {
         read_asset: None,
         gl_probe: false,
         window_seconds: None,
+        game_activity: false,
         host_libc: false,
         jni_onload: false,
         dump_classes: None,
@@ -74,6 +77,10 @@ fn parse() -> Result<Options, String> {
             }
             "--host-libc" => opt.host_libc = true,
             "--jni-onload" => opt.jni_onload = true,
+            "--game-activity" => {
+                opt.jni_onload = true;
+                opt.game_activity = true;
+            }
             "--dump-classes" => {
                 opt.jni_onload = true;
                 opt.dump_classes = Some(args.next().ok_or("--dump-classes needs a path")?);
@@ -252,6 +259,32 @@ fn main() -> ExitCode {
                     println!(
                         "\n  Roblox expects the Android bring-up sequence, not a bare JNI_OnLoad:\n                           a JavaVM, then GameActivity.initializeNativeCode called from Java with a\n                           real Activity. See docs/framework-api-inventory.md §3.3."
                     );
+                }
+            }
+
+            if opt.game_activity {
+                let native = lib.symbol(
+                    "Java_com_google_androidgamesdk_GameActivity_initializeNativeCode",
+                );
+                match native {
+                    None => eprintln!("  initializeNativeCode is not exported"),
+                    Some(f) => {
+                        let files = std::env::var("CORDIAL_FILES_DIR").unwrap_or_else(|_| {
+                            format!(
+                                "{}/cordial/instances/default/data",
+                                std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| format!(
+                                    "{}/.local/share",
+                                    std::env::var("HOME").unwrap_or_else(|_| "/tmp".into())
+                                ))
+                            )
+                        });
+                        let env = linker::jni::env().unwrap_or(std::ptr::null_mut());
+                        println!("\ncalling GameActivity.initializeNativeCode");
+                        match linker::game_activity::initialize(f, env, &files, &files, &files) {
+                            Ok(handle) => println!("  native handle {handle:#x}"),
+                            Err(e) => println!("  failed: {e}"),
+                        }
+                    }
                 }
             }
 

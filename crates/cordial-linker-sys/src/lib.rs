@@ -225,3 +225,64 @@ pub mod jni {
         }
     }
 }
+
+/// Drive AGDK `GameActivity` bring-up.
+///
+/// On Android the platform calls `initializeNativeCode` from Java with a real
+/// Activity. Cordial builds the arguments through libjnivm and calls the
+/// exported JNI native directly. The returned handle is what every later
+/// callback carries — surface creation, resize, input.
+pub mod game_activity {
+    use std::ffi::{c_char, c_void, CString};
+
+    extern "C" {
+        fn cordial_game_activity_init(
+            f: *mut c_void,
+            env: *mut c_void,
+            internal_path: *const c_char,
+            obb_path: *const c_char,
+            external_path: *const c_char,
+            err: *mut c_char,
+            err_len: usize,
+        ) -> i64;
+    }
+
+    pub fn initialize(
+        native: *mut c_void,
+        env: *mut c_void,
+        internal_path: &str,
+        obb_path: &str,
+        external_path: &str,
+    ) -> Result<i64, String> {
+        let internal = CString::new(internal_path).map_err(|e| e.to_string())?;
+        let obb = CString::new(obb_path).map_err(|e| e.to_string())?;
+        let external = CString::new(external_path).map_err(|e| e.to_string())?;
+        let mut err = vec![0u8; 512];
+
+        // SAFETY: `native` is libroblox's initializeNativeCode export and `env`
+        // the process JNIEnv; the paths outlive the call.
+        let handle = unsafe {
+            cordial_game_activity_init(
+                native,
+                env,
+                internal.as_ptr(),
+                obb.as_ptr(),
+                external.as_ptr(),
+                err.as_mut_ptr() as *mut c_char,
+                err.len(),
+            )
+        };
+
+        if handle == 0 {
+            let end = err.iter().position(|&b| b == 0).unwrap_or(err.len());
+            let msg = String::from_utf8_lossy(&err[..end]).into_owned();
+            Err(if msg.is_empty() {
+                "initializeNativeCode returned a null handle".into()
+            } else {
+                msg
+            })
+        } else {
+            Ok(handle)
+        }
+    }
+}
