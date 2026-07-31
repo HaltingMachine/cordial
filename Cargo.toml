@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/cordial-linker-sys",
+    "crates/cordial-runtime",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "MIT"
+rust-version = "1.75"
+
+[profile.release]
+debug = true      # the runtime is useless to debug without symbols

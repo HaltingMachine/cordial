@@ -1,0 +1,10 @@
+[package]
+name = "cordial-linker-sys"
+description = "Rust bindings to the AOSP bionic linker, built for the host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+links = "cordial_linker_shim"
+
+[build-dependencies]
+cmake = "0.1"

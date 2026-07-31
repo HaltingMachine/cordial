@@ -1,0 +1,308 @@
+//! Builds the `{soname -> {symbol -> address}}` tables handed to the linker.
+//!
+//! Each of Roblox's imports resolves one of two ways:
+//!
+//! * **host** — the desktop already has a compatible implementation. True for
+//!   libm and libz (plain C, scalar and pointer arguments) and for GLES2/EGL
+//!   (Khronos-specified; Mesa implements the same contract).
+//! * **stub** — everything else, for now.
+//!
+//! `libc` is deliberately *not* resolved from the host by default. bionic and
+//! glibc disagree on `struct stat`, `pthread_mutex_t`, `DIR`, `FILE` and
+//! `sigset_t`, so passthrough would silently corrupt rather than work. Closing
+//! that gap is what a bionic shim is for; see docs/base-evaluation.md §4.
+
+use std::collections::BTreeMap;
+use std::ffi::{c_char, c_int, c_void, CString};
+
+use crate::stubs::SYMBOLS;
+
+/// Symbol prefix -> the Android library that provides it. These have no host
+/// equivalent, so they are always stubbed; the mapping only decides which
+/// soname Cordial registers them under.
+const ANDROID_PREFIXES: &[(&str, &str)] = &[
+    ("AMedia", "libmediandk.so"),
+    ("AMEDIA", "libmediandk.so"),
+    ("AImage", "libmediandk.so"),
+    ("AIMAGE", "libmediandk.so"),
+    ("AndroidBitmap", "libjnigraphics.so"),
+    ("__android_log", "liblog.so"),
+    ("android_set_abort_message", "liblog.so"),
+    ("android_get_device_api_level", "liblog.so"),
+    ("ANative", "libandroid.so"),
+    ("AAsset", "libandroid.so"),
+    ("AInput", "libandroid.so"),
+    ("AKey", "libandroid.so"),
+    ("AMotion", "libandroid.so"),
+    ("ALooper", "libandroid.so"),
+    ("ASensor", "libandroid.so"),
+    ("AChoreographer", "libandroid.so"),
+    ("AConfiguration", "libandroid.so"),
+    ("ATrace", "libandroid.so"),
+    ("AHardwareBuffer", "libandroid.so"),
+    ("ASharedMemory", "libandroid.so"),
+    ("APerformanceHint", "libandroid.so"),
+    ("AObb", "libandroid.so"),
+    ("AStorageManager", "libandroid.so"),
+    ("ASurface", "libandroid.so"),
+    ("AFont", "libandroid.so"),
+    ("ASystemFont", "libandroid.so"),
+];
+
+/// In `libroblox.so`'s `DT_NEEDED` but contributing no undefined symbols — they
+/// are consulted via `dlsym` at runtime, if at all. They still have to exist for
+/// the `DT_NEEDED` walk to succeed.
+pub const EMPTY_LIBRARIES: &[&str] = &["libOpenSLES.so", "libOpenMAXAL.so"];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Source {
+    Host,
+    Stub,
+}
+
+pub struct Entry {
+    pub symbol: &'static str,
+    pub address: *mut c_void,
+    pub source: Source,
+}
+
+#[derive(Default, Clone, Copy)]
+pub struct Stats {
+    pub host: usize,
+    pub stub: usize,
+}
+
+pub struct SymbolTable {
+    pub libraries: BTreeMap<&'static str, Vec<Entry>>,
+    pub stats: BTreeMap<&'static str, Stats>,
+    /// Host libraries that could not be opened; their symbols fell back to stubs.
+    pub missing_host_libs: Vec<&'static str>,
+}
+
+impl SymbolTable {
+    pub fn totals(&self) -> Stats {
+        self.stats.values().fold(Stats::default(), |mut acc, s| {
+            acc.host += s.host;
+            acc.stub += s.stub;
+            acc
+        })
+    }
+}
+
+/// How a symbol is classified before resolution is attempted.
+enum Class {
+    /// Android-only; no host implementation exists.
+    Android(&'static str),
+    /// Khronos API; try the host, fall back to a stub, but always register under
+    /// the given soname so the bucketing stays honest either way.
+    Khronos(&'static str),
+    /// Anything else — libc, libm, libz. Whichever host library answers decides.
+    Generic,
+}
+
+fn classify(symbol: &str) -> Class {
+    // `gl`/`egl` followed by a capital, so `glob` and friends do not match.
+    if let Some(rest) = symbol.strip_prefix("egl") {
+        if rest.starts_with(char::is_uppercase) {
+            return Class::Khronos("libEGL.so");
+        }
+    }
+    if let Some(rest) = symbol.strip_prefix("gl") {
+        if rest.starts_with(char::is_uppercase) {
+            return Class::Khronos("libGLESv2.so");
+        }
+    }
+    for (prefix, lib) in ANDROID_PREFIXES {
+        if symbol.starts_with(prefix) {
+            return Class::Android(lib);
+        }
+    }
+    Class::Generic
+}
+
+/// Build the full table.
+///
+/// `host_libc` resolves libc symbols from the host as well. It is ABI-unsafe and
+/// exists to see how far execution gets, not to be correct.
+pub fn build(host_libc: bool) -> SymbolTable {
+    // (host soname, Android soname it stands in for)
+    let candidates: &[(&'static str, &'static str)] = &[
+        ("libm.so.6", "libm.so"),
+        ("libz.so.1", "libz.so"),
+        ("libGLESv2.so.2", "libGLESv2.so"),
+        ("libEGL.so.1", "libEGL.so"),
+    ];
+
+    let mut host_libs = Vec::new();
+    let mut missing_host_libs = Vec::new();
+    for (soname, provides) in candidates {
+        match HostLib::open(soname, provides) {
+            Some(lib) => host_libs.push(lib),
+            None => missing_host_libs.push(*soname),
+        }
+    }
+    let libc = host_libc
+        .then(|| HostLib::open("libc.so.6", "libc.so"))
+        .flatten();
+
+    let mut table = SymbolTable {
+        libraries: BTreeMap::new(),
+        stats: BTreeMap::new(),
+        missing_host_libs,
+    };
+
+    for (symbol, stub) in SYMBOLS.iter() {
+        let stub_addr = *stub as *mut c_void;
+
+        let (library, address, source) = match classify(symbol) {
+            Class::Android(lib) => (lib, stub_addr, Source::Stub),
+
+            Class::Khronos(lib) => match lookup(&host_libs, symbol) {
+                Some((_, addr)) => (lib, addr, Source::Host),
+                None => (lib, stub_addr, Source::Stub),
+            },
+
+            Class::Generic => match lookup(&host_libs, symbol) {
+                Some((provides, addr)) => (provides, addr, Source::Host),
+                None => match libc.as_ref().and_then(|l| l.lookup(symbol)) {
+                    Some(addr) => ("libc.so", addr, Source::Host),
+                    None => ("libc.so", stub_addr, Source::Stub),
+                },
+            },
+        };
+
+        table.libraries.entry(library).or_default().push(Entry {
+            symbol,
+            address,
+            source,
+        });
+        let s = table.stats.entry(library).or_default();
+        match source {
+            Source::Host => s.host += 1,
+            Source::Stub => s.stub += 1,
+        }
+    }
+
+    for name in EMPTY_LIBRARIES {
+        table.libraries.entry(name).or_default();
+        table.stats.entry(name).or_default();
+    }
+
+    table
+}
+
+fn lookup(libs: &[HostLib], symbol: &str) -> Option<(&'static str, *mut c_void)> {
+    libs.iter()
+        .find_map(|lib| lib.lookup(symbol).map(|addr| (lib.provides, addr)))
+}
+
+/// A host shared object consulted for real implementations.
+struct HostLib {
+    provides: &'static str,
+    /// Filename prefix a symbol's defining object must have to count as ours,
+    /// e.g. `libm.so` for `libm.so.6`.
+    soname_stem: &'static str,
+    handle: *mut c_void,
+}
+
+impl HostLib {
+    fn open(soname: &'static str, provides: &'static str) -> Option<Self> {
+        let name = CString::new(soname).ok()?;
+        // SAFETY: `name` outlives the call and is NUL-terminated.
+        let handle = unsafe { host_dlopen(name.as_ptr(), RTLD_NOW | RTLD_GLOBAL) };
+        let soname_stem = soname.split_once(".so").map_or(soname, |(stem, _)| {
+            // "libm.so.6" -> "libm.so"
+            &soname[..stem.len() + 3]
+        });
+        (!handle.is_null()).then_some(HostLib { provides, soname_stem, handle })
+    }
+
+    fn lookup(&self, symbol: &str) -> Option<*mut c_void> {
+        let name = CString::new(symbol).ok()?;
+        // SAFETY: `handle` came from dlopen and is never closed; `name` is valid.
+        let addr = unsafe { host_dlsym(self.handle, name.as_ptr()) };
+        if addr.is_null() {
+            return None;
+        }
+        // dlsym searches the handle's whole dependency chain, so asking libm for
+        // `memcpy` succeeds — glibc's libm.so.6 depends on libc.so.6. Accepting
+        // that would attribute 400-odd libc symbols to libm and, worse, silently
+        // resolve libc from the host when the caller did not ask for it. Confirm
+        // the *defining* object is the one we asked.
+        (self.defines(addr)).then_some(addr)
+    }
+
+    fn defines(&self, addr: *mut c_void) -> bool {
+        let mut info = DlInfo::default();
+        // SAFETY: `addr` came from dlsym and `info` is a valid out-parameter.
+        if unsafe { host_dladdr(addr, &mut info) } == 0 || info.dli_fname.is_null() {
+            return false;
+        }
+        // SAFETY: dladdr filled dli_fname with a NUL-terminated path.
+        let path = unsafe { std::ffi::CStr::from_ptr(info.dli_fname) };
+        let path = path.to_string_lossy();
+        let file = path.rsplit('/').next().unwrap_or(&path);
+        file.starts_with(self.soname_stem)
+    }
+}
+
+/// `Dl_info`, laid out to match glibc's.
+#[repr(C)]
+struct DlInfo {
+    dli_fname: *const c_char,
+    dli_fbase: *mut c_void,
+    dli_sname: *const c_char,
+    dli_saddr: *mut c_void,
+}
+
+impl Default for DlInfo {
+    fn default() -> Self {
+        DlInfo {
+            dli_fname: std::ptr::null(),
+            dli_fbase: std::ptr::null_mut(),
+            dli_sname: std::ptr::null(),
+            dli_saddr: std::ptr::null_mut(),
+        }
+    }
+}
+
+// The *host* dynamic loader, not the bionic one. Declared directly rather than
+// taking a dependency on the `libc` crate for two functions.
+extern "C" {
+    #[link_name = "dlopen"]
+    fn host_dlopen(filename: *const c_char, flags: c_int) -> *mut c_void;
+    #[link_name = "dlsym"]
+    fn host_dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+    #[link_name = "dladdr"]
+    fn host_dladdr(addr: *mut c_void, info: *mut DlInfo) -> c_int;
+}
+
+const RTLD_NOW: c_int = 2;
+const RTLD_GLOBAL: c_int = 0x100;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classifies_khronos_by_shape_not_prefix() {
+        assert!(matches!(classify("glDrawArrays"), Class::Khronos("libGLESv2.so")));
+        assert!(matches!(classify("eglGetDisplay"), Class::Khronos("libEGL.so")));
+        // `glob` and `globfree` are libc, not GLES.
+        assert!(matches!(classify("glob"), Class::Generic));
+        assert!(matches!(classify("globfree"), Class::Generic));
+    }
+
+    #[test]
+    fn classifies_android_apis() {
+        assert!(matches!(classify("ANativeWindow_lock"), Class::Android("libandroid.so")));
+        assert!(matches!(classify("__android_log_print"), Class::Android("liblog.so")));
+        assert!(matches!(classify("AMediaCodec_start"), Class::Android("libmediandk.so")));
+    }
+
+    #[test]
+    fn plain_libc_is_generic() {
+        assert!(matches!(classify("memcpy"), Class::Generic));
+        assert!(matches!(classify("pthread_create"), Class::Generic));
+    }
+}

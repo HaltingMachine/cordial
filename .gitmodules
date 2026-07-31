@@ -1,0 +1,3 @@
+[submodule "third_party/mcpelauncher-linker"]
+	path = third_party/mcpelauncher-linker
+	url = https://github.com/minecraft-linux/mcpelauncher-linker

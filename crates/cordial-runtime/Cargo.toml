@@ -1,0 +1,13 @@
+[package]
+name = "cordial-runtime"
+description = "Loads and (eventually) runs Roblox's Android x86-64 build on Linux"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "cordial-load"
+path = "src/bin/load.rs"
+
+[dependencies]
+cordial-linker-sys = { path = "../cordial-linker-sys" }
