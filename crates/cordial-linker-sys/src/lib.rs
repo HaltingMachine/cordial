@@ -162,3 +162,66 @@ impl std::fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+/// The JNI virtual machine Roblox's native code calls back into.
+///
+/// Roblox registers 518 natives statically, but the traffic that matters runs the
+/// other way: native code reaching for Java classes it expects Android to
+/// provide. libjnivm answers those calls and records what was asked for, which is
+/// how the framework-API backlog stops being a guess.
+pub mod jni {
+    use std::ffi::{c_char, c_int, c_void, CString};
+
+    extern "C" {
+        fn cordial_jni_create_vm() -> *mut c_void;
+        fn cordial_jni_env() -> *mut c_void;
+        fn cordial_jni_dump_classes(path: *const c_char) -> c_int;
+        fn cordial_jni_call_onload(f: *mut c_void, err: *mut c_char, err_len: usize) -> c_int;
+    }
+
+    /// Call Roblox's `JNI_OnLoad` with the process JavaVM.
+    ///
+    /// Any C++ exception is caught on the far side: letting one cross the FFI
+    /// boundary gives a core dump and no explanation.
+    pub fn call_on_load(f: *mut c_void) -> Result<i32, String> {
+        let mut err = vec![0u8; 512];
+        // SAFETY: `f` is libroblox's JNI_OnLoad export; `err` is a live buffer of
+        // the length passed alongside it.
+        let rc = unsafe { cordial_jni_call_onload(f, err.as_mut_ptr() as *mut c_char, err.len()) };
+        match rc {
+            -1 => Err("no JavaVM, or JNI_OnLoad not found".into()),
+            -2 | -3 => {
+                let end = err.iter().position(|&b| b == 0).unwrap_or(err.len());
+                Err(String::from_utf8_lossy(&err[..end]).into_owned())
+            }
+            v => Ok(v),
+        }
+    }
+
+    /// Create the process's `JavaVM`. Returns `None` if one already exists.
+    pub fn create_vm() -> Option<*mut c_void> {
+        // SAFETY: the VM is process-global and owned by the shim.
+        let vm = unsafe { cordial_jni_create_vm() };
+        (!vm.is_null()).then_some(vm)
+    }
+
+    /// The calling thread's `JNIEnv*`.
+    pub fn env() -> Option<*mut c_void> {
+        // SAFETY: returns null when no VM exists, which is checked.
+        let env = unsafe { cordial_jni_env() };
+        (!env.is_null()).then_some(env)
+    }
+
+    /// Write C++ stubs for every Java class and method the native code reached
+    /// for. This is the observed Phase 2 backlog.
+    pub fn dump_classes(path: &str) -> Result<(), String> {
+        let c = CString::new(path).map_err(|e| e.to_string())?;
+        // SAFETY: `c` is a valid NUL-terminated path for the duration of the call.
+        match unsafe { cordial_jni_dump_classes(c.as_ptr()) } {
+            0 => Ok(()),
+            -1 => Err("no JavaVM has been created".into()),
+            -2 => Err("libjnivm was built without JNI_DEBUG".into()),
+            n => Err(format!("class dump failed ({n})")),
+        }
+    }
+}

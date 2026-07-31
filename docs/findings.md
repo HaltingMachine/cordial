@@ -136,13 +136,10 @@ Vendored at [`third_party/libbadcpu/`](../third_party/libbadcpu) from `sober-oss
 commit `e48a905efdffa1ad49a3ebb873895bcff73aa935`, MIT, attribution in
 [`third_party/libbadcpu/README.md`](../third_party/libbadcpu/README.md).
 
-Builds and tests clean in Cordial's own Meson tree:
-
-```bash
-meson setup build && ninja -C build && meson test -C build
-```
-
-Produces `build/third_party/libbadcpu/libbadcpu.so`. `1/1 cordial:badcpu-test OK`.
+Built as part of Cordial's native subtree (`native/CMakeLists.txt`), which Cargo
+drives via `cordial-linker-sys`'s build script. Meson was dropped when the bionic
+linker arrived: that subtree is CMake-and-Clang-only, and two build systems for one
+repository was not worth the small independence libbadcpu had.
 
 **Honest scope, per §16.5 and §16.7.** This is roughly 1% of Phase 1: eight emulated
 instructions behind a `SIGILL` handler, 904 lines including headers and tests.
@@ -154,6 +151,9 @@ emulation correctness at all** — nothing executes a faulting instruction and c
 emulated register result against the hardware. The upstream commit message
 ("fix: correct REX/VEX decoding, popcnt /r check, 64-bit movbe, r8-r15 support")
 indicates the decoder has already had real bugs in exactly the areas that are untested.
+
+It is **not yet wired into the load path** — nothing installs its `SIGILL` handler
+in the Roblox process. That happens when instances become real processes.
 
 Before this is trusted in a shipping runtime it needs a differential test: for each of the
 eight instructions, execute it natively on a capable CPU, execute it through the emulator,
@@ -299,9 +299,39 @@ an anonymous abort into `sysconf(39) = 1000` in one run. `abort`,
 `__stack_chk_fail` and `__android_log_assert` are wrapped unconditionally — a
 silent abort costs more time than the wrapper costs anything.
 
-### 8.2 Still true, and worth not overstating
+### 8.2 JNI_OnLoad — reached, and it marks the Phase 2 boundary
 
-- **Nothing renders.** No JavaVM, no window, no frame, no input.
+With `libjnivm` standing up a `JavaVM`, `cordial-load --jni-onload` calls Roblox's
+`JNI_OnLoad`. It does not return. Two worker threads — neither the calling thread —
+immediately call back through the JNI invocation interface with a **null**
+`JavaVM`, and libjnivm throws.
+
+The VM itself is sound: its `JavaVM::functions->reserved0` points at the VM, which
+is exactly what libjnivm needs to recover itself, and it is verified at creation.
+The null pointer is Roblox's own — threads that already existed before
+`JNI_OnLoad` (six `gettid` calls happen during static construction) reading a
+global the real Android bring-up would have populated by now.
+
+**That is the finding, and it is a scoping one:** `JNI_OnLoad` is not an entry
+point that can be called in isolation. On Android the sequence is a VM, then the
+app's Java side, then `GameActivity.initializeNativeCode` invoked *from Java* with
+a real `Activity`. Reaching a frame means implementing enough of that sequence for
+Roblox's own globals to be set — which is Phase 2 proper, not a finishing touch on
+Phase 1.
+
+`GameActivity` being Apache-2.0 (§5(b)) is what makes this tractable: the sequence
+is readable rather than inferred.
+
+A practical note for whoever picks this up: an exception escaping a thread Cordial
+did not start cannot be caught anywhere, so the default outcome is `std::terminate`
+and a core dump carrying no information at all. `native/jni_shim.cpp` installs a
+terminate handler that prints the thread, the `what()`, and a backtrace. Without it
+this took several runs to see; with it, one.
+
+### 8.3 Still true, and worth not overstating
+
+- **Nothing renders.** There is a JavaVM now, but no window, no frame and no input.
+- **`JNI_OnLoad` does not complete** (§8.2).
 - **`--host-libc` is a diagnostic, not the design.** libc is currently the host's
   where the ABI happens to agree. The divergences above are the ones found *so
   far*, by running until something broke; the file, directory and signal

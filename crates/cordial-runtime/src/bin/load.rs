@@ -15,6 +15,7 @@ struct Options {
     library: String,
     host_libc: bool,
     jni_onload: bool,
+    dump_classes: Option<String>,
     verbose: bool,
 }
 
@@ -24,7 +25,9 @@ usage: cordial-load --lib-dir <dir> [options]
   --lib-dir <dir>   directory holding the APK's lib/x86_64/ objects
   --library <name>  object to load (default: libroblox.so)
   --host-libc       also resolve libc from the host (ABI-unsafe; diagnostic only)
-  --jni-onload      call JNI_OnLoad after loading (expect this to fail)
+  --jni-onload      stand up a JavaVM and call JNI_OnLoad
+  --dump-classes <f>  implies --jni-onload; write the Java classes Roblox asked
+                    for to <f> — the observed Phase 2 backlog
   -v, --verbose     list every symbol and how it resolved
 
 env:
@@ -40,6 +43,7 @@ fn parse() -> Result<Options, String> {
         library: "libroblox.so".into(),
         host_libc: false,
         jni_onload: false,
+        dump_classes: None,
         verbose: false,
     };
     let mut args = std::env::args().skip(1);
@@ -49,6 +53,10 @@ fn parse() -> Result<Options, String> {
             "--library" => opt.library = args.next().ok_or("--library needs a value")?,
             "--host-libc" => opt.host_libc = true,
             "--jni-onload" => opt.jni_onload = true,
+            "--dump-classes" => {
+                opt.jni_onload = true;
+                opt.dump_classes = Some(args.next().ok_or("--dump-classes needs a path")?);
+            }
             "-v" | "--verbose" => opt.verbose = true,
             "-h" | "--help" => return Err(String::new()),
             other => return Err(format!("unrecognised argument: {other}")),
@@ -156,14 +164,31 @@ fn main() -> ExitCode {
 
     if opt.jni_onload {
         if let Some(p) = lib.symbol("JNI_OnLoad") {
-            println!("\ncalling JNI_OnLoad(null, null) — expect this to fail");
-            // SAFETY: nothing about this is safe. It calls into a 116 MB binary
-            // whose libc is mostly stubs, with a null JavaVM. It exists to find
-            // out where it stops.
-            let f: extern "C" fn(*mut std::ffi::c_void, *mut std::ffi::c_void) -> i32 =
-                unsafe { std::mem::transmute(p) };
-            let rc = f(std::ptr::null_mut(), std::ptr::null_mut());
-            println!("JNI_OnLoad returned {rc} ({rc:#x})");
+            let Some(vm) = linker::jni::create_vm() else {
+                eprintln!("could not create a JavaVM");
+                return ExitCode::FAILURE;
+            };
+            println!("\nJavaVM at {vm:p}; calling JNI_OnLoad");
+
+            match linker::jni::call_on_load(p) {
+                // JNI versions are 0x000M_000m; 0x00010006 is JNI_VERSION_1_6.
+                Ok(rc) => {
+                    println!("JNI_OnLoad returned {rc:#x} = JNI {}.{}", rc >> 16, rc & 0xffff);
+                }
+                Err(e) => {
+                    println!("JNI_OnLoad failed: {e}");
+                    println!(
+                        "\n  Roblox expects the Android bring-up sequence, not a bare JNI_OnLoad:\n                           a JavaVM, then GameActivity.initializeNativeCode called from Java with a\n                           real Activity. See docs/framework-api-inventory.md §3.3."
+                    );
+                }
+            }
+
+            if let Some(path) = &opt.dump_classes {
+                match linker::jni::dump_classes(path) {
+                    Ok(()) => println!("  Java classes Roblox reached for -> {path}"),
+                    Err(e) => eprintln!("  class dump failed: {e}"),
+                }
+            }
         }
     }
 
