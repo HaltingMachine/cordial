@@ -238,7 +238,6 @@ pub mod game_activity {
     extern "C" {
         fn cordial_game_activity_init(
             f: *mut c_void,
-            env: *mut c_void,
             internal_path: *const c_char,
             obb_path: *const c_char,
             external_path: *const c_char,
@@ -249,7 +248,6 @@ pub mod game_activity {
 
     pub fn initialize(
         native: *mut c_void,
-        env: *mut c_void,
         internal_path: &str,
         obb_path: &str,
         external_path: &str,
@@ -259,12 +257,12 @@ pub mod game_activity {
         let external = CString::new(external_path).map_err(|e| e.to_string())?;
         let mut err = vec![0u8; 512];
 
-        // SAFETY: `native` is libroblox's initializeNativeCode export and `env`
-        // the process JNIEnv; the paths outlive the call.
+        // SAFETY: `native` is libroblox's initializeNativeCode export; the paths
+        // outlive the call. The shim takes the JNI environment from the VM
+        // itself — Rust cannot name `jnivm::ENV` and must not pretend to.
         let handle = unsafe {
             cordial_game_activity_init(
                 native,
-                env,
                 internal.as_ptr(),
                 obb.as_ptr(),
                 external.as_ptr(),

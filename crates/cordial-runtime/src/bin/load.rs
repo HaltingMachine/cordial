@@ -278,9 +278,8 @@ fn main() -> ExitCode {
                                 ))
                             )
                         });
-                        let env = linker::jni::env().unwrap_or(std::ptr::null_mut());
                         println!("\ncalling GameActivity.initializeNativeCode");
-                        match linker::game_activity::initialize(f, env, &files, &files, &files) {
+                        match linker::game_activity::initialize(f, &files, &files, &files) {
                             Ok(handle) => println!("  native handle {handle:#x}"),
                             Err(e) => println!("  failed: {e}"),
                         }

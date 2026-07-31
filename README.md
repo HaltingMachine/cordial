@@ -84,6 +84,20 @@ To load Roblox's engine, point it at the `lib/x86_64/` objects from an installed
 cargo run --release --bin cordial-load -- --lib-dir /path/to/lib/x86_64 --host-libc
 ```
 
+## Flatpak
+
+Flatpak is the primary distribution target (spec §11).
+
+```bash
+packaging/build-flatpak.sh --install
+```
+
+The manifest deliberately has no `--filesystem=host` and no
+`--talk-name=org.freedesktop.Flatpak` — the latter is arbitrary host command
+execution and would hand every plugin the sandbox escape the capability model
+exists to prevent, below where any broker could see it
+([ADR-002](docs/adr/ADR-002-core-shell-and-ui-handoff.md) §2).
+
 ## Build order
 
 0. **Evaluate prior art** — done. Port, don't write: the AOSP bionic linker, a bionic libc

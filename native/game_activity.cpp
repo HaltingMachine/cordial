@@ -24,6 +24,7 @@
 #include <string>
 
 namespace cordial {
+jnivm::ENV* process_env();
 
 using jnivm::Class;
 using jnivm::ENV;
@@ -127,12 +128,15 @@ extern "C" {
 /// `err` receives a message on failure. Exceptions are contained here for the
 /// same reason as in jni_shim.cpp: one crossing the Rust boundary is a core dump
 /// with no explanation.
-long cordial_game_activity_init(void* fn, void* env_ptr, const char* internal_path,
-                                const char* obb_path, const char* external_path,
-                                char* err, size_t err_len) {
+long cordial_game_activity_init(void* fn, const char* internal_path, const char* obb_path,
+                                const char* external_path, char* err, size_t err_len) {
     using Init = jlong (*)(JNIEnv*, jobject, jstring, jstring, jstring, jobject, jbyteArray,
                            jobject);
-    auto* env = static_cast<jnivm::ENV*>(env_ptr);
+    // Taken from the VM here rather than passed in. A `JNIEnv*` and a
+    // `jnivm::ENV*` are unrelated types that both arrive as `void*`, and
+    // confusing them does not fail at the boundary — it fails much later, as a
+    // call through a null slot in what was assumed to be the function table.
+    auto* env = cordial::process_env();
     if (!fn || !env) {
         snprintf(err, err_len, "no JavaVM or no initializeNativeCode");
         return 0;

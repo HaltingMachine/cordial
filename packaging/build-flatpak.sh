@@ -66,6 +66,10 @@ flatpak-builder \
 echo
 echo "built into $repo"
 
+# A single-file bundle, which is what you hand someone who wants to try it.
+flatpak build-bundle "$repo" "$root/target/cordial.flatpak" org.cordial.Cordial
+echo "bundle: $root/target/cordial.flatpak"
+
 if [[ "${1:-}" == "--install" ]]; then
     flatpak install --user --noninteractive --or-update --reinstall "$repo" org.cordial.Cordial
     echo "installed. run with: flatpak run org.cordial.Cordial"

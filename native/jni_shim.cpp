@@ -7,6 +7,13 @@
 extern "C" void cordial_register_android_classes(void* env);
 namespace cordial { void register_game_activity_classes(jnivm::ENV* env); }
 
+/// The process VM, for translation units that need the real jnivm::ENV rather
+/// than a JNIEnv. Keeping this on the C++ side means Rust never has to hold a
+/// type it cannot name — passing a JNIEnv* and casting it to jnivm::ENV* is a
+/// silent type confusion that surfaces as a null function pointer several calls
+/// later.
+namespace cordial { jnivm::ENV* process_env(); }
+
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
@@ -191,3 +198,9 @@ int cordial_jni_call_onload(void* fn, char* err, size_t err_len) {
 }
 
 } // extern "C"
+
+namespace cordial {
+jnivm::ENV* process_env() {
+    return g_vm ? g_vm->GetEnv().get() : nullptr;
+}
+} // namespace cordial
