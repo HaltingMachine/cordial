@@ -672,3 +672,51 @@ of it is the answer to this question.
 What remains unexplained: `onFlagsFailed` arrives on a background thread, early,
 with a full and valid flag set already installed. Whatever it is testing, it is
 not "do I have flags".
+
+## §9. Where the verdict is actually made
+
+A breakpoint on Cordial's own `NativeHelper::onFlagsFailed` gives the real call
+chain (offsets into `libroblox.so`, ASLR disabled, base `0x7fffefec0000`):
+
+```
+onFlagsFailed  (Cordial)
+  <- libjnivm CallMethod
+  <- 0x29c8fff   JNI varargs wrapper
+  <- 0x29c9349   inside a small reporter function starting at 0x29c92eb
+  <- 0x29c5541
+  <- 0x20db850 / 0x20db728 / 0x20db5a7  = nativeGameGlobalInit
+  <- start_thread
+```
+
+Two facts worth having:
+
+**There are two separate reporter functions, not one branch.** The string
+`gameActivity_onFlagsLoaded` is referenced from exactly one place, `0x29c9182`,
+inside a function beginning at `0x29c9120`; `gameActivity_onFlagsFailed` from
+exactly one place, `0x29c931e`, inside a *different* function beginning at
+`0x29c92eb` (`push %rbp` prologue). So neither reporter chooses anything — the
+choice is made by whoever calls one of them.
+
+**The call site is already committed.** At `0x29c553c` the failed reporter is
+called unconditionally:
+
+```
+29c5519:  mov  0x8(%rbx),%rax     ; an object hanging off the caller's state
+29c5527:  je   29c5541            ; skipped entirely if that is null
+29c5529:  movl $0xb,0x10(%rax)    ; write 11 into it -- a status, before reporting
+29c5530:  mov  0x40(%rax),%rax
+29c5538:  mov  0x10(%rax),%rdi
+29c553c:  call 29c92eb            ; report FAILED
+```
+
+The `movl $0xb` is the useful part: **11 is written into `+0x10` of that object
+immediately before the report.** That is a status code being recorded, and it is
+a far better instrumentation target than the report itself — a watchpoint on
+that word catches the moment the verdict is decided, with the deciding frame
+still on the stack. Whatever picks `0xb` is upstream of `0x29c5541` and is the
+actual question.
+
+Stopping the static walk here deliberately. This is the point at which previous
+investigations on this binary started inferring, and eight consecutive inferences
+have been wrong. The next step is a watchpoint on that status word, not more
+disassembly.
