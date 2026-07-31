@@ -11,3 +11,9 @@ compile_commands.json
 /native/lib/
 .flatpak-builder/
 *.flatpak
+
+# Per-run engine debris. Roblox writes its FastLog and a per-PID memory-profile
+# dump next to the working directory on every launch; some were committed before
+# this rule existed, which is why the paths already have contents.
+appData/logs/
+appData/LocalStorage/_memProfStorage*.json

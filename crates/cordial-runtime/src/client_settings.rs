@@ -9,10 +9,15 @@
 //!
 //! ## The call contract, established by experiment
 //!
-//! `nativeInitClientSettings(String, String, String)` returns an `int`, and that
-//! return value is the only trustworthy signal — the engine's own `FLog` output
-//! is not routed anywhere visible in this build. Feeding it known-good and
-//! known-bad documents settles what it means:
+//! `nativeInitClientSettings(String, String, String)` returns an `int`. Feeding
+//! it known-good and known-bad documents settles what it means:
+//!
+//! (An earlier version of this note called that return value "the only
+//! trustworthy signal, since the engine's own `FLog` output is not routed
+//! anywhere visible in this build". The second half was wrong. `FLog` is routed,
+//! and always has been — the engine writes it to `appData/logs/*.log`, relative
+//! to the working directory. Read that file; it is the best diagnostic Cordial
+//! has.)
 //!
 //! | first argument | result |
 //! |---|---|

@@ -134,6 +134,29 @@ fn parse() -> Result<Options, String> {
 /// `.apk` names a file inside a file. So the APK's assets are unpacked once to
 /// a cache directory and that is what `assetFolderPath` points at.
 ///
+/// It points at the `content` **subdirectory**, not the unpack root. The
+/// Waydroid capture is explicit about this:
+///
+/// ```text
+/// [FLog::Output] setAssetFolder      /data/user/0/com.roblox.client/app_assets/content
+/// [FLog::Output] setExtraAssetFolder /data/user/0/com.roblox.client/app_assets/ExtraContent
+/// ```
+///
+/// The engine echoes back exactly the path it is given, and resolves its
+/// siblings — `android/`, `ssl/`, `fonts/` — relative to the *parent*. Passing
+/// the unpack root therefore sends every one of those lookups a level too high.
+/// Cordial did that, and the engine's own log named the consequence:
+///
+/// ```text
+/// [FLog::CreatorError] Error: boost::filesystem::canonical:
+///     No such file or directory: ".../.cache/cordial/android"
+/// ```
+///
+/// That throw aborts `SingleSurfaceApp` initialisation before it reaches
+/// `setStage: (stage:Native)` and before it instantiates its controllers, which
+/// is why `initializeLuaAppWithLoggedInUser` then ran at `(stage:None)` and
+/// dereferenced a controller that was never built.
+///
 /// Falls back to the APK path if extraction fails, which keeps the old
 /// behaviour rather than refusing to start over an asset folder — the loader
 /// and asset paths still work without it.
@@ -145,7 +168,7 @@ fn asset_folder(apk: &Option<String>) -> String {
         .unwrap_or_else(std::env::temp_dir)
         .join("cordial/assets");
     match cordial_runtime::android::asset::extract_to(&base) {
-        Ok(dir) => dir.to_string_lossy().into_owned(),
+        Ok(dir) => dir.join("content").to_string_lossy().into_owned(),
         Err(e) => {
             println!("  asset extraction failed ({e}); using the APK path");
             apk.clone()
@@ -509,9 +532,16 @@ fn main() -> ExitCode {
                                         if let Some(p) = lib.symbol(
                                             "Java_com_roblox_client_startup_MainGameActivity_nativeAppBridgeSetInitParams",
                                         ) {
+                                            // `PlatformParams.assetFolderPath`,
+                                            // which is the same field the app
+                                            // bridge gets — so it takes the same
+                                            // unpacked `content` directory, not
+                                            // the `.apk`. Naming the archive here
+                                            // made every path the engine built
+                                            // from it a file inside a file.
                                             match linker::game_activity::set_init_params(
                                                 p,
-                                                opt.apk.as_deref().unwrap_or(""),
+                                                &asset_folder(&opt.apk),
                                                 width,
                                                 height,
                                             ) {

@@ -10,136 +10,226 @@ conclusion drawn by reading the stripped binary was wrong — nine in a row — 
 every conclusion drawn by running something held up. The trace exists so that
 "what does the engine expect here?" is a lookup, not an investigation.
 
-Two of the nine were caught only because they were tested before being built on:
-a fix for a `Surface` that turned out to already work, and a client-settings
-theory that survived three careful arguments and died to one experiment.
+The rule held again this session. The futex was identified without disassembling
+a single instruction, and the root cause underneath it was found by reading a log
+file the engine had been writing all along.
 
-## Start here: the futex
+## Read this first: the engine has a voice, and it always did
 
-The driving thread parks in a futex during render bring-up. A wait like that is
-almost always on a sync primitive **nobody is going to signal**, and the prime
-candidate is an **EGL/GBM surface handshake that never completes**. That fits the
-one confirmed fact nothing else explained: the engine takes a real, non-null
-`ANativeWindow` and then never touches it again — no `setBuffersGeometry`, no
-`getWidth`, no EGL.
+**Roblox writes its own FastLog to `appData/logs/<version>_<timestamp>_Player_*.log`,
+relative to the working directory.** Every run produces one. It is far and away
+the best diagnostic in the project — it names subsystems, stages, file paths and
+exceptions in the engine's own words.
 
-Identify what that futex word belongs to before anything else. If it is a
-graphics-side handshake, the wall may not be Cordial's client code at all.
+Two comments in this repo claimed the opposite ("`FLog` is not routed anywhere
+visible in this build"). Both were wrong and are now corrected. Nobody had
+looked in `appData/`.
 
-## A limit on the trace, stated honestly
+So: **before anything else, read the newest file in `appData/logs/`.**
 
-Cordial runs **natively on the host** (X11/Mesa), not inside the container. The
-Waydroid capture is therefore trustworthy for **call order, names and contract**
-— which is what it was taken for — but **not** for timing or render behaviour.
-Roblox under Waydroid is reported to burn CPU with very little GPU utilisation,
-with missing explicit sync suspected, and on NVIDIA the container's Android is
-built against bionic while `nvidia-utils` is not. Do not read the capture's
-rendering path as a model of a healthy one.
+```bash
+cat "appData/logs/$(ls -t appData/logs | head -1)"
+```
 
-## Do not re-derive
+Enabling extra channels via client settings (adding `FLog<Channel>` keys to the
+cached settings document) was tried and produced no additional output; the
+channels that matter are on by default anyway. Not worth a second attempt.
 
-The 139 flag names are already extracted and built in
-(`crates/cordial-runtime/src/native-flag-names.txt`). The bring-up order is
-already corrected. Both came from the capture; do not spend a session
-rediscovering them.
+## The futex: answered, and it was not what we thought
+
+The previous handoff said the driving thread parks in a futex that is "most
+likely an EGL/GBM surface handshake that never completes". **That was wrong.**
+There is no graphics primitive involved.
+
+What it actually is, established by observation:
+
+- The futex word lives in an anonymous heap arena, at **offset +0x0C of a
+  64-byte-aligned engine object**. Every one of the 16 idle `RBX Worker` threads
+  parks on the *same class of object at the same offset through the same call
+  site*. It is the engine's ordinary internal wait primitive, nothing special.
+- The wait is `FUTEX_WAIT_BITSET|FUTEX_PRIVATE`, expected value 2, **timeout
+  NULL** — indefinite.
+- It is a **completion handshake**: the JNI thread dispatches work to an engine
+  thread and waits for that thread to signal. The engine thread segfaults before
+  signalling, so the wait can never end.
+
+**The block and the crash were one bug, not two.** The previous handoff treated
+them as independent ("it dies because a *different* engine thread segfaults").
+They are cause and effect.
+
+Proven causally rather than argued: at the SIGSEGV, stepping the faulting thread
+over its null dereferences and continuing made the futex resolve immediately,
+`StartAppWithParams` return, `ANativeWindow_*` calls follow, and the process run
+its full 12 seconds and exit 0.
+
+### Correction: it is `StartLuaAppDM`, not `StartAppWithParams`
+
+The blocking call is `nativeAppBridgeStartLuaAppDM`
+(`load.rs:821`), not `nativeAppBridgeV2StartAppWithParams`. The previous handoff
+named the wrong one. This matches the capture, where `StartLuaAppDM` is exactly
+the call that hands work to the `SingleSurfaceApp` thread and waits.
+
+### How to read a futex under Cordial
+
+`lldb` cannot symbolise `libroblox`, but it stops the process fine, and while it
+is stopped `/proc/<pid>/task/<tid>/syscall` gives the syscall number and all six
+arguments directly — no register-shuffle guesswork about glibc's `syscall()`
+wrapper. Combine with `/proc/<pid>/maps` to place the address. That is how the
+above was established, and it is the technique to reuse.
+
+## Root cause found and fixed: the asset folder was one level too high
+
+The engine's log named it:
+
+```text
+[FLog::Output] setAssetFolder ~/.cache/cordial/assets
+[FLog::CreatorError] Error: boost::filesystem::canonical:
+    No such file or directory: ".../.cache/cordial/android"
+```
+
+The capture says what the path should be:
+
+```text
+[FLog::Output] setAssetFolder      /data/user/0/com.roblox.client/app_assets/content
+[FLog::Output] setExtraAssetFolder /data/user/0/com.roblox.client/app_assets/ExtraContent
+```
+
+The engine is handed the **`content` subdirectory** and resolves its siblings —
+`android/`, `ssl/`, `fonts/`, `ExtraContent/` — relative to the *parent*. Cordial
+handed it the unpack root, so every sibling lookup landed a level too high, the
+`canonical` call threw, and `SingleSurfaceApp` initialisation aborted **before**
+`setStage: (stage:Native)` and before it instantiated its controllers. The later
+`initializeLuaAppWithLoggedInUser` then ran at `(stage:None)` and made a virtual
+call through a controller that had never been constructed — the null dereference
+at `libroblox+0x2ccd912`.
+
+Fixed in `asset_folder()` in `load.rs`. The same string also feeds
+`PlatformParams.assetFolderPath` via `nativeAppBridgeSetInitParams`, which was
+still being handed the raw `.apk` file path; that is fixed too.
+
+### What the fix bought
+
+The engine now gets all the way through the sequence it was failing at. Against
+`docs/traces/render-bringup-sequence.log`, Cordial now reproduces:
+
+```text
+initializeWithAppStarter / initializeSingleton
+setAssetFolder + setExtraAssetFolder          (correct paths)
+registerForForceOTAUpdateAvailableConnection   <- new
+setStage: (stage:Native)                       <- new
+instantiate controllers                        <- new
+SurfaceController[_:1]::SurfaceController      <- new
+instantiate experience coordinator             <- new
+initializeLuaAppWithLoggedInUser: (stage:Native).   (was (stage:None))
+applyLocale
+DataModelPatchConfigurer ... deserializeAndVerifyPatch with blake3
+[FLog::Output] Hello world, CLI-208683! ...    <- Lua is running
+```
+
+**Lua executes.** That is a long way past where this was stuck.
+
+## The blocker now
+
+```text
+[LOGCHANNELS + 1] RBXCRASH: UnhandledException (St13runtime_error Path does not exist: "")
+```
+
+Thrown ~0.2 s after `deserializeAndVerifyPatch with blake3`, on the DataModel/Lua
+thread — the same thread that prints the `Hello world` lines. The path is
+**empty**, not merely missing.
+
+Facts about it, all from running:
+
+- It happens with `CORDIAL_SKIP_LUA_DM=1` too, so it is **not** driven by
+  `StartLuaAppDM`. The patch configurer is started during `V2Init`.
+- **No JNI upcall precedes it.** Cordial's `[JNIVM]` log stops at
+  `PlatformParams.assetFolderPath`. So the empty path was supplied earlier or is
+  computed internally — the engine is not asking the host for it.
+- The subsequent SIGSEGV is *secondary*: it lands in `_IO_fflush` with a null
+  `FILE*`, i.e. inside Roblox's own crash reporter. Do not chase that address; it
+  is the handler tripping over glibc/bionic `FILE` layout, not the defect.
+- The content is not missing: all 1839 asset files extract, including
+  `ExtraContent/models/UniversalApp/UniversalApp.rbxm` and
+  `ExtraContent/places/Mobile.rbxl` (which is what the real client loads next).
+
+### Leads, in the order worth trying
+
+1. **The engine ignores the storage directory Cordial gives it.**
+   `initStorageManagerNativeV3` is passed
+   `$XDG_DATA_HOME/cordial/instances/default/data` — *twice*, the same string for
+   both arguments — and that directory **did not even exist**. Creating it changed
+   nothing, and the engine keeps writing to a CWD-relative `appData/`, which is
+   its unconfigured fallback. So the storage root is very likely still unset
+   inside the engine, and an unset root is a plausible source of an empty path.
+   Find out what the two arguments actually are before guessing again — the dex
+   in the APK names them.
+2. `InitParams.baseURL` is `https://www.roblox.com` and `userAgent` is
+   `Roblox/Android`. The capture says `www.roblox.com/` (**trailing slash**) and
+   the long real UA (`... ROBLOX Android App 2.732.1043 Tablet Hybrid
+   GooglePlayStore RobloxApp/2.732.1043`). Cheap to align, and `setBaseUrl()` is
+   visible in the capture.
+3. `DeviceParams.appVersion` is `""`. If any path is built as
+   `<root>/<version>/...` that is a candidate.
+
+## Still true, still not worth redoing
+
+- The **flags verdict does not gate rendering**. `onFlagsFailed` is a complaint,
+  not a gate. Confirmed again this session: the verdict is still `FAILED` while
+  the engine happily instantiates controllers and runs Lua.
+- It is **not** an unserviced ALooper.
+- The 139 flag names and the corrected bring-up order are already in the tree.
 
 ## On observing Sober
 
-An earlier version of this file said attaching a debugger to Sober raises "the
-same provenance question" as reading its decompilation. That was wrong, and the
-distinction matters enough to state properly.
+**Decompilation reconstructs expression** — you end up reading a reconstruction
+of their source and writing code from it, which is where derivative-work risk
+lives. That is why `decompiled/` stays off-limits (§16.1, ADR-001).
 
-**Decompilation reconstructs expression.** You end up reading a reconstruction of
-their source and writing code from it, which is where derivative-work risk lives.
-That is why `decompiled/` stays off-limits (§16.1, ADR-001).
-
-**A debugger on a running process yields behaviour.** Which libraries it loads,
-which natives it calls, in what order, with what arguments, what it maps where.
-Those are facts and interfaces, not expression, and black-box observation for
-interoperability is the ordinary basis for this kind of work rather than an edge
-case.
+**A debugger on a running process yields behaviour** — which libraries it loads,
+which natives it calls, in what order, with what arguments. Those are facts and
+interfaces, not expression, and black-box observation for interoperability is the
+ordinary basis for this kind of work.
 
 So the line is not the tool, it is **what you take away**:
 
 - Fine: the call sequence, the load order, argument shapes, which symbols get
-  resolved, timing, syscalls. Anything you could in principle have discovered by
-  watching the outside of the process.
-- Not fine: stepping into Sober's own routines to read how it implements
-  something and transcribing that logic. At that point the debugger is just a
-  slower decompiler.
+  resolved, timing, syscalls.
+- Not fine: stepping into its routines to read how it implements something and
+  transcribing that logic. At that point the debugger is just a slower decompiler.
 
-**And Sober is the better reference for this specific problem.** Waydroid runs a
-full Android stack in a container, which is exactly why its render path is not a
-model to copy (see the caveat above). Sober runs the same APK natively on the
-host against the host GPU — the shape Cordial is aiming at. Its *sequencing* is
-therefore more relevant ground truth than the Waydroid capture, particularly for
-the EGL/surface handshake the futex is likely waiting on.
+**One rule, applied to any binary including Roblox: observe freely, do not
+transcribe.** Sober was built by observing Roblox, and nobody treats Sober as
+tainted for it.
 
-**The rule is uniform, and applies to Roblox exactly as it does to Sober.**
-Roblox is proprietary too. Sober was built by observing it, and nobody treats
-Sober as tainted for that — it is ordinary interoperability work. Earlier notes
-here implied Sober needed extra caution *because* it is proprietary; that was
-inconsistent, since the same would then condemn Sober itself, and Cordial's own
-Waydroid capture of Roblox along with it.
+Sober remains the better reference for the render path specifically — it runs the
+same APK natively against the host GPU, which is Cordial's shape. It was not
+needed this session; the engine's own log was enough.
 
-One rule, applied to any binary: **observe freely, do not transcribe.**
+## A limit on the trace, stated honestly
 
-Worth recording in the commit which kind of observation produced any given fact.
-
-## The blocker, as precisely as it is known
-
-Confirmed by runtime evidence:
-
-- The **flags verdict does not gate rendering**. `onFlagsFailed` is a complaint,
-  not a gate. The crash address moves between paths while the verdict stays
-  constant. Do not spend time on it.
-- **No EGL or GL call ever happens.** All counters read zero at the crash.
-  `ANativeWindow_fromSurface` returns a real non-null window and nothing follows.
-- At the moment of death the **driving thread is not crashed — it is blocked**,
-  in a futex, inside Roblox's own code, underneath
-  `nativeAppBridgeV2StartAppWithParams`. It never returns, so it never reaches
-  the code that would create the EGL surface.
-- It dies because a **different** engine thread segfaults first
-  (`libroblox+0x2ccd912`), and any thread's SIGSEGV kills the process.
-- It is **not** an unserviced ALooper. That was tested: the main thread pumps
-  `epoll_wait` continuously on a dedicated thread while the worker still blocks
-  at the identical futex.
-
-So the question is **what that futex is waiting on**. That is the whole problem.
-
-## Cheap things not yet tried
-
-- Enable the engine's own logging. Thirty `FLog::`/`DFLog::` channels are live in
-  the Waydroid capture (`docs/traces/flog-channels.txt`), including
-  `FLog::AndroidGLView`. An earlier note here claiming FLog is unrouted was wrong
-  — it is routed on real Android, so the channels work; Cordial just has not
-  turned them on. Getting the engine to narrate itself is worth more than any
-  amount of further static analysis.
-- Diff Cordial's JNI call sequence against the trace directly. Cordial's own
-  `[JNIVM]` log and the logcat capture are both ordered lists of the same
-  bring-up; the first divergence is the thing to fix.
-- Drive the remaining GameActivity callbacks. Only 4 of ~23 were being called;
-  adding `onWindowFocusChangedNative` alone provoked three new engine call-outs
-  (`setImeEditorInfoFields`, `setWindowFlags`, `getWindowInsets`) and that
-  isolated path exits cleanly. `agent/wt-agdk` has that work.
-- Implement `ShellConfigurationContentProvider`
-  (`content://com.roblox.client.ShellConfigurationProvider/config.get`), which the
-  real client queries twice at startup and Cordial has no equivalent for.
+Cordial runs **natively on the host** (X11/Mesa), not inside the container. The
+Waydroid capture is trustworthy for **call order, names and contract** — which is
+what it was taken for — but **not** for timing or render behaviour.
 
 ## Debugging facts that cost time to learn
 
+- **Read `appData/logs/` first.** See the top of this file.
 - **lldb breakpoints inside `libroblox.so` do not work.** Cordial `mmap`s it
   outside the system linker, so lldb never lists the image and every breakpoint
-  stays unresolved with hit count 0 — silently. The only working technique is
-  `memory write` of `0xCC`, then rewinding `$pc` and restoring the byte on trap.
-  Crash-stop backtraces and breakpoints in Cordial's own code are unaffected.
-- **There are three threads named `Main`**: Cordial's driving thread, the AGDK
-  looper-service thread, and one the engine spawns. Use `thread backtrace all`;
-  any note in this repo saying "the engine's Main thread" is ambiguous.
-- **`CORDIAL_SKIP_AGDK=1` skips the flag and app-bridge calls entirely.** Several
-  results were measured on a path that never ran the code under test.
-- Roblox's launcher activity is `com.roblox.client/.startup.ActivitySplash`, in
-  the `.startup` subpackage. `monkey` fails silently on the wrong name.
+  stays unresolved with hit count 0 — silently. Use `memory write` of `0xCC`,
+  then rewind `$pc` and restore the byte on trap. Crash-stop backtraces and
+  breakpoints in Cordial's own code are unaffected.
+- **Read syscall arguments from `/proc/<pid>/task/<tid>/syscall`** while lldb has
+  the process stopped, not from registers.
+- **Stepping a thread over its faults is a legitimate causality experiment.** On
+  SIGSEGV, advance `$pc` by the instruction length, zero the destination
+  register, and continue. Five skips were enough to prove the futex was
+  downstream of the crash. Debugger-only; nothing shipped.
+- **There are three threads named `Main`.** Use `thread backtrace all`.
+- **`CORDIAL_SKIP_AGDK=1` skips the flag and app-bridge calls entirely.**
+- The whole run lives and dies in ~120 ms. Sampling `/proc` from a shell loop is
+  too slow to catch it; drive it under lldb.
+- Roblox's launcher activity is `com.roblox.client/.startup.ActivitySplash`.
 
 ## Branches
 
