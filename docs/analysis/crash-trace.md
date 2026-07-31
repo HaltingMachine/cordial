@@ -104,6 +104,24 @@ nothing convenient breaks in between.
 `gdb` is not installed here; lldb can do it but needs a stopping point in the
 middle of engine startup, which is the part still missing.
 
+## Why the setter scan missed: an embedded sub-object
+
+The vtable stored at the object's `+0` is loaded from exactly two places in the
+binary, one of them inside `nativeAppBridgeV2InitWithParams` — so that native
+constructs `SingleSurfaceAppImpl` directly, consistent with the zeroing seen at
+`+0x21867c0`.
+
+That zeroing covers `+0x3c0` through `+0x440` as one block, which is the shape of
+an **embedded member**, not a scatter of independent fields. If the `JNIEnv` lives
+inside that member, its setter writes at a small offset from a pointer to the
+member — e.g. `mov %rax,0x40(%rbx)` with `%rbx == object + 0x3c0` — and a scan
+for `0x400(%reg)` cannot see it.
+
+That resolves the contradiction between "59 stores to `+0x400`, none executed" and
+"the field must be written somewhere": it is written, but not at that literal
+displacement. The watchpoint remains the authority — and it says nothing writes a
+non-zero value to this object's field during the run.
+
 ## The setter is not findable by direct scan
 
 Every `mov %reg,0x400(%reg)` in the binary — 59 of them — was breakpointed in a
