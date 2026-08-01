@@ -134,6 +134,13 @@ on it.
 - x86-64 Linux
 - **Clang** — AOSP bionic uses C11 `_Atomic` inside C++ headers and GCC rejects it
 - An X11 session (Wayland works through XWayland)
+- **GTK4 (≥ 4.10) and libadwaita (≥ 1.4)** development packages — the core shell
+  in `crates/cordial-shell` is `AdwApplicationWindow`/`AdwToolbarView` end to
+  end (see [ADR-002](docs/adr/ADR-002-core-shell-and-ui-handoff.md) and
+  [ADR-011](docs/adr/ADR-011-wayland-and-libadwaita.md)), and `gtk4-sys`/
+  `libadwaita-sys` link against them via `pkg-config` at build time. Fedora:
+  `dnf install gtk4-devel libadwaita-devel`. Debian/Ubuntu:
+  `apt install libgtk-4-dev libadwaita-1-dev`. Arch: `pacman -S gtk4 libadwaita`
 - Roblox's official Android client, which **you supply** — Cordial ships no
   Roblox code, APK or assets and never will
 
