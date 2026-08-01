@@ -265,6 +265,18 @@ extern "C" fn vk_get_instance_proc_addr(instance: *mut c_void, name: *const c_ch
         // Counted, not altered. A Vulkan session leaves every GLES counter at
         // zero, so without this the graphics report cannot tell "Vulkan is
         // presenting frames" from "nothing is drawing at all".
+        // Device-level entry points are normally fetched through
+        // `vkGetDeviceProcAddr`, not through this function — that is the whole
+        // point of the device dispatch. Intercepting only the instance getter
+        // meant the present counter never incremented and a perfectly healthy
+        // Vulkan session read as "nothing is drawing".
+        b"vkGetDeviceProcAddr" => {
+            HOST_GET_DEVICE_PROC_ADDR.store(
+                unsafe { (h.get_instance_proc_addr)(instance, name) } as usize,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            vk_get_device_proc_addr as *const () as *mut c_void
+        }
         b"vkQueuePresentKHR" => {
             HOST_QUEUE_PRESENT.store(
                 unsafe { (h.get_instance_proc_addr)(instance, name) } as usize,
@@ -279,6 +291,27 @@ extern "C" fn vk_get_instance_proc_addr(instance: *mut c_void, name: *const c_ch
         // `VkInstance`: see `vk_create_instance`.
         _ => unsafe { (h.get_instance_proc_addr)(instance, name) },
     }
+}
+
+/// The host's `vkGetDeviceProcAddr`, so device-level lookups can be forwarded
+/// after the counted ones are peeled off.
+static HOST_GET_DEVICE_PROC_ADDR: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+extern "C" fn vk_get_device_proc_addr(device: *mut c_void, name: *const c_char) -> *mut c_void {
+    let f = HOST_GET_DEVICE_PROC_ADDR.load(std::sync::atomic::Ordering::Relaxed);
+    if f == 0 || name.is_null() {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: resolved from the host loader for exactly this name.
+    let host: extern "C" fn(*mut c_void, *const c_char) -> *mut c_void =
+        unsafe { std::mem::transmute(f) };
+    // SAFETY: Vulkan's contract is a NUL-terminated name.
+    if unsafe { CStr::from_ptr(name) }.to_bytes() == b"vkQueuePresentKHR" {
+        HOST_QUEUE_PRESENT.store(host(device, name) as usize, std::sync::atomic::Ordering::Relaxed);
+        return vk_queue_present_khr as *const () as *mut c_void;
+    }
+    host(device, name)
 }
 
 /// The real `vkQueuePresentKHR`, resolved on first request and then called

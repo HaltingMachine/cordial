@@ -66,6 +66,21 @@ modules:
           /app/share/icons/hicolor/scalable/apps/org.cordial.Cordial.svg
       - install -Dm644 packaging/org.cordial.Cordial.desktop
           /app/share/applications/org.cordial.Cordial.desktop
+      # Licence and attribution. MIT requires its notice in "all copies or
+      # substantial portions", and Apache-2.0 section 4(d) requires the NOTICE
+      # file to travel with derivative works — both apply to a binary build, not
+      # just to the source tree.
+      - install -Dm644 LICENSE /app/share/licenses/cordial/LICENSE
+      - install -Dm644 THIRD-PARTY-NOTICES.md
+          /app/share/licenses/cordial/THIRD-PARTY-NOTICES.md
+      - install -Dm644 third_party/libbadcpu/LICENSE.upstream
+          /app/share/licenses/cordial/libbadcpu-MIT.txt
+      - install -Dm644 third_party/mcpelauncher-linker/LICENSE
+          /app/share/licenses/cordial/mcpelauncher-linker-MIT.txt
+      - install -Dm644 third_party/mcpelauncher-linker/core/NOTICE
+          /app/share/licenses/cordial/aosp-NOTICE.txt
+      - install -Dm644 third_party/libjnivm/LICENSE
+          /app/share/licenses/cordial/libjnivm-MIT.txt
     sources:
       - type: dir
         path: ..

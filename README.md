@@ -135,6 +135,16 @@ Also out: client-side integrity flags or watermarks, and obfuscation-as-security
 
 GPL-3.0-or-later. See [`LICENSE`](LICENSE).
 
-Vendored and submoduled dependencies are MIT and keep their own notices:
-[`third_party/libbadcpu`](third_party/libbadcpu) (from Sober OSS),
-`mcpelauncher-linker` and `libjnivm` (ChristopherHX / MCMrARM).
+Third-party components keep their own licences and notices, reproduced in
+[`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) and installed alongside the
+binary by the Flatpak:
+
+- [`third_party/libbadcpu`](third_party/libbadcpu) — MIT, vendored from
+  [Sober OSS](https://github.com/Z3ki/sober-oss)
+- `mcpelauncher-linker` — MIT, ChristopherHX and MCMrARM
+- AOSP bionic, carried within it — Apache-2.0 and BSD
+- `libjnivm` — MIT, ChristopherHX
+
+MIT and Apache-2.0 are satisfied while the combined work is offered under the
+GPL, provided those notices travel with it. That is a condition, not a
+courtesy.

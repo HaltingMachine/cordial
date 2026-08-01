@@ -39,6 +39,8 @@ struct Xlib {
     change_property: unsafe extern "C" fn(
         Display, Window, c_ulong, c_ulong, c_int, c_int, *const c_void, c_int,
     ) -> c_int,
+    send_event: unsafe extern "C" fn(Display, Window, c_int, c_long, *mut c_void) -> c_int,
+    sync: unsafe extern "C" fn(Display, c_int) -> c_int,
     store_name: unsafe extern "C" fn(Display, Window, *const c_char) -> c_int,
     flush: unsafe extern "C" fn(Display) -> c_int,
     destroy_window: unsafe extern "C" fn(Display, Window) -> c_int,
@@ -95,6 +97,8 @@ impl Xlib {
             move_window: sym!("XMoveWindow"),
             intern_atom: sym!("XInternAtom"),
             change_property: sym!("XChangeProperty"),
+            send_event: sym!("XSendEvent"),
+            sync: sym!("XSync"),
             connection_number: sym!("XConnectionNumber"),
             pending: sym!("XPending"),
             next_event: sym!("XNextEvent"),
@@ -214,11 +218,16 @@ struct Placement {
     width: c_int,
     height: c_int,
     fullscreen: bool,
+    /// Which monitor was asked for, for `_NET_WM_FULLSCREEN_MONITORS`. A window
+    /// manager fullscreens onto whichever monitor it thinks the window is on,
+    /// and it does not have to agree with where the window was put — so naming
+    /// the monitor explicitly is the only reliable way to say which screen.
+    monitor: Option<c_long>,
 }
 
 fn placement(win_w: c_int, win_h: c_int) -> Placement {
     let fullscreen = std::env::var_os("CORDIAL_FULLSCREEN").is_some();
-    let mut p = Placement { x: 0, y: 0, width: win_w, height: win_h, fullscreen };
+    let mut p = Placement { x: 0, y: 0, width: win_w, height: win_h, fullscreen, monitor: None };
 
     if let Ok(pos) = std::env::var("CORDIAL_WINDOW_POS") {
         let mut parts = pos.split(',').map(str::trim);
@@ -285,6 +294,7 @@ fn placement(win_w: c_int, win_h: c_int) -> Placement {
                 &list[0]
             }
         };
+        p.monitor = Some(want.min(n as usize - 1) as c_long);
         if p.fullscreen {
             // Cover the monitor exactly. The window manager fullscreens onto
             // whichever monitor the window occupies, so filling it first is
@@ -333,6 +343,15 @@ pub fn open(width: u32, height: u32, title: &str) -> Result<&'static HostWindow,
     // plain values.
     CURRENT_DISPLAY.store(display as usize, std::sync::atomic::Ordering::Relaxed);
     let place = placement(width as c_int, height as c_int);
+    // Reported always, not behind a trace flag: "the window opened on the wrong
+    // screen" is a user-visible complaint, and this line is what separates
+    // "Cordial computed the wrong position" from "the window manager ignored
+    // the one it was given".
+    println!(
+        "[android] window placement: {}x{} at {},{}{}",
+        place.width, place.height, place.x, place.y,
+        if place.fullscreen { " (fullscreen)" } else { "" }
+    );
     let (ox, oy) = (place.x, place.y);
     // Fullscreen resizes the surface as well as the window: the engine sizes
     // its framebuffers from what `geometry()` reports, so a window covering a
@@ -396,34 +415,68 @@ pub fn open(width: u32, height: u32, title: &str) -> Result<&'static HostWindow,
         };
         (xlib.set_class_hint)(display, w, &mut class);
 
-        if place.fullscreen {
-            // EWMH: setting _NET_WM_STATE to include _NET_WM_STATE_FULLSCREEN
-            // *before* mapping is the documented way to come up fullscreen.
-            // Doing it after mapping requires a ClientMessage to the root
-            // window instead, which is a different and more fragile dance.
-            let state = CString::new("_NET_WM_STATE").unwrap_or_default();
-            let fs = CString::new("_NET_WM_STATE_FULLSCREEN").unwrap_or_default();
-            let a_state = (xlib.intern_atom)(display, state.as_ptr(), 0);
-            let a_fs = (xlib.intern_atom)(display, fs.as_ptr(), 0);
-            if a_state != 0 && a_fs != 0 {
-                const XA_ATOM: c_ulong = 4;
-                const PROP_MODE_REPLACE: c_int = 0;
-                let atoms = [a_fs];
-                (xlib.change_property)(
-                    display, w, a_state, XA_ATOM, 32, PROP_MODE_REPLACE,
-                    atoms.as_ptr() as *const c_void, 1,
-                );
-            }
-        }
-
         (xlib.select_input)(display, w, INPUT_EVENT_MASK);
         (xlib.map_window)(display, w);
-        // Again after mapping: some window managers apply their own placement
-        // on map and ignore the pre-map position entirely.
-        if (ox, oy) != (0, 0) {
+        // Let the window manager finish its own placement before arguing with
+        // it. Moving before it has acted is a race that the window manager
+        // wins, which is exactly what happened: Cordial computed 3760,480 and
+        // the window still came up at 25,62.
+        (xlib.sync)(display, 0);
+
+        let root = (xlib.default_root_window)(display);
+        const SUBSTRUCTURE_REDIRECT: c_long = 1 << 20;
+        const SUBSTRUCTURE_NOTIFY: c_long = 1 << 19;
+        const CLIENT_MESSAGE: c_int = 33;
+        let atom = |n: &str| -> c_ulong {
+            let c = CString::new(n).unwrap_or_default();
+            (xlib.intern_atom)(display, c.as_ptr(), 0)
+        };
+
+        // An XClientMessageEvent, laid out by hand. Xlib's XEvent union is
+        // large and only the leading fields matter here.
+        let mut msg = [0u8; 96];
+        let mut send = |message_type: c_ulong, data: [c_long; 5]| {
+            msg.fill(0);
+            let p = msg.as_mut_ptr();
+            *(p as *mut c_int) = CLIENT_MESSAGE;
+            *(p.add(8) as *mut c_ulong) = 1; // serial
+            *(p.add(16) as *mut c_int) = 1; // send_event
+            *(p.add(24) as *mut usize) = display as usize;
+            *(p.add(32) as *mut Window) = w;
+            *(p.add(40) as *mut c_ulong) = message_type;
+            *(p.add(48) as *mut c_int) = 32; // format
+            for (i, v) in data.iter().enumerate() {
+                *(p.add(56 + i * 8) as *mut c_long) = *v;
+            }
+            (xlib.send_event)(
+                display, root, 0,
+                SUBSTRUCTURE_REDIRECT | SUBSTRUCTURE_NOTIFY,
+                msg.as_mut_ptr() as *mut c_void,
+            );
+        };
+
+        if place.fullscreen {
+            // Name the monitor outright. `_NET_WM_STATE_FULLSCREEN` alone
+            // fullscreens onto whichever monitor the window manager believes
+            // the window occupies, which is the thing that was wrong.
+            if let Some(m) = place.monitor {
+                let a = atom("_NET_WM_FULLSCREEN_MONITORS");
+                if a != 0 {
+                    send(a, [m, m, m, m, 1]);
+                }
+            }
+            let state = atom("_NET_WM_STATE");
+            let fs = atom("_NET_WM_STATE_FULLSCREEN");
+            if state != 0 && fs != 0 {
+                const ADD: c_long = 1;
+                send(state, [ADD, fs as c_long, 0, 1, 0]);
+            }
+        } else if (ox, oy) != (0, 0) {
             (xlib.move_window)(display, w, ox, oy);
         }
         (xlib.flush)(display);
+        (xlib.sync)(display, 0);
+
         (w, (xlib.connection_number)(display))
     };
 
