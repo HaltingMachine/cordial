@@ -51,7 +51,6 @@ extern "C" {
     fn eventfd(initval: u32, flags: c_int) -> c_int;
     fn read(fd: c_int, buf: *mut c_void, count: usize) -> isize;
     fn write(fd: c_int, buf: *const c_void, count: usize) -> isize;
-    fn close(fd: c_int) -> c_int;
 }
 
 /// A registered descriptor. `ident` is what `pollOnce` reports for it; a
@@ -403,6 +402,12 @@ pub fn overrides() -> Vec<(&'static str, *mut c_void)> {
 
 #[cfg(test)]
 mod tests {
+    // Only the tests close a descriptor, so the binding lives with them rather
+    // than in the module's extern block, where it read as dead code.
+    extern "C" {
+        fn close(fd: c_int) -> c_int;
+    }
+
     use super::*;
 
     #[test]

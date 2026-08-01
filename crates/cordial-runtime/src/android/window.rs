@@ -36,9 +36,6 @@ struct Xlib {
     set_wm_hints: unsafe extern "C" fn(Display, Window, *mut XWMHints) -> c_int,
     move_window: unsafe extern "C" fn(Display, Window, c_int, c_int) -> c_int,
     intern_atom: unsafe extern "C" fn(Display, *const c_char, c_int) -> c_ulong,
-    change_property: unsafe extern "C" fn(
-        Display, Window, c_ulong, c_ulong, c_int, c_int, *const c_void, c_int,
-    ) -> c_int,
     send_event: unsafe extern "C" fn(Display, Window, c_int, c_long, *mut c_void) -> c_int,
     sync: unsafe extern "C" fn(Display, c_int) -> c_int,
     store_name: unsafe extern "C" fn(Display, Window, *const c_char) -> c_int,
@@ -96,7 +93,6 @@ impl Xlib {
             set_wm_hints: sym!("XSetWMHints"),
             move_window: sym!("XMoveWindow"),
             intern_atom: sym!("XInternAtom"),
-            change_property: sym!("XChangeProperty"),
             send_event: sym!("XSendEvent"),
             sync: sym!("XSync"),
             connection_number: sym!("XConnectionNumber"),
