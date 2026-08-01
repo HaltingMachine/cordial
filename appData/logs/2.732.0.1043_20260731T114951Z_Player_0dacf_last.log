@@ -1,9 +1,0 @@
-[FLog::Output] All use of Roblox services must comply with Roblox's Terms of Use, Privacy Policy, Community Standards, and applicable laws. Processing of User personal information is limited to the purposes expressly permitted therein.
-2026-07-31T11:49:51.100Z,0.100218,f79afa00,6,Info [FLog::JNIAppBridge] nativeAppBridgeV2Init:
-2026-07-31T11:49:51.100Z,0.100459,af1056c0,6 [FLog::SingleSurfaceApp] initializeWithAppStarter
-2026-07-31T11:49:51.100Z,0.100495,af1056c0,6 [FLog::SingleSurfaceApp] initializeSingleton
-2026-07-31T11:49:51.100Z,0.100851,af1056c0,6 [FLog::Output] setAssetFolder /tmp/claude-1001/-var-home-user-Projects-cordial/00000000-0000-0000-0000-000000000000/scratchpad/apk/base.apk
-2026-07-31T11:49:51.101Z,0.101000,af1056c0,6 [FLog::Error] Error: '/tmp/claude-1001/-var-home-user-Projects-cordial/00000000-0000-0000-0000-000000000000/scratchpad/apk/base.apk' is not a directory
-2026-07-31T11:49:51.101Z,0.101180,f79afa00,6,Info [FLog::JNIAppBridge] nativeAppBridgeStartLuaAppDM: Calling initializeLuaAppWithLoggedInUser
-2026-07-31T11:49:51.101Z,0.101245,af1056c0,6 [FLog::SingleSurfaceApp] initializeLuaAppWithLoggedInUser: (stage:None).
-2026-07-31T11:49:51.101Z,0.101259,af1056c0,6 [FLog::SingleSurfaceApp] applyLocale

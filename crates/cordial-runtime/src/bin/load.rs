@@ -176,8 +176,68 @@ fn asset_folder(apk: &Option<String>) -> String {
     }
 }
 
+/// The directory the engine runs *in*, and why it needs one of its own.
+///
+/// Roblox builds several paths from a root it was never given and resolves them
+/// against the working directory: `./exe/cacert.pem`, `http/`, `sounds/`,
+/// `cache/` and a `ContentProvider_<pid>` per launch. Two consequences, both
+/// real:
+///
+/// * curl is handed `./exe/cacert.pem` as its trust store, does not find it, and
+///   every HTTPS request fails — `error adding trust anchors from file`. The CA
+///   bundle exists; it ships in the APK at `assets/ssl/cacert.pem`.
+/// * whatever directory you launched from fills up with the engine's scratch
+///   files. Running from a checkout littered this repository.
+///
+/// An Android app's working directory is its own sandbox, so giving the process
+/// one is the faithful behaviour rather than a workaround. `--lib-dir` and
+/// `--apk` are made absolute first, because they are the caller's paths and are
+/// allowed to be relative to the caller's directory.
+///
+/// Never fatal: a client that starts in the wrong directory is more useful than
+/// one that refuses to start.
+fn enter_run_dir(opt: &mut Options) {
+    for p in [&mut opt.lib_dir] {
+        if let Ok(abs) = std::fs::canonicalize(&*p) {
+            *p = abs.to_string_lossy().into_owned();
+        }
+    }
+    if let Some(apk) = opt.apk.as_mut() {
+        if let Ok(abs) = std::fs::canonicalize(&*apk) {
+            *apk = abs.to_string_lossy().into_owned();
+        }
+    }
+
+    let root = std::env::var_os("XDG_DATA_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/share")))
+        .unwrap_or_else(std::env::temp_dir)
+        .join("cordial/instances/default/run");
+    if let Err(e) = std::fs::create_dir_all(root.join("exe")) {
+        println!("  could not create {}: {e}", root.display());
+        return;
+    }
+
+    // The trust store, from the APK's own copy. Linked rather than copied so a
+    // re-extracted bundle is picked up without a stale duplicate.
+    let ca = std::env::var_os("XDG_CACHE_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".cache")))
+        .unwrap_or_else(std::env::temp_dir)
+        .join("cordial/assets/ssl/cacert.pem");
+    let dest = root.join("exe/cacert.pem");
+    if ca.exists() && std::fs::read_link(&dest).ok().as_deref() != Some(ca.as_path()) {
+        let _ = std::fs::remove_file(&dest);
+        let _ = std::os::unix::fs::symlink(&ca, &dest);
+    }
+
+    if let Err(e) = std::env::set_current_dir(&root) {
+        println!("  could not enter {}: {e}", root.display());
+    }
+}
+
 fn main() -> ExitCode {
-    let opt = match parse() {
+    let mut opt = match parse() {
         Ok(o) => o,
         Err(msg) => {
             if !msg.is_empty() {
@@ -203,6 +263,13 @@ fn main() -> ExitCode {
             }
         }
     }
+
+    // After the APK is registered (so the CA bundle can be extracted) and before
+    // anything asks the engine to resolve a path.
+    if opt.apk.is_some() {
+        let _ = asset_folder(&opt.apk);
+    }
+    enter_run_dir(&mut opt);
 
     if let Some(name) = &opt.read_asset {
         match cordial_runtime::android::asset::probe(name) {

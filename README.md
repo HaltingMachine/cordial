@@ -31,17 +31,18 @@ resolves every relocation, runs all of its static constructors, completes
 612, clean exit after twelve seconds. The client narrates itself through
 Cordial's `liblog` and writes its own FastLog to `<files>/appData/logs/`.
 
-Two things are badly wrong and both are known:
+The app shell comes up: the engine reaches `APP_READY (Landing)`, talks to
+Roblox over HTTPS, writes its flag cache to disk, and reports no flag failures.
 
-- **It runs at about 1 fps.** Not compute-bound — 8% CPU over thirty seconds —
-  so it is waiting, not working. The surface handler bails with
-  `onSurfaceChanged: ... Flags-Not-Received. Return.`, and the static flag path
-  is measurably broken: of the 139 names the client registers, the real client
-  resolves 74 and reports 67 not found; Cordial reports 68 not found and
-  resolves **zero**. Dynamic flags from client settings *do* apply, so the
-  defect is specific to the static path. Repairing it is the next job.
-- **No network.** The engine's own HTTP cannot resolve any host, so no remote
-  content ever arrives and no texture is ever uploaded.
+What is still wrong:
+
+- **It runs at about 1 fps.** Not compute-bound — 13% CPU over thirty seconds,
+  with every engine thread parked in a futex and waking once a second. The app
+  shell registers a *rendering frequency* and renders on demand; the working
+  theory is that Cordial delivers no frame or input signal to drive it, so it
+  falls back to a one-second heartbeat. Not yet proven.
+- **Not signed in.** Without a session the landing page has nothing to show, and
+  avatar thumbnails fail against user id 0.
 
 Input is still unimplemented. See [`docs/NEXT.md`](docs/NEXT.md).
 

@@ -64,6 +64,10 @@ pub fn function_overrides() -> Vec<(&'static str, *mut c_void)> {
     // Android's `/system` tree. These are path-taking libc calls, redirected
     // only for paths under `/system`; everything else forwards untouched.
     v.extend(system_path_overrides());
+    // `struct addrinfo` has its last two pointers swapped between bionic and
+    // glibc, and the `AI_*` constants disagree outright. Same class as the
+    // `sigset_t` and `pthread_mutex_t` translations above.
+    v.extend(netdb_overrides());
     if std::env::var_os("CORDIAL_TRACE_PATHS").is_some() {
         extern "C" {
             fn cordial_set_path_trace(on: c_int);
@@ -389,6 +393,41 @@ pub fn system_path_overrides() -> Vec<(&'static str, *mut c_void)> {
         .iter()
         .map(|e| {
             // SAFETY: each `name` is a string literal in system_paths.cpp.
+            let name = unsafe { CStr::from_ptr(e.name) }.to_str().unwrap_or("");
+            (name, e.addr)
+        })
+        .collect()
+}
+
+// ------------------------------------------------------------------- netdb
+
+/// `getaddrinfo`/`freeaddrinfo` in bionic's layout — `native/netdb_compat.cpp`.
+///
+/// Without these the engine cannot resolve a single hostname: bionic's
+/// `AI_DEFAULT` sets a bit glibc rejects with `EAI_BADFLAGS`, and a result that
+/// did come back would have its `ai_addr` and `ai_canonname` transposed.
+pub fn netdb_overrides() -> Vec<(&'static str, *mut c_void)> {
+    #[repr(C)]
+    struct Symbol {
+        name: *const c_char,
+        addr: *mut c_void,
+    }
+    extern "C" {
+        fn cordial_netdb_symbols(count: *mut usize) -> *const Symbol;
+    }
+
+    let mut count = 0usize;
+    // SAFETY: the table is a static in netdb_compat.cpp and outlives the process.
+    let table = unsafe { cordial_netdb_symbols(&mut count) };
+    if table.is_null() {
+        return Vec::new();
+    }
+    // SAFETY: `table` points at `count` initialised entries with static names.
+    let entries = unsafe { std::slice::from_raw_parts(table, count) };
+    entries
+        .iter()
+        .map(|e| {
+            // SAFETY: each `name` is a string literal in netdb_compat.cpp.
             let name = unsafe { CStr::from_ptr(e.name) }.to_str().unwrap_or("");
             (name, e.addr)
         })

@@ -128,7 +128,40 @@ DataModelPatchConfigurer ... deserializeAndVerifyPatch with blake3
 
 **Lua executes.** That is a long way past where this was stuck.
 
-## The blocker now: the static flag path resolves nothing
+## Fixed since: DNS, HTTPS, and the working directory
+
+`struct addrinfo` is **not** the same in bionic and glibc — the last two
+pointers are transposed, and the `AI_*` constants disagree outright (bionic's
+`AI_DEFAULT` sets a bit glibc rejects with `EAI_BADFLAGS`). That is why every
+request failed with `Could not resolve host`. Translated in
+`native/netdb_compat.cpp`; put `addrinfo` on the list next to `stat`,
+`pthread_mutex_t`, `DIR`, `FILE` and `sigset_t`.
+
+Then curl failed on `error adding trust anchors from file: ./exe/cacert.pem`.
+The engine builds several paths from a root it was never given and resolves them
+against the working directory — `./exe/cacert.pem`, `http/`, `sounds/`, `cache/`,
+`ContentProvider_<pid>`. Cordial now gives the process its own run directory
+with the APK's CA bundle linked into `exe/`, which also stops the engine
+littering whatever directory you launched from.
+
+With those two in, the engine reaches `APP_READY (Landing)` and **`flags FAILED`
+drops to zero** — the static-flag problem below resolved itself once HTTPS
+worked, so it was a symptom, not a cause. Left recorded because the measurement
+technique is the reusable part.
+
+## The blocker now: about 1 fps
+
+Every engine thread sits in `futex_do_wait` and wakes once a second; 13% CPU
+over thirty seconds; exactly 30 swaps in 30s. It is waiting, not working.
+
+The app shell logs `Register rendering frequency during startup` and later
+`Restoring rendering frequency to normal`, and renders on demand rather than
+continuously. **Working theory, not proven:** nothing in Cordial delivers a
+frame or input signal to drive that, so it falls back to a one-second heartbeat.
+Note `AChoreographer_*` is *not* imported by `libroblox`, so it is not simple
+frame-callback starvation — that was checked.
+
+## Previously the blocker: the static flag path
 
 Measured against the capture, same 139 names, same call:
 

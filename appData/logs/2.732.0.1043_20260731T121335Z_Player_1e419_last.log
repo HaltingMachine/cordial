@@ -1,9 +1,0 @@
-[FLog::Output] All use of Roblox services must comply with Roblox's Terms of Use, Privacy Policy, Community Standards, and applicable laws. Processing of User personal information is limited to the purposes expressly permitted therein.
-2026-07-31T12:13:35.651Z,0.651321,b7e3ea00,6,Info [FLog::JNIAppBridge] nativeAppBridgeV2Init:
-2026-07-31T12:13:35.651Z,0.651454,6eeea6c0,6 [FLog::SingleSurfaceApp] initializeWithAppStarter
-2026-07-31T12:13:35.651Z,0.651466,6eeea6c0,6 [FLog::SingleSurfaceApp] initializeSingleton
-2026-07-31T12:13:35.651Z,0.651584,6eeea6c0,6 [FLog::Output] setAssetFolder ~/.cache/cordial/assets
-2026-07-31T12:13:35.651Z,0.651712,6eeea6c0,6 [FLog::Error] Error: boost::filesystem::canonical: No such file or directory: "~/.cache/cordial/android"
-2026-07-31T12:13:35.651Z,0.651726,b7e3ea00,6,Info [FLog::JNIAppBridge] nativeAppBridgeStartLuaAppDM: Calling initializeLuaAppWithLoggedInUser
-2026-07-31T12:13:35.651Z,0.651749,6eeea6c0,6 [FLog::SingleSurfaceApp] initializeLuaAppWithLoggedInUser: (stage:None).
-2026-07-31T12:13:35.651Z,0.651755,6eeea6c0,6 [FLog::SingleSurfaceApp] applyLocale
