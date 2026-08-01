@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/luohoa97/cordial/main/packaging/icons/org.cordial.Cordial.svg" alt="Cordial" width="220">
+  <img src="https://raw.githubusercontent.com/luohoa97/cordial/main/packaging/icons/org.cordial.Cordial.svg" alt="Cordial" width="460">
 </p>
 
 # Run Roblox on Linux natively — Plugins, all yours.
