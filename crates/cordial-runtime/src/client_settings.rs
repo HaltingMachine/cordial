@@ -111,72 +111,42 @@ fn load_base(explicit: Option<&str>) -> Option<String> {
     }
 }
 
-/// Where the user's own FastFlag overrides live.
-pub fn overrides_path() -> PathBuf {
-    std::env::var_os("CORDIAL_FLAGS")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            std::env::var_os("XDG_CONFIG_HOME")
-                .map(PathBuf::from)
-                .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-                .unwrap_or_else(std::env::temp_dir)
-                .join("cordial/flags.json")
-        })
-}
-
-/// Merge the user's flag overrides into the settings document.
+/// Merge every layer of flag overrides into the settings document.
 ///
-/// This is the mechanism that demonstrably works. Setting a flag here changes
-/// engine behaviour — verified with a control:
-/// `DFFlagRbxTransportUseRtcioRna=False` removes
+/// The layering, precedence and provenance live in [`crate::flags`]; this only
+/// applies the result. Splitting them is what lets a plugin contribute flags
+/// without writing into the user's file.
+///
+/// This is the mechanism that demonstrably works. Verified with a control:
+/// `DFFlagRbxTransportUseRtcioRna=false` removes
 /// `Initialized RtcIoRna with 1 event loop threads` from the engine's own log,
-/// and the same run without it has that line.
-///
-/// `nativePreloadFlagOverrides` is *not* the mechanism, despite the name. It
-/// was tried with several document shapes and changed nothing observable.
-///
-/// One caveat worth knowing before wiring anything to this: `FFlag`/`FInt`/
-/// `FString` are read once during startup, so changing them requires a
-/// relaunch. Only the `DFFlag`/`DFInt`/`DFString` family is re-read while the
-/// client runs.
-///
-/// Never fails the launch. A malformed overrides file is reported and skipped,
-/// because a typo in a config file should not stop the client from starting.
+/// and the same run without it has that line. `nativePreloadFlagOverrides` is
+/// *not* the mechanism despite the name — it was tried with several document
+/// shapes and changed nothing observable.
 fn apply_overrides(doc: String) -> String {
-    let path = overrides_path();
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return doc;
-    };
-    let overrides: serde_json::Map<String, serde_json::Value> =
-        match serde_json::from_str(&text) {
-            Ok(serde_json::Value::Object(m)) => m,
-            Ok(_) => {
-                println!("  flag overrides: {} is not a JSON object; ignoring", path.display());
-                return doc;
-            }
-            Err(e) => {
-                println!("  flag overrides: {} is not valid JSON ({e}); ignoring", path.display());
-                return doc;
-            }
-        };
-    if overrides.is_empty() {
+    let resolved = crate::flags::resolve(crate::flags::collect());
+    if resolved.is_empty() {
         return doc;
     }
+    let overrides: serde_json::Map<String, serde_json::Value> = resolved
+        .iter()
+        .map(|(k, r)| (k.clone(), serde_json::Value::String(r.value.clone())))
+        .collect();
 
     match merge(&doc, overrides) {
-        Ok((merged, applied)) => {
-            println!("  flag overrides: {applied} applied from {}", path.display());
+        Ok((merged, _)) => {
+            crate::flags::report(&resolved);
             merged
         }
         Err(why) => {
-            println!("  flag overrides: {why}; ignoring overrides");
+            println!("  flags: {why}; ignoring overrides");
             doc
         }
     }
 }
 
 /// Merge overrides into `applicationSettings`, returning the document and how
-/// many were applied. Split out from the file handling so it can be tested.
+/// many were applied. Split out from layer resolution so it can be tested.
 fn merge(
     doc: &str,
     overrides: serde_json::Map<String, serde_json::Value>,
@@ -188,9 +158,6 @@ fn merge(
         .and_then(serde_json::Value::as_object_mut)
         .ok_or("no applicationSettings object")?;
 
-    // Roblox's own document stores every value as a string, including numbers
-    // and booleans, so anything written as a bare `true` or `7` is converted
-    // rather than rejected — a config file should not require knowing that.
     let mut applied = 0usize;
     for (k, v) in overrides {
         let as_string = match v {

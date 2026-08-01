@@ -181,7 +181,31 @@ were applied.
 **`FFlag`, `FInt` and `FString` are read once at startup**, so changing them
 needs a relaunch. Only the `DFFlag`/`DFInt`/`DFString` family is re-read while
 the client is running. That distinction matters if you are building anything
-that changes flags dynamically.
+that changes flags dynamically — a plugin loaded part-way through a session
+cannot change a startup flag, whatever it writes.
+
+#### Layers and provenance
+
+Flags come from more than one place, and each source owns its own file:
+
+```text
+~/.config/cordial/flags.json                     user    (always wins)
+~/.local/share/cordial/plugins/<id>/flags.json   plugin
+the client-settings document from Roblox         base
+```
+
+A plugin never writes to your file. That keeps three things true: a plugin
+cannot silently overwrite a value you chose, removing a plugin removes its
+flags, and "why is this flag set to that?" has an answer. Conflicts are reported
+rather than resolved quietly:
+
+```text
+flags: FIntTaskSchedulerAutoThreadLimit = 8 from user
+       (overrides plugin:fps-tweaks=4, plugin:net-tuner=16)
+```
+
+Two plugins disagreeing is a real disagreement, so both are named. The later one
+wins so the outcome is deterministic, but nothing is hidden.
 
 **If the interface looks coarse**, it is being laid out for a low-density phone.
 Raise both — the render resolution is 720p by default and `dpiScale` is 1.0,
