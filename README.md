@@ -60,10 +60,20 @@ It has still only existed for two days.
 > ban accounts for using them, up to permanent termination. Those systems have
 > produced false positives against innocent players.
 >
-> Cordial does not modify the Roblox client — it runs the official Android build
-> unmodified — but it necessarily presents a synthesised Android environment, and
-> a heuristic detector does not owe you that distinction. Alternate accounts are
-> not a shield; Roblox's Terms reserve the right to terminate those too.
+> **Roblox has not approved this project, and has not been asked to.** There is
+> no green light, no arrangement, and no reason to assume tolerance. Treat every
+> claim below as our reasoning about risk, not as permission.
+>
+> Cordial does not modify the Roblox client — it runs the official Android build,
+> does not touch the engine's process, and any asset overlay you enable is
+> non-destructive and off by default — but it necessarily presents a synthesised
+> Android environment, and a heuristic detector does not owe you that
+> distinction. Alternate accounts are not a shield; Roblox's Terms reserve the
+> right to terminate those too.
+>
+> Enforcement at this scale is automated and runs in waves, and accounts sharing
+> an address get associated with each other. If you test, use a throwaway account
+> on a different IP — see [CONTRIBUTING.md](CONTRIBUTING.md).
 >
 > **If your account matters to you, do not use it here.** If you use Cordial and
 > get banned, that is on you, and the maintainers cannot get it reversed.
