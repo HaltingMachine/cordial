@@ -480,7 +480,7 @@ fn main() -> ExitCode {
                 if skip_agdk {
                     // The bridge sequence, without a handle and without AGDK.
                     let (rw, rh) = requested_resolution();
-                    match cordial_runtime::android::window::open(
+                    match cordial_runtime::android::open_window(
                         rw, rh, &cordial_runtime::window_title("OpenGL ES"),
                     ) {
                         Err(e) => println!("  no window: {e}"),
@@ -631,7 +631,7 @@ fn main() -> ExitCode {
                                 // there has to be a real one before the surface
                                 // callbacks arrive.
                                 let (rw, rh) = requested_resolution();
-                                match cordial_runtime::android::window::open(
+                                match cordial_runtime::android::open_window(
                                     rw, rh, &cordial_runtime::window_title("OpenGL ES"),
                                 ) {
                                     Err(e) => println!("  no window: {e}"),
@@ -1040,7 +1040,7 @@ fn main() -> ExitCode {
                                             let uk = lib.symbol(
                                                 "Java_com_roblox_engine_jni_NativeGLInterface_updateKeyboardSize",
                                             ).unwrap_or(std::ptr::null_mut());
-                                            cordial_runtime::android::window::set_input_natives(mv, bt, ke, tx, sy, uk);
+                                            cordial_runtime::android::input::set_input_natives(mv, bt, ke, tx, sy, uk);
                                             if mv.is_null() || bt.is_null() {
                                                 println!("  input: NativeInputInterface not fully exported; UI input will not work");
                                             }

@@ -720,11 +720,7 @@ const LOCK_MASK: c_uint = 1 << 1; // Caps Lock
 const CONTROL_MASK: c_uint = 1 << 2;
 const MOD1_MASK: c_uint = 1 << 3; // Alt, on essentially every layout in practice
 
-// `android.view.KeyEvent.META_*`.
-const META_SHIFT_ON: i32 = 1;
-const META_ALT_ON: i32 = 2;
-const META_CTRL_ON: i32 = 0x1000;
-const META_CAPS_LOCK_ON: i32 = 0x100000;
+use super::input::{META_ALT_ON, META_CAPS_LOCK_ON, META_CTRL_ON, META_SHIFT_ON};
 
 fn android_meta_state(x11_state: c_uint) -> i32 {
     let mut m = 0;
@@ -743,17 +739,16 @@ fn android_meta_state(x11_state: c_uint) -> i32 {
     m
 }
 
-// `android.view.MotionEvent.BUTTON_*` / `ACTION_*` — only the ones this module
-// produces.
-const BUTTON_PRIMARY: i32 = 1;
-const BUTTON_SECONDARY: i32 = 2;
-const BUTTON_TERTIARY: i32 = 4;
-const ACTION_DOWN: i32 = 0;
-const ACTION_UP: i32 = 1;
-const ACTION_MOVE: i32 = 2;
-const ACTION_HOVER_MOVE: i32 = 7;
-const ACTION_BUTTON_PRESS: i32 = 11;
-const ACTION_BUTTON_RELEASE: i32 = 12;
+// `android.view.MotionEvent.BUTTON_*` / `ACTION_*`, and the keysym table, now
+// live in `input.rs` — shared with the Wayland backend. See its module doc for
+// why the keysym table in particular carries over unchanged: X11 keysyms and
+// XKB keysyms are the same numbering.
+use super::input::{
+    deliver_key, deliver_surface_redraw, deliver_touch, edit_text_buffer, keysym_to_android,
+    pass_key_event, pass_mouse_button, pass_mouse_move, pass_text, report_keyboard_state, Caret,
+    Edit, ACTION_BUTTON_PRESS, ACTION_BUTTON_RELEASE, ACTION_DOWN, ACTION_HOVER_MOVE, ACTION_MOVE,
+    ACTION_UP, BUTTON_PRIMARY, BUTTON_SECONDARY, BUTTON_TERTIARY,
+};
 
 /// X11 numbers buttons 1/2/3 as left/middle/right; Android's bit assignment
 /// puts secondary (right) before tertiary (middle). Buttons 4/5 are X11's
@@ -767,54 +762,6 @@ fn x11_button_to_android(button: c_uint) -> Option<i32> {
         3 => Some(BUTTON_SECONDARY),
         _ => None,
     }
-}
-
-/// A pragmatic subset of X11 keysyms mapped to `android.view.KeyEvent.KEYCODE_*`.
-/// Covers what a desktop text field and basic UI navigation need — letters,
-/// digits, common punctuation, arrows, and the usual control keys. Anything
-/// outside this set is dropped rather than guessed at; see the report for what
-/// that leaves out.
-fn keysym_to_android(keysym: c_ulong) -> Option<i32> {
-    let k = keysym as u32;
-    Some(match k {
-        0x30..=0x39 => 7 + (k - 0x30) as i32,  // 0..9 -> AKEYCODE_0..9
-        0x61..=0x7a => 29 + (k - 0x61) as i32, // a..z -> AKEYCODE_A..Z
-        0x41..=0x5a => 29 + (k - 0x41) as i32, // A..Z (shifted) -> the same keycodes
-        0x0020 => 62,                          // space
-        0xff0d | 0xff8d => 66,                 // Return, KP_Enter
-        0xff08 => 67,                          // BackSpace
-        0xff09 => 61,                          // Tab
-        0xff1b => 111,                         // Escape
-        0xff51 => 21,                          // Left
-        0xff52 => 19,                          // Up
-        0xff53 => 22,                          // Right
-        0xff54 => 20,                          // Down
-        0xffe1 => 59,                          // Shift_L
-        0xffe2 => 60,                          // Shift_R
-        0xffe3 => 113,                         // Control_L
-        0xffe4 => 114,                         // Control_R
-        0xffe9 => 57,                          // Alt_L
-        0xffea => 58,                          // Alt_R
-        0xffe5 => 115,                         // Caps_Lock
-        0xffff => 112,                         // Delete (forward delete)
-        0xff50 => 122,                         // Home
-        0xff57 => 123,                         // End
-        0xff55 => 92,                          // Page_Up
-        0xff56 => 93,                          // Page_Down
-        0xff63 => 124,                         // Insert
-        0x002c => 55,                          // comma
-        0x002e => 56,                          // period
-        0x002f => 76,                          // slash
-        0x003b => 74,                          // semicolon
-        0x0027 => 75,                          // apostrophe
-        0x0060 => 68,                          // grave
-        0x002d => 69,                          // minus
-        0x003d => 70,                          // equal
-        0x005b => 71,                          // bracketleft
-        0x005d => 72,                          // bracketright
-        0x005c => 73,                          // backslash
-        _ => return None,
-    })
 }
 
 // `*mut c_void` rather than a typed `*mut PollFd`, to match the `poll`
@@ -833,57 +780,6 @@ struct PollFd {
 }
 const POLLIN: i16 = 0x001;
 
-/// AGDK's `onTouchEventNative`, unless the duplicate-delivery control is on.
-#[allow(clippy::too_many_arguments)]
-fn deliver_touch(
-    handle: i64,
-    action: i32,
-    x: f32,
-    y: f32,
-    button_state: i32,
-    action_button: i32,
-    event_time_ms: i64,
-    down_time_ms: i64,
-) {
-    if no_agdk_touch() {
-        return;
-    }
-    deliver_touch_inner(
-        handle, action, x, y, button_state, action_button, event_time_ms, down_time_ms,
-    );
-}
-
-#[allow(clippy::too_many_arguments)]
-fn deliver_touch_inner(
-    handle: i64,
-    action: i32,
-    x: f32,
-    y: f32,
-    button_state: i32,
-    action_button: i32,
-    event_time_ms: i64,
-    down_time_ms: i64,
-) {
-    match cordial_linker_sys::game_activity::touch(
-        handle,
-        action,
-        x,
-        y,
-        button_state,
-        action_button,
-        event_time_ms,
-        down_time_ms,
-    ) {
-        Ok(Some(consumed)) => {
-            super::trace(format_args!("onTouchEventNative(action={action}) -> {consumed}"))
-        }
-        // Not registered yet — a normal race against initializeNativeCode
-        // early in startup.
-        Ok(None) => {}
-        Err(e) => super::trace(format_args!("onTouchEventNative(action={action}) failed: {e}")),
-    }
-}
-
 /// Whether an `Expose` event is the last one in its batch — `count` is how
 /// many more follow for the same repaint, so 0 is the point at which the
 /// window has finished describing what it needs redrawn. Pulled out as its
@@ -891,50 +787,6 @@ fn deliver_touch_inner(
 /// connection.
 fn is_final_expose(count: c_int) -> bool {
     count == 0
-}
-
-fn deliver_surface_redraw(handle: i64) {
-    match cordial_linker_sys::game_activity::surface_redraw_needed(handle) {
-        Ok(Some(())) => super::trace(format_args!("onSurfaceRedrawNeededNative")),
-        // Not registered yet — a normal race against initializeNativeCode
-        // early in startup, same convention as touch/key.
-        Ok(None) => {}
-        Err(e) => super::trace(format_args!("onSurfaceRedrawNeededNative failed: {e}")),
-    }
-}
-
-fn deliver_key(
-    handle: i64,
-    down: bool,
-    key_code: i32,
-    scan_code: i32,
-    meta_state: i32,
-    repeat_count: i32,
-    unicode_char: i32,
-    event_time_ms: i64,
-    down_time_ms: i64,
-) {
-    match cordial_linker_sys::game_activity::key(
-        handle,
-        down,
-        key_code,
-        scan_code,
-        meta_state,
-        repeat_count,
-        unicode_char,
-        event_time_ms,
-        down_time_ms,
-    ) {
-        Ok(Some(consumed)) => {
-            super::trace(format_args!("onKey{}Native(code={key_code}) -> {consumed}",
-                if down { "Down" } else { "Up" }))
-        }
-        Ok(None) => {}
-        Err(e) => super::trace(format_args!(
-            "onKey{}Native(code={key_code}) failed: {e}",
-            if down { "Down" } else { "Up" }
-        )),
-    }
 }
 
 impl HostWindow {
@@ -1018,7 +870,7 @@ impl HostWindow {
         let meta = android_meta_state(ev.state);
         let now = self.now_ms();
 
-        if trace_text() {
+        if super::input::trace_text() {
             eprintln!(
                 "[cordial] key {} keysym={keysym:#x} text={:?} keycode={:?} focus={:?}",
                 if down { "down" } else { "up" },
@@ -1092,7 +944,8 @@ impl HostWindow {
         // Before draining input: if the engine has opened or closed an editor
         // since last time, acknowledge it. Cheap — an atomic load and a
         // comparison unless something actually changed.
-        report_keyboard_state();
+        let (gw, gh, _) = self.geometry();
+        report_keyboard_state((gw, gh));
 
         let mut pfd = PollFd { fd: self.conn_fd, events: POLLIN, revents: 0 };
         // SAFETY: `pfd` is a live array of length 1; a 0ms timeout makes this a
@@ -1383,321 +1236,9 @@ extern "C" fn egl_swap_interval(dpy: *mut c_void, _interval: c_int) -> u32 {
     f(dpy, 0)
 }
 
-
-/// The two `NativeInputInterface` natives Roblox's interface actually reads.
-///
-/// Resolved once by the loader and stored here, because the input drain runs on
-/// the looper thread and has no access to the loaded library. Null until set, in
-/// which case only the AGDK path is driven — which is what shipped before, and
-/// which the interface ignores.
-static PASS_MOUSE_MOVE: std::sync::atomic::AtomicPtr<c_void> =
-    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
-static PASS_MOUSE_BUTTON: std::sync::atomic::AtomicPtr<c_void> =
-    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
-static PASS_KEY_EVENT: std::sync::atomic::AtomicPtr<c_void> =
-    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
-static PASS_TEXT: std::sync::atomic::AtomicPtr<c_void> =
-    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
-/// `syncTextboxTextAndCursorPosition2`. Separate from `PASS_TEXT` because it is
-/// a different call at a different moment, not an alternative spelling of one.
-static SYNC_TEXTBOX: std::sync::atomic::AtomicPtr<c_void> =
-    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
-/// `updateKeyboardSize`, the acknowledgement that an editor is up.
-static UPDATE_KEYBOARD_SIZE: std::sync::atomic::AtomicPtr<c_void> =
-    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
-/// Focus generation the keyboard state was last reported for.
-static KEYBOARD_REPORTED: Mutex<Option<u32>> = Mutex::new(None);
-
-pub fn set_input_natives(
-    mouse_move: *mut c_void,
-    mouse_button: *mut c_void,
-    key_event: *mut c_void,
-    pass_text: *mut c_void,
-    sync_textbox: *mut c_void,
-    update_keyboard_size: *mut c_void,
-) {
-    PASS_MOUSE_MOVE.store(mouse_move, std::sync::atomic::Ordering::Relaxed);
-    PASS_MOUSE_BUTTON.store(mouse_button, std::sync::atomic::Ordering::Relaxed);
-    PASS_KEY_EVENT.store(key_event, std::sync::atomic::Ordering::Relaxed);
-    PASS_TEXT.store(pass_text, std::sync::atomic::Ordering::Relaxed);
-    SYNC_TEXTBOX.store(sync_textbox, std::sync::atomic::Ordering::Relaxed);
-    UPDATE_KEYBOARD_SIZE.store(update_keyboard_size, std::sync::atomic::Ordering::Relaxed);
-}
-
-/// Tell the engine whether an editor is up, when that has changed.
-///
-/// This closes the handshake `showKeyboard` opens. It runs from the input pump
-/// rather than from inside `showKeyboard` itself because on Android the reply
-/// comes from the UI thread after the IME has actually appeared, not
-/// synchronously from within the request — and calling back into the engine
-/// from inside its own call is a re-entry this has no reason to risk.
-fn report_keyboard_state() {
-    // `CORDIAL_NO_KEYBOARD_REPORT=1` — do not acknowledge the keyboard at all.
-    // A control, because focus was observed bouncing in the order
-    // focused, updateKeyboardSize(true), blurred, which is the shape of a
-    // feedback loop rather than a coincidence: reporting a keyboard makes the
-    // engine re-lay-out, and a re-layout may be what drops the capture.
-    if std::env::var_os("CORDIAL_NO_KEYBOARD_REPORT").is_some() {
-        return;
-    }
-    let f = UPDATE_KEYBOARD_SIZE.load(std::sync::atomic::Ordering::Relaxed);
-    if f.is_null() {
-        return;
-    }
-    let generation = cordial_linker_sys::game_activity::textbox_generation();
-    {
-        let mut seen = KEYBOARD_REPORTED.lock().unwrap_or_else(|e| e.into_inner());
-        if *seen == Some(generation) {
-            return;
-        }
-        *seen = Some(generation);
-    }
-    let visible = cordial_linker_sys::game_activity::focused_textbox().is_some();
-    let (w, h) = current().map(|c| { let g = c.geometry(); (g.0, g.1) }).unwrap_or((1280, 720));
-    // Zero height: no soft keyboard occupies the screen here, and a real height
-    // would make the engine shift its layout up to avoid nothing.
-    let r = cordial_linker_sys::game_activity::update_keyboard_size(f, visible, 0, h, w, 0);
-    if trace_text() {
-        eprintln!("[cordial] updateKeyboardSize(visible={visible}, w={w}, h=0) -> {r:?}");
-    }
-}
-
-/// `CORDIAL_NO_AGDK_TOUCH=1` — deliver pointer input only through Roblox's own
-/// `NativeInputInterface`, not also through AGDK's `onTouchEventNative`.
-///
-/// Both paths are real and the engine consumes both, which means one physical
-/// click arrives twice. That is harmless for a button and not harmless for a
-/// text box: the observed symptom is focus bouncing, focused then blurred then
-/// focused again, so a field never stays captured long enough to show a caret
-/// or accept text.
-fn no_agdk_touch() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("CORDIAL_NO_AGDK_TOUCH").is_some())
-}
-
-fn pass_key_event(down: bool, key_code: i32, modifiers: i32) {
-    let f = PASS_KEY_EVENT.load(std::sync::atomic::Ordering::Relaxed);
-    if !f.is_null() {
-        let _ = cordial_linker_sys::game_activity::pass_key_event(f, down, key_code, modifiers, false);
-    }
-}
-
-fn pass_text(which: i64, text: &str, cursor: i32) {
-    // The per-keystroke sync first: this is the call that actually fills the
-    // field. `nativePassText` is driven alongside it for the same reason both
-    // mouse paths are — the interface declares both and the cost of driving
-    // one that turns out to be a no-op is nothing.
-    let sync = SYNC_TEXTBOX.load(std::sync::atomic::Ordering::Relaxed);
-    if !sync.is_null() {
-        if let Err(e) = cordial_linker_sys::game_activity::sync_textbox(sync, text, cursor) {
-            if trace_text() {
-                eprintln!("[cordial] syncTextbox failed: {e}");
-            }
-        }
-    }
-    let f = PASS_TEXT.load(std::sync::atomic::Ordering::Relaxed);
-    if !f.is_null() {
-        // `nativePassText(long, String, boolean, int)`. The boolean's meaning is
-        // not declared anywhere Cordial can read, so it is a knob until a run
-        // says otherwise: `CORDIAL_PASSTEXT_FLAG=1` sends true.
-        let flag = std::env::var_os("CORDIAL_PASSTEXT_FLAG").is_some();
-        if let Err(e) = cordial_linker_sys::game_activity::pass_text(f, which, text, flag, cursor) {
-            if trace_text() {
-                eprintln!("[cordial] passText failed: {e}");
-            }
-        }
-    }
-    if trace_text() {
-        eprintln!(
-            "[cordial] text -> {text:?} caret={cursor} sync={} passText={}",
-            !sync.is_null(), !f.is_null()
-        );
-    }
-}
-
-fn pass_mouse_move(x: f32, y: f32) {
-    let f = PASS_MOUSE_MOVE.load(std::sync::atomic::Ordering::Relaxed);
-    if !f.is_null() {
-        let _ = cordial_linker_sys::game_activity::pass_mouse_move(f, x, y, 0.0, 0.0);
-    }
-}
-
-fn pass_mouse_button(x: f32, y: f32, down: bool) {
-    let f = PASS_MOUSE_BUTTON.load(std::sync::atomic::Ordering::Relaxed);
-    if !f.is_null() {
-        // Button 0 is the primary button in this interface's numbering.
-        let _ = cordial_linker_sys::game_activity::pass_mouse_button(f, x, y, down, 0);
-    }
-}
-
-
-/// The text a focused field currently contains.
-///
-/// Android text fields are edited by *state*, not keystrokes: the whole
-/// contents are delivered each time they change. Cordial therefore has to keep
-/// the buffer itself, because there is no IME here to keep it.
-///
-/// Reset when the engine tells us focus moved would be better; nothing reports
-/// that yet, so a field change currently carries the previous field's text over.
-/// Documented rather than hidden because it will be visible the moment someone
-/// tabs between two boxes.
-/// `CORDIAL_TRACE_TEXT=1`. Text entry is the one path where the interesting
-/// question is what the host *saw*, not what the engine did, so it gets its own
-/// switch rather than riding on the general trace — which is documented as
-/// ABI-unsafe and aborts the engine.
-fn trace_text() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("CORDIAL_TRACE_TEXT").is_some())
-}
-
-static TEXT_BUFFER: Mutex<TextField> = Mutex::new(TextField::new());
-
-/// The editing state Cordial keeps on behalf of the engine.
-///
-/// Android delegates text editing to the IME, and with a hardware keyboard the
-/// IME is still in the loop — it receives the key events and commits finished
-/// text through the InputConnection. Cordial is that IME here, so it owns the
-/// caret as well as the contents. Sending the whole string with the caret
-/// pinned to the end is what made typing feel broken: every keystroke dragged
-/// the caret back, so arrows and clicking into the middle of a field could not
-/// work by construction.
-///
-/// The caret is counted in `char`s, not bytes, because that is what the engine
-/// is told and what a person means by "third character".
-struct TextField {
-    text: String,
-    caret: usize,
-}
-
-impl TextField {
-    const fn new() -> Self {
-        TextField { text: String::new(), caret: 0 }
-    }
-
-    /// Byte offset of the caret, for slicing.
-    fn byte_offset(&self) -> usize {
-        self.text
-            .char_indices()
-            .nth(self.caret)
-            .map(|(i, _)| i)
-            .unwrap_or(self.text.len())
-    }
-
-    fn len_chars(&self) -> usize {
-        self.text.chars().count()
-    }
-
-    fn seed(&mut self, text: String) {
-        self.caret = text.chars().count();
-        self.text = text;
-    }
-
-    fn insert(&mut self, s: &str) {
-        let at = self.byte_offset();
-        self.text.insert_str(at, s);
-        self.caret += s.chars().count();
-    }
-
-    /// Delete the character before the caret. False when there is nothing to
-    /// delete, so the caller can avoid sending an unchanged state.
-    fn backspace(&mut self) -> bool {
-        if self.caret == 0 {
-            return false;
-        }
-        self.caret -= 1;
-        let at = self.byte_offset();
-        self.text.remove(at);
-        true
-    }
-
-    /// Delete the character at the caret — the `Delete` key, as distinct from
-    /// backspace. Without it, correcting a typo means deleting everything after
-    /// it too.
-    fn delete(&mut self) -> bool {
-        if self.caret >= self.len_chars() {
-            return false;
-        }
-        let at = self.byte_offset();
-        self.text.remove(at);
-        true
-    }
-
-    /// Move the caret. Returns whether it moved, so a Left at position zero
-    /// does not resend identical state.
-    fn move_caret(&mut self, to: Caret) -> bool {
-        let before = self.caret;
-        self.caret = match to {
-            Caret::Left => self.caret.saturating_sub(1),
-            Caret::Right => (self.caret + 1).min(self.len_chars()),
-            Caret::Home => 0,
-            Caret::End => self.len_chars(),
-        };
-        self.caret != before
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Caret {
-    Left,
-    Right,
-    Home,
-    End,
-}
-
-/// The focus generation `TEXT_BUFFER` was last seeded for. `showKeyboard`
-/// bumps the engine-side counter on every focus change; when this falls behind
-/// it, the buffer belongs to a box that no longer has focus and is reseeded
-/// from whatever the engine says the newly focused box contains.
-///
-/// Without this, moving from the username field to the password field carries
-/// the username into it, and the first keystroke in a pre-filled field appends
-/// rather than continues.
-static TEXT_GENERATION: Mutex<Option<u32>> = Mutex::new(None);
-
-/// What a key press means to the focused field.
-enum Edit<'a> {
-    Insert(&'a str),
-    Backspace,
-    Delete,
-    Move(Caret),
-}
-
-/// Apply one edit to the focused field.
-///
-/// Returns the contents and caret to send, or `None` when nothing changed —
-/// resending identical state on every arrow key at the end of a field makes the
-/// engine redraw for no reason.
-fn edit_text_buffer(edit: Edit<'_>) -> Option<(String, i32)> {
-    let mut buf = TEXT_BUFFER.lock().unwrap_or_else(|e| e.into_inner());
-
-    // Reseed when focus has moved since this buffer was filled.
-    let generation = cordial_linker_sys::game_activity::textbox_generation();
-    {
-        let mut seen = TEXT_GENERATION.lock().unwrap_or_else(|e| e.into_inner());
-        if *seen != Some(generation) {
-            buf.seed(cordial_linker_sys::game_activity::textbox_text());
-            *seen = Some(generation);
-        }
-    }
-
-    let changed = match edit {
-        Edit::Insert(s) => {
-            // Control characters are not text. A field receives what a person
-            // typed, not every key they pressed.
-            if s.is_empty() || s.chars().any(|c| c.is_control()) {
-                false
-            } else {
-                buf.insert(s);
-                true
-            }
-        }
-        Edit::Backspace => buf.backspace(),
-        Edit::Delete => buf.delete(),
-        Edit::Move(to) => buf.move_caret(to),
-    };
-
-    changed.then(|| (buf.text.clone(), buf.caret as i32))
-}
+// The `NativeInputInterface` natives, the text-entry state machine, and
+// `set_input_natives` itself have all moved to `input.rs` — see its module
+// doc. `dispatch_key`, above, calls back into them by name.
 
 pub fn overrides() -> Vec<(&'static str, *mut c_void)> {
     macro_rules! f {
@@ -1752,68 +1293,6 @@ mod tests {
             INPUT_EVENT_MASK & KEY_BUTTON_MOTION_MASK,
             KEY_BUTTON_MOTION_MASK
         );
-    }
-
-    #[test]
-    fn a_caret_edits_where_it_is_not_at_the_end() {
-        // Every keystroke used to send the whole string with the caret pinned to
-        // the end, which meant arrows and clicking into the middle of a field
-        // could not work however the engine behaved. This is the regression that
-        // made typing feel broken rather than absent.
-        let mut f = TextField::new();
-        f.seed("hello".into());
-        assert_eq!(f.caret, 5);
-        assert!(f.move_caret(Caret::Home));
-        assert_eq!(f.caret, 0);
-        f.insert("say ");
-        assert_eq!(f.text, "say hello");
-        assert_eq!(f.caret, 4);
-    }
-
-    #[test]
-    fn backspace_and_delete_are_not_the_same_key() {
-        // Backspace removes before the caret, Delete at it. Treating Delete as
-        // backspace loses the character on the wrong side of the cursor, which
-        // is the sort of bug people describe as "it eats my text".
-        let mut f = TextField::new();
-        f.seed("abc".into());
-        f.move_caret(Caret::Home);
-        assert!(!f.backspace()); // nothing before the caret
-        assert!(f.delete());
-        assert_eq!(f.text, "bc");
-        assert_eq!(f.caret, 0);
-        f.move_caret(Caret::End);
-        assert!(f.backspace());
-        assert_eq!(f.text, "b");
-    }
-
-    #[test]
-    fn the_caret_is_counted_in_characters_not_bytes() {
-        // The engine is told a character offset. Counting bytes puts the caret
-        // mid-codepoint for any non-ASCII input and slices a String there, which
-        // panics rather than misbehaving quietly.
-        let mut f = TextField::new();
-        f.seed("héllo".into());
-        assert_eq!(f.caret, 5);
-        f.move_caret(Caret::Home);
-        f.move_caret(Caret::Right);
-        f.move_caret(Caret::Right);
-        assert_eq!(f.caret, 2);
-        f.insert("X");
-        assert_eq!(f.text, "héXllo");
-    }
-
-    #[test]
-    fn a_caret_move_that_goes_nowhere_reports_no_change() {
-        // Left at position zero must not resend identical state; the engine
-        // would redraw the field on every held arrow key for nothing.
-        let mut f = TextField::new();
-        f.seed("ab".into());
-        f.move_caret(Caret::Home);
-        assert!(!f.move_caret(Caret::Left));
-        assert!(f.move_caret(Caret::Right));
-        f.move_caret(Caret::End);
-        assert!(!f.move_caret(Caret::Right));
     }
 
     #[test]
