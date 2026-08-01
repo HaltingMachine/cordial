@@ -64,11 +64,27 @@ one — registry binding, `xdg_shell`, `wl_seat` input with xkbcommon keymaps,
 `VK_KHR_xlib_surface` in the Vulkan interposition. The X11 backend reached a
 first frame sooner and that was worth having; it is not worth keeping two.
 
-**Accepted:** the existing X11 code stays in the tree for now rather than being
-deleted in the same change that adds its replacement, so that a regression in the
-new backend is diagnosable against a working one. It is not a supported
-configuration and it is not to be extended. It should be removed once the Wayland
-path has run the sign-in flow end to end.
+**Accepted, with a hard trigger:** the existing X11 code stays only until the
+Wayland path runs the sign-in flow end to end, and **is deleted in that same
+change** — not in a follow-up, not when someone gets to it.
+
+That is deliberately a rule and not an intention, because this ADR already
+rejected maintaining two backends on the grounds that a fallback nobody runs
+rots. Keeping X11 "for now" is that same arrangement wearing a deadline, and it
+decays the moment the deadline is soft. Two specifics make it decay faster than
+usual here: once Wayland works nobody will run X11, including CI, which runs
+neither; and the shared `android/input.rs` means a rotting X11 path drags shared
+editing logic with it rather than rotting in isolation.
+
+So the condition is mechanical. When the Wayland backend can reach sign-in,
+`window.rs` and its `Backend::X11` arm go in the same commit. A change that makes
+Wayland work and leaves X11 in place has not finished. Until that point X11 is
+not a fallback, it is the *only* working backend and is load-bearing — the risk
+described here starts the day that stops being true.
+
+Removal is cheap by construction: what remains in `window.rs` is X-specific
+surface and event plumbing, because the display-independent parts already moved
+to `input.rs`. Nothing else has to be untangled first.
 
 **Accepted:** input has to be rebuilt, not ported. X11 delivers keysyms; Wayland
 delivers keycodes plus an xkb keymap the client is expected to interpret. The
