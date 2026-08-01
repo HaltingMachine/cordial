@@ -1016,6 +1016,30 @@ fn main() -> ExitCode {
                                             }
                                         }
 
+                                        // Resolve the input path Roblox's own
+                                        // interface reads. AGDK's
+                                        // onTouchEventNative is accepted by the
+                                        // engine and ignored by the Lua UI; this
+                                        // is what actually moves anything.
+                                        {
+                                            let mv = lib.symbol(
+                                                "Java_com_roblox_engine_jni_NativeInputInterface_nativePassMouseMove",
+                                            ).unwrap_or(std::ptr::null_mut());
+                                            let bt = lib.symbol(
+                                                "Java_com_roblox_engine_jni_NativeInputInterface_nativePassMouseButton",
+                                            ).unwrap_or(std::ptr::null_mut());
+                                            let ke = lib.symbol(
+                                                "Java_com_roblox_engine_jni_NativeGLInterface_nativePassKeyEvent",
+                                            ).unwrap_or(std::ptr::null_mut());
+                                            let tx = lib.symbol(
+                                                "Java_com_roblox_engine_jni_NativeGLInterface_nativePassText",
+                                            ).unwrap_or(std::ptr::null_mut());
+                                            cordial_runtime::android::window::set_input_natives(mv, bt, ke, tx);
+                                            if mv.is_null() || bt.is_null() {
+                                                println!("  input: NativeInputInterface not fully exported; UI input will not work");
+                                            }
+                                        }
+
                                         // A read-only probe of the engine's own
                                         // verdict on whether login is rendered
                                         // by the Lua app shell rather than a

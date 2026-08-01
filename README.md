@@ -78,11 +78,12 @@ will be declined.
 | App shell reaches `APP_READY (Landing)` | ✅ |
 | Renders — Vulkan, with GLES2 fallback | ✅ |
 | Networking / HTTPS | ✅ |
-| Mouse and keyboard reach the engine | ✅ (no scroll wheel yet) |
+| Mouse: navigation, buttons, field focus | ✅ |
+| Typing into text fields | ❌ the last step before sign-in |
 | Clean shutdown | ✅ full pause/stop/destroy sequence |
 | Stable | ✅ 26 consecutive clean launches |
 | Frame rate | ✅ ~27 fps on Vulkan, ~33 fps on GLES |
-| Signed in | ❌ not implemented |
+| Signed in | ❌ login form renders and is reachable; typing is the blocker |
 | Plugins | 🟡 host and capability broker built; not yet wired to the running client |
 
 Measured with `vkQueuePresentKHR`: 656, 656 and 655 presents over 24 s across

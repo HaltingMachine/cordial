@@ -145,19 +145,37 @@ public:
 /// (no motion coalescing), `getHistoricalEventTime`/`getHistoricalAxisValue` are
 /// registered — because AGDK unconditionally resolves the method IDs at
 /// `initializeNativeCode` time — but never actually invoked.
+/// Whether to present input as a touchscreen rather than a mouse.
+///
+/// Read once. An input device that changed identity mid-session would be a
+/// stranger thing than either choice.
+bool input_is_touch() {
+    static const bool v = [] {
+        const char* e = getenv("CORDIAL_INPUT_TOUCH");
+        return e && *e && *e != '0';
+    }();
+    return v;
+}
+
 class MotionEvent : public Object {
 public:
     jint deviceId = 1;
-    // InputDevice.SOURCE_MOUSE = SOURCE_CLASS_POINTER(0x2) | 0x2000.
-    jint source = 0x00002002;
+    // InputDevice.SOURCE_MOUSE = SOURCE_CLASS_POINTER(0x2) | 0x2000, or
+    // SOURCE_TOUCHSCREEN = SOURCE_CLASS_POINTER(0x2) | 0x1000 with
+    // CORDIAL_INPUT_TOUCH=1. Roblox's Android UI may bind only touch handlers,
+    // in which case a perfectly well-formed mouse event is consumed by the
+    // input dispatcher and then ignored by the interface — which is exactly the
+    // symptom: onTouchEventNative returns true and nothing moves.
+    jint source = cordial::input_is_touch() ? 0x00001002 : 0x00002002;
     jint action = 0;
     jlong eventTime = 0, downTime = 0;
     jint flags = 0, metaState = 0, actionButton = 0, buttonState = 0;
     jfloat x = 0.0f, y = 0.0f;
-    // TOOL_TYPE_MOUSE. Cordial reports isMouseDevice/isTouchDevice accordingly
-    // in PlatformParams (init_params.cpp), and this is the same claim made
-    // consistently on the event itself.
-    jint toolType = 3;
+    // TOOL_TYPE_MOUSE, or TOOL_TYPE_FINGER under CORDIAL_INPUT_TOUCH=1. Kept
+    // consistent with `source` and with PlatformParams' isMouseDevice/
+    // isTouchDevice, because claiming to be a mouse in one place and a finger in
+    // another is the kind of inconsistency an input stack is entitled to reject.
+    jint toolType = cordial::input_is_touch() ? 1 : 3;
 
     jint getPointerId(ENV*, jint) { return 0; }
     jint getToolType(ENV*, jint) { return toolType; }
@@ -241,6 +259,37 @@ public:
 /// primitives at all — the whole event is this object, and AGDK's
 /// `GameActivityKeyEvent_fromJava` (same source file as the MotionEvent mapping
 /// above) calls every one of these accessors directly.
+/// `com.google.androidgamesdk.gametextinput.State` — the whole editing state.
+///
+/// Android text fields do not receive keystrokes. They receive *state*: the
+/// complete contents of the field, the selection, and any in-progress composing
+/// region from an IME. Cordial had no implementation of this, which is why keys
+/// reached `onKeyDownNative` and the login form's text boxes stayed empty — the
+/// engine resolves these five fields and nothing was ever answering them.
+///
+/// Fields rather than getters, matching the real class, which libjnivm binds by
+/// name and descriptor.
+class TextInputState : public Object {
+public:
+    std::shared_ptr<String> text = std::make_shared<String>(std::string());
+    jint selectionStart = 0;
+    jint selectionEnd = 0;
+    // -1 means "no composing region", which is what a physical keyboard
+    // produces — composition is an IME concept and there is no IME here.
+    jint composingRegionStart = -1;
+    jint composingRegionEnd = -1;
+
+    static void Register(ENV* env) {
+        env->GetClass<TextInputState>("com/google/androidgamesdk/gametextinput/State");
+        auto c = env->GetClass("com/google/androidgamesdk/gametextinput/State");
+        c->HookInstance(env, "text", &TextInputState::text);
+        c->HookInstance(env, "selectionStart", &TextInputState::selectionStart);
+        c->HookInstance(env, "selectionEnd", &TextInputState::selectionEnd);
+        c->HookInstance(env, "composingRegionStart", &TextInputState::composingRegionStart);
+        c->HookInstance(env, "composingRegionEnd", &TextInputState::composingRegionEnd);
+    }
+};
+
 class KeyEvent : public Object {
 public:
     jint deviceId = 1;
@@ -340,6 +389,7 @@ void register_game_activity_classes(ENV* env) {
     GameActivity::Register(env);
     MotionEvent::Register(env);
     KeyEvent::Register(env);
+    TextInputState::Register(env);
 }
 
 } // namespace cordial
@@ -663,6 +713,157 @@ extern "C" {
 /// `cordial::to_jni` parks every object it touches in the current local frame
 /// (see its own doc comment) — without popping, a long session would grow that
 /// frame without bound.
+/// `NativeInputInterface.nativePassMouseMove(F,F,F,F)` and
+/// `nativePassMouseButton(F,F,Z,I)`.
+///
+/// This is the input path Roblox's *interface* actually reads. AGDK's
+/// `onTouchEventNative` is a different pipe: it accepts events and returns true,
+/// and the engine buffers them, but the Lua app shell never hit-tests anything
+/// delivered that way. Feeding only AGDK produced a client where every click was
+/// accepted and nothing on screen ever moved — pixel-identical before and after,
+/// including hover.
+///
+/// Signatures read from the shipping APK's dex, not guessed.
+/// `GameActivity.onTextInputEventNative(J, State)`.
+///
+/// Delivers the field's entire contents, not a keystroke. The caller owns the
+/// buffer and sends the whole thing each time it changes, which is what the real
+/// Android implementation does when an IME edits the text.
+int cordial_game_activity_text_input(long handle, const char* text, int sel_start, int sel_end,
+                                     char* err, size_t err_len) {
+    auto* env = cordial::process_env();
+    if (!env || handle == 0) {
+        snprintf(err, err_len, "no JavaVM, or no native handle");
+        return -1;
+    }
+    try {
+        JNIEnv* jni = env->GetJNIEnv();
+        auto cls = env->GetClass("com/google/androidgamesdk/GameActivity");
+        if (!cls) {
+            snprintf(err, err_len, "GameActivity class is not registered");
+            return -1;
+        }
+        auto it = cls->natives.find("onTextInputEventNative");
+        if (it == cls->natives.end()) {
+            snprintf(err, err_len, "onTextInputEventNative was never registered");
+            return -1;
+        }
+        auto state = std::make_shared<cordial::TextInputState>();
+        state->text = std::make_shared<cordial::String>(std::string(text ? text : ""));
+        state->selectionStart = sel_start;
+        state->selectionEnd = sel_end;
+
+        using Call = void (*)(JNIEnv*, jobject, jlong, jobject);
+        reinterpret_cast<Call>(it->second)(jni, (jobject)cordial::to_jni(env, cordial::shared_activity(env)), (jlong)handle,
+                                           (jobject)cordial::to_jni(env, state));
+        return 0;
+    } catch (const std::exception& e) {
+        snprintf(err, err_len, "%s", e.what());
+        return -1;
+    } catch (...) {
+        snprintf(err, err_len, "non-standard C++ exception");
+        return -1;
+    }
+}
+
+/// `NativeGLInterface.nativePassKeyEvent(Z down, I keyCode, I modifiers, Z isRepeat)`.
+///
+/// Roblox's own keyboard path, the counterpart to `nativePassMouseButton`. AGDK's
+/// `onKeyDownNative` is accepted and ignored by the interface in exactly the way
+/// `onTouchEventNative` was.
+int cordial_input_key_event(void* fn, int down, int key_code, int modifiers, int is_repeat,
+                            char* err, size_t err_len) {
+    using Call = void (*)(JNIEnv*, jobject, jboolean, jint, jint, jboolean);
+    auto* env = cordial::process_env();
+    if (!fn || !env) {
+        snprintf(err, err_len, "no JavaVM, or nativePassKeyEvent is not exported");
+        return -1;
+    }
+    try {
+        auto cls = env->GetClass("com/roblox/engine/jni/NativeGLInterface");
+        reinterpret_cast<Call>(fn)(env->GetJNIEnv(), (jobject)cordial::to_jni(env, cls),
+                                   down ? JNI_TRUE : JNI_FALSE, key_code, modifiers,
+                                   is_repeat ? JNI_TRUE : JNI_FALSE);
+        return 0;
+    } catch (const std::exception& e) {
+        snprintf(err, err_len, "%s", e.what());
+        return -1;
+    } catch (...) {
+        snprintf(err, err_len, "non-standard C++ exception");
+        return -1;
+    }
+}
+
+/// `NativeGLInterface.nativePassText(J, String, Z, I)` — text entered into a
+/// focused text box, which is a different thing from a key being pressed.
+int cordial_input_pass_text(void* fn, long long which, const char* text, int flag, int cursor,
+                            char* err, size_t err_len) {
+    using Call = void (*)(JNIEnv*, jobject, jlong, jstring, jboolean, jint);
+    auto* env = cordial::process_env();
+    if (!fn || !env) {
+        snprintf(err, err_len, "no JavaVM, or nativePassText is not exported");
+        return -1;
+    }
+    try {
+        auto cls = env->GetClass("com/roblox/engine/jni/NativeGLInterface");
+        auto str = std::make_shared<cordial::String>(std::string(text ? text : ""));
+        reinterpret_cast<Call>(fn)(env->GetJNIEnv(), (jobject)cordial::to_jni(env, cls),
+                                   (jlong)which, (jstring)cordial::to_jni(env, str),
+                                   flag ? JNI_TRUE : JNI_FALSE, cursor);
+        return 0;
+    } catch (const std::exception& e) {
+        snprintf(err, err_len, "%s", e.what());
+        return -1;
+    } catch (...) {
+        snprintf(err, err_len, "non-standard C++ exception");
+        return -1;
+    }
+}
+
+int cordial_input_mouse_move(void* fn, float x, float y, float dx, float dy, char* err,
+                             size_t err_len) {
+    using Call = void (*)(JNIEnv*, jobject, jfloat, jfloat, jfloat, jfloat);
+    auto* env = cordial::process_env();
+    if (!fn || !env) {
+        snprintf(err, err_len, "no JavaVM, or nativePassMouseMove is not exported");
+        return -1;
+    }
+    try {
+        auto cls = env->GetClass("com/roblox/engine/jni/NativeInputInterface");
+        reinterpret_cast<Call>(fn)(env->GetJNIEnv(), (jobject)cordial::to_jni(env, cls), x, y, dx,
+                                   dy);
+        return 0;
+    } catch (const std::exception& e) {
+        snprintf(err, err_len, "%s", e.what());
+        return -1;
+    } catch (...) {
+        snprintf(err, err_len, "non-standard C++ exception");
+        return -1;
+    }
+}
+
+int cordial_input_mouse_button(void* fn, float x, float y, int down, int button, char* err,
+                               size_t err_len) {
+    using Call = void (*)(JNIEnv*, jobject, jfloat, jfloat, jboolean, jint);
+    auto* env = cordial::process_env();
+    if (!fn || !env) {
+        snprintf(err, err_len, "no JavaVM, or nativePassMouseButton is not exported");
+        return -1;
+    }
+    try {
+        auto cls = env->GetClass("com/roblox/engine/jni/NativeInputInterface");
+        reinterpret_cast<Call>(fn)(env->GetJNIEnv(), (jobject)cordial::to_jni(env, cls), x, y,
+                                   down ? JNI_TRUE : JNI_FALSE, button);
+        return 0;
+    } catch (const std::exception& e) {
+        snprintf(err, err_len, "%s", e.what());
+        return -1;
+    } catch (...) {
+        snprintf(err, err_len, "non-standard C++ exception");
+        return -1;
+    }
+}
+
 int cordial_game_activity_touch(long handle, int action, float x, float y, int button_state,
                                 int action_button, long long event_time_ms,
                                 long long down_time_ms, int* consumed, char* err,

@@ -888,6 +888,26 @@ pub mod game_activity {
             err: *mut c_char,
             err_len: usize,
         ) -> c_int;
+        fn cordial_game_activity_text_input(
+            handle: i64, text: *const c_char, sel_start: c_int, sel_end: c_int,
+            err: *mut c_char, n: usize,
+        ) -> c_int;
+        fn cordial_input_key_event(
+            f: *mut c_void, down: c_int, key_code: c_int, modifiers: c_int, is_repeat: c_int,
+            err: *mut c_char, n: usize,
+        ) -> c_int;
+        fn cordial_input_pass_text(
+            f: *mut c_void, which: i64, text: *const c_char, flag: c_int, cursor: c_int,
+            err: *mut c_char, n: usize,
+        ) -> c_int;
+        fn cordial_input_mouse_move(
+            f: *mut c_void, x: f32, y: f32, dx: f32, dy: f32,
+            err: *mut c_char, n: usize,
+        ) -> c_int;
+        fn cordial_input_mouse_button(
+            f: *mut c_void, x: f32, y: f32, down: c_int, button: c_int,
+            err: *mut c_char, n: usize,
+        ) -> c_int;
         fn cordial_game_activity_window_focus(
             handle: i64,
             focused: c_int,
@@ -928,6 +948,74 @@ pub mod game_activity {
     /// `onWindowFocusChangedNative(hasFocus)`. `start` already drives the
     /// `true` case inline at bring-up; this is for the `false` case Android
     /// sends immediately before `onPauseNative` when a run ends.
+    /// `GameActivity.onTextInputEventNative` — the whole field contents.
+    ///
+    /// Android text fields receive state, not keystrokes, which is why keys
+    /// alone left the login form's boxes empty.
+    pub fn text_input(handle: i64, text: &str, sel_start: i32, sel_end: i32) -> Result<(), String> {
+        let t = CString::new(text).map_err(|e| e.to_string())?;
+        let mut err = vec![0u8; 512];
+        // SAFETY: `t` and `err` outlive the call.
+        let rc = unsafe {
+            cordial_game_activity_text_input(
+                handle, t.as_ptr(), sel_start, sel_end,
+                err.as_mut_ptr() as *mut c_char, err.len(),
+            )
+        };
+        if rc == 0 { Ok(()) } else { Err(take_err(err)) }
+    }
+
+    /// `NativeGLInterface.nativePassKeyEvent` — Roblox's own keyboard path.
+    pub fn pass_key_event(native: *mut c_void, down: bool, key_code: i32, modifiers: i32, is_repeat: bool) -> Result<(), String> {
+        let mut err = vec![0u8; 512];
+        // SAFETY: `err` outlives the call.
+        let rc = unsafe {
+            cordial_input_key_event(
+                native, down as c_int, key_code, modifiers, is_repeat as c_int,
+                err.as_mut_ptr() as *mut c_char, err.len(),
+            )
+        };
+        if rc == 0 { Ok(()) } else { Err(take_err(err)) }
+    }
+
+    /// `NativeGLInterface.nativePassText` — text entered into a focused box.
+    pub fn pass_text(native: *mut c_void, text: &str, cursor: i32) -> Result<(), String> {
+        let t = CString::new(text).map_err(|e| e.to_string())?;
+        let mut err = vec![0u8; 512];
+        // SAFETY: `t` and `err` outlive the call.
+        let rc = unsafe {
+            cordial_input_pass_text(
+                native, 0, t.as_ptr(), 0, cursor,
+                err.as_mut_ptr() as *mut c_char, err.len(),
+            )
+        };
+        if rc == 0 { Ok(()) } else { Err(take_err(err)) }
+    }
+
+    /// `NativeInputInterface.nativePassMouseMove` — the path Roblox's interface
+    /// actually reads, as distinct from AGDK's `onTouchEventNative`.
+    pub fn pass_mouse_move(native: *mut c_void, x: f32, y: f32, dx: f32, dy: f32) -> Result<(), String> {
+        let mut err = vec![0u8; 512];
+        // SAFETY: `native` is the exported JNI native; `err` outlives the call.
+        let rc = unsafe {
+            cordial_input_mouse_move(native, x, y, dx, dy, err.as_mut_ptr() as *mut c_char, err.len())
+        };
+        if rc == 0 { Ok(()) } else { Err(take_err(err)) }
+    }
+
+    /// `NativeInputInterface.nativePassMouseButton`.
+    pub fn pass_mouse_button(native: *mut c_void, x: f32, y: f32, down: bool, button: i32) -> Result<(), String> {
+        let mut err = vec![0u8; 512];
+        // SAFETY: as above.
+        let rc = unsafe {
+            cordial_input_mouse_button(
+                native, x, y, if down { 1 } else { 0 }, button,
+                err.as_mut_ptr() as *mut c_char, err.len(),
+            )
+        };
+        if rc == 0 { Ok(()) } else { Err(take_err(err)) }
+    }
+
     pub fn window_focus(handle: i64, focused: bool) -> Result<Option<()>, String> {
         let mut err = vec![0u8; 512];
         // SAFETY: `handle` came from `initialize`; `err` is a live buffer.

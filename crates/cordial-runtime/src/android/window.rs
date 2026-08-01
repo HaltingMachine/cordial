@@ -851,6 +851,11 @@ impl HostWindow {
             deliver_touch(handle, ACTION_BUTTON_RELEASE, x, y, buttons, android_button, now, down_time);
             deliver_touch(handle, ACTION_UP, x, y, buttons, 0, now, down_time);
         }
+
+        // The interface's own input path, alongside AGDK's.
+        if android_button == BUTTON_PRIMARY {
+            pass_mouse_button(x, y, press);
+        }
     }
 
     fn dispatch_motion(&self, handle: i64, ev: &XInputEvent) {
@@ -865,6 +870,10 @@ impl HostWindow {
         // when it moves without a button down.
         let action = if buttons != 0 { ACTION_MOVE } else { ACTION_HOVER_MOVE };
         deliver_touch(handle, action, x, y, buttons, 0, now, down_time);
+        // And the path the interface reads. Both are driven: AGDK's contract is
+        // real and the engine consumes it, it is simply not what hit-tests the
+        // Lua UI.
+        pass_mouse_move(x, y);
     }
 
     fn dispatch_key(&self, handle: i64, buf: &mut [u8; 256], down: bool) {
@@ -899,6 +908,30 @@ impl HostWindow {
         // the report — it does not block a key reaching the engine, only the
         // precision of one timing field most UI code does not consult.
         deliver_key(handle, down, keycode, ev.detail as i32, meta, 0, unicode, now, now);
+
+        pass_key_event(down, keycode, meta);
+
+        // And the text path. Android text fields are edited by state, not by
+        // keystrokes — delivering the key alone leaves the box empty, which is
+        // exactly what the login form did before this. Only on key-down: a
+        // release would deliver the same state twice.
+        if down {
+            let typed = if n > 0 {
+                std::str::from_utf8(&text[..n as usize]).unwrap_or("")
+            } else {
+                ""
+            };
+            // XK_BackSpace
+            let backspace = keysym == 0xff08;
+            if let Some(contents) = edit_text_buffer(typed, backspace) {
+                let len = contents.chars().count() as i32;
+                // AGDK's GameTextInput path, and Roblox's own. Both are driven
+                // for the same reason as the mouse: the first is the documented
+                // contract, the second is what the interface reads.
+                let _ = cordial_linker_sys::game_activity::text_input(handle, &contents, len, len);
+                pass_text(&contents, len);
+            }
+        }
     }
 
     /// Drain and deliver whatever X11 input is already queued, then return.
@@ -1158,6 +1191,97 @@ extern "C" fn egl_swap_interval(dpy: *mut c_void, _interval: c_int) -> u32 {
     // SAFETY: resolved from the host for exactly this name.
     let f: Fn_ = unsafe { std::mem::transmute(f) };
     f(dpy, 0)
+}
+
+
+/// The two `NativeInputInterface` natives Roblox's interface actually reads.
+///
+/// Resolved once by the loader and stored here, because the input drain runs on
+/// the looper thread and has no access to the loaded library. Null until set, in
+/// which case only the AGDK path is driven — which is what shipped before, and
+/// which the interface ignores.
+static PASS_MOUSE_MOVE: std::sync::atomic::AtomicPtr<c_void> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+static PASS_MOUSE_BUTTON: std::sync::atomic::AtomicPtr<c_void> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+static PASS_KEY_EVENT: std::sync::atomic::AtomicPtr<c_void> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+static PASS_TEXT: std::sync::atomic::AtomicPtr<c_void> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+
+pub fn set_input_natives(
+    mouse_move: *mut c_void,
+    mouse_button: *mut c_void,
+    key_event: *mut c_void,
+    pass_text: *mut c_void,
+) {
+    PASS_MOUSE_MOVE.store(mouse_move, std::sync::atomic::Ordering::Relaxed);
+    PASS_MOUSE_BUTTON.store(mouse_button, std::sync::atomic::Ordering::Relaxed);
+    PASS_KEY_EVENT.store(key_event, std::sync::atomic::Ordering::Relaxed);
+    PASS_TEXT.store(pass_text, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn pass_key_event(down: bool, key_code: i32, modifiers: i32) {
+    let f = PASS_KEY_EVENT.load(std::sync::atomic::Ordering::Relaxed);
+    if !f.is_null() {
+        let _ = cordial_linker_sys::game_activity::pass_key_event(f, down, key_code, modifiers, false);
+    }
+}
+
+fn pass_text(text: &str, cursor: i32) {
+    let f = PASS_TEXT.load(std::sync::atomic::Ordering::Relaxed);
+    if !f.is_null() {
+        let _ = cordial_linker_sys::game_activity::pass_text(f, text, cursor);
+    }
+}
+
+fn pass_mouse_move(x: f32, y: f32) {
+    let f = PASS_MOUSE_MOVE.load(std::sync::atomic::Ordering::Relaxed);
+    if !f.is_null() {
+        let _ = cordial_linker_sys::game_activity::pass_mouse_move(f, x, y, 0.0, 0.0);
+    }
+}
+
+fn pass_mouse_button(x: f32, y: f32, down: bool) {
+    let f = PASS_MOUSE_BUTTON.load(std::sync::atomic::Ordering::Relaxed);
+    if !f.is_null() {
+        // Button 0 is the primary button in this interface's numbering.
+        let _ = cordial_linker_sys::game_activity::pass_mouse_button(f, x, y, down, 0);
+    }
+}
+
+
+/// The text a focused field currently contains.
+///
+/// Android text fields are edited by *state*, not keystrokes: the whole
+/// contents are delivered each time they change. Cordial therefore has to keep
+/// the buffer itself, because there is no IME here to keep it.
+///
+/// Reset when the engine tells us focus moved would be better; nothing reports
+/// that yet, so a field change currently carries the previous field's text over.
+/// Documented rather than hidden because it will be visible the moment someone
+/// tabs between two boxes.
+static TEXT_BUFFER: Mutex<String> = Mutex::new(String::new());
+
+/// Feed a keystroke into the focused field, if there is one.
+///
+/// Returns whether the buffer changed, so the caller only delivers state when
+/// something actually happened.
+fn edit_text_buffer(keysym_text: &str, backspace: bool) -> Option<String> {
+    let mut buf = TEXT_BUFFER.lock().unwrap_or_else(|e| e.into_inner());
+    if backspace {
+        if buf.pop().is_none() {
+            return None;
+        }
+    } else {
+        // Control characters are not text. A field receives what a person typed,
+        // not every key they pressed.
+        if keysym_text.is_empty() || keysym_text.chars().any(|c| c.is_control()) {
+            return None;
+        }
+        buf.push_str(keysym_text);
+    }
+    Some(buf.clone())
 }
 
 pub fn overrides() -> Vec<(&'static str, *mut c_void)> {

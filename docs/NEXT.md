@@ -38,7 +38,39 @@ had looked in `appData/`.
 
 # What is blocking
 
-## 1. Sign-in — the reason it is not usable
+## 1. Text entry — the last step before you can sign in
+
+**The login form works.** Clicking Sign In on the landing page opens Roblox's
+Lua-rendered login form — username, password with a reveal toggle, Quick Sign-in,
+Forgot Password. Clicking a field focuses it and shows a caret. All of that is
+verified by screenshot.
+
+**What does not work is typing into it.** Characters do not appear. Everything
+else about sign-in is now reachable, so this is the single remaining step.
+
+The cause is almost certainly the same shape as the input bug it came out of.
+Roblox reads text through its own on-screen-keyboard contract, and Cordial
+implements none of the reverse half:
+
+```text
+nativeGetTextBoxInfo()                     -> NativeTextBoxInfo
+syncTextboxTextAndCursorPosition2(String, I)
+updateKeyboardSize(...)
+nativeReturnPressedFromOnScreenKeyboard()
+GameActivity.setSoftKeyboardActive(Z, I)   <- engine calls INTO Java
+```
+
+`nativePassText` and `nativePassKeyEvent` are already wired and are not enough on
+their own. The engine calls *out* to Java to raise a soft keyboard and attach an
+input connection, and nothing answers — so the field is focused with no text
+source attached. Implementing that reverse contract is the job.
+
+**Already ruled out, do not redo:** delivering keys through AGDK's
+`onKeyDownNative` (accepted, ignored), delivering editing state through AGDK's
+`onTextInputEventNative` with a populated `gametextinput/State` (accepted,
+ignored), and re-sending window focus after the Lua app is up (no effect).
+
+## 2. Sign-in itself
 
 Without a session the client sits on the landing page. Avatar thumbnails fail
 against user id 0 and there is nothing to do. `NativeUserJavaInterface` is
@@ -77,7 +109,7 @@ One correction that came out of it: the `The requested Ids are invalid`
 thumbnail failure is what the **real, logged-out Android client** also produces.
 It is not a Cordial defect and it is not evidence of anything.
 
-## 2. Plugins: running, but with three methods
+## 3. Plugins: running, but with three methods
 
 `crates/cordial-plugins` has capabilities, a broker, manifests, user grants and a
 Deno host. `crates/cordial-runtime/src/plugin_host.rs` joins it to the client:
