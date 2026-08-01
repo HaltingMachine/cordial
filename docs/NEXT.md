@@ -78,20 +78,28 @@ broken 1 Hz clamp underneath that pacing rather than uncapping anything.
 `CORDIAL_SWAP_TIMES=1` reports how long each swap blocks — which is what found
 this.
 
-## 3. Plugins: the host exists, the runtime is not wired to it yet
+## 3. Plugins: running, but with three methods
 
-`crates/cordial-plugins` has capabilities, the broker, the manifest, user grants
-and a Deno host, with an end-to-end test that runs the real example plugin in
-[`plugins/flag-inspector`](../plugins/flag-inspector).
+`crates/cordial-plugins` has capabilities, a broker, manifests, user grants and a
+Deno host. `crates/cordial-runtime/src/plugin_host.rs` joins it to the client:
+plugins are discovered, started after bring-up, and served from the real flag
+resolver. Verified in a live launch — the example plugin in
+[`plugins/flag-inspector`](../plugins/flag-inspector) reads a flag the user
+actually set and is refused a capability it did not request.
 
-**What is missing** is the join to the running client: `flags.list` and friends
-are served by the test's stand-in rather than by
-`crates/cordial-runtime/src/flags.rs`, and nothing spawns plugins during a real
-launch. That wiring, plus lifecycle events, is the next piece.
+**What is missing** is surface area, not structure. Only `flags.list`,
+`flags.get` and `log.write` are implemented. `flags.write`,
+`flags.write.dynamic` and `lifecycle.subscribe` are defined as capabilities and
+return `error: not implemented yet` — deliberately `error` rather than `denied`,
+so an author is not sent looking for a permission that was never the problem.
 
-See [ADR-003](adr/ADR-003-plugin-isolation.md) for why isolation is by process
-and [ADR-005](adr/ADR-005-flag-service.md) for why flag writes are two
-capabilities rather than one.
+Lifecycle events have nothing to subscribe to yet. That is the natural next
+piece now that the client has a real shutdown sequence to report.
+
+See [ADR-003](adr/ADR-003-plugin-isolation.md) for why isolation is by process,
+[ADR-004](adr/ADR-004-plugin-asset-overrides.md) for why plugins cannot replace
+Roblox's assets, and [ADR-005](adr/ADR-005-flag-service.md) for why flag writes
+are two capabilities.
 
 ---
 
