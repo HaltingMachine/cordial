@@ -63,6 +63,8 @@ env:
                                      the first), instead of the primary one
   CORDIAL_WINDOW_POS=<x>,<y>         explicit window position; wins over
                                      CORDIAL_MONITOR
+  CORDIAL_FULLSCREEN=1               cover the chosen monitor and ask the
+                                     window manager for fullscreen
 ";
 
 fn parse() -> Result<Options, String> {

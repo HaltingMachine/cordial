@@ -1,210 +1,140 @@
-# Cordial
+<p align="center">
+  <img src="https://raw.githubusercontent.com/luohoa97/cordial/main/packaging/icons/org.cordial.Cordial.svg" alt="Cordial" width="220">
+</p>
 
-**A Linux client for Roblox — plugins and all, all yours.**
+# Run Roblox on Linux natively — Plugins, all yours.
 
-> **Warning — read this before you use Cordial with an account you care about.**
+Cordial loads Roblox's official Android x86-64 engine directly on Linux through a
+purpose-built runtime: the AOSP bionic linker, a bionic/glibc shim, a JNI VM in
+place of Android's, and a framework layer that answers the client's calls. No
+emulator, no container, no virtual machine. It talks to your GPU through Vulkan
+or GLES2 the way any native application does.
+
+### Disclosure
+
+**This is NOT an official Roblox client. This project is in no way endorsed or
+sponsored by Roblox Corporation.** Roblox is a trademark of Roblox Corporation.
+
+**It was built in two days by [Claude Code](https://claude.com/claude-code)** —
+Anthropic's Claude, model Opus 5 — with the architecture directed by a human
+working alongside it. That is not a footnote. It is why the commit messages are
+long, why `docs/` records what was disproved as carefully as what worked, and why
+nobody should assume a human reviewed every line. The engineering is real and
+every finding was verified by running the thing rather than reasoning about it.
+It has still only existed for two days.
+
+> ### ⚠️ Read this before using an account you care about
 >
 > Roblox does not support third-party clients and operates automated systems that
 > ban accounts for using them, up to permanent termination. Those systems have
-> produced false positives against innocent players. Sober has survived this for
-> years; Cordial is a different project with no track record whatsoever.
+> produced false positives against innocent players.
 >
 > Cordial does not modify the Roblox client — it runs the official Android build
 > unmodified — but it necessarily presents a synthesised Android environment, and
 > a heuristic detector does not owe you that distinction. Alternate accounts are
-> not a shield: Roblox's Terms reserve the right to terminate those too.
+> not a shield; Roblox's Terms reserve the right to terminate those too.
 >
 > **If your account matters to you, do not use it here.** If you use Cordial and
 > get banned, that is on you, and the maintainers cannot get it reversed.
 
-A Linux runtime for Roblox with a first-class plugin ecosystem.
+## Status: early. It runs, it draws, it is not yet usable.
 
-Roblox ships no Linux client, and Hyperion blocks the Windows client under Wine. Cordial
-runs the official x86-64 Android build on Linux through a purpose-built runtime, fixes the
-Android-on-desktop gaps at the framework layer rather than by patching the client, and
-exposes a sandboxed, capability-scoped plugin surface on top.
-
-**Status: Phase 1 done, Phase 2 underway. It renders — slowly.**
-
-`cordial-load` maps Roblox's 105.6 MB `libroblox.so` with the AOSP bionic linker,
-resolves every relocation, runs all of its static constructors, completes
-`JNI_OnLoad`, brings the app bridge up, hands the engine a surface and **draws
-frames**. Both renderers work: Vulkan through a `VK_KHR_android_surface` →
-`VK_KHR_xlib_surface` shim, and GLES2/EGL as the fallback when the host has no
-Vulkan. The client narrates itself through Cordial's `liblog` and writes its own
-FastLog to `<files>/appData/logs/`.
-
-The app shell comes up: the engine reaches `APP_READY (Landing)`, talks to
-Roblox over HTTPS, writes its flag cache to disk, and reports no flag failures.
-
-Mouse and keyboard reach the engine through the real AGDK `GameActivity`
-natives, and the engine reports consuming them.
-
-What is still wrong:
-
-- **It crashes on roughly a third of launches** — always the same signature, an `HttpClient` thread indexing a table off a null base. Newly reached rather than newly introduced.
-- **It runs at about 1 fps.** Not compute-bound — 13% CPU over thirty seconds,
-  with every engine thread parked in a futex and waking once a second. The app
-  shell registers a *rendering frequency* and renders on demand; that is still
-  the best theory and it is unproven. Window focus and frame-callback starvation
-  have both been tested and ruled out.
-- **Not signed in.** Without a session the landing page has nothing to show, and
-  avatar thumbnails fail against user id 0.
-
-Scroll wheel and text input/IME are not implemented. See
-[`docs/NEXT.md`](docs/NEXT.md).
-
-## What is here
-
-| Path | |
+| | |
 |---|---|
-| [`docs/findings.md`](docs/findings.md) | Bootstrap analysis: the architecture verdict, what is unknown, what is blocked |
-| [`docs/multiarch.md`](docs/multiarch.md) | Multi-architecture decision |
-| [`docs/framework-api-inventory.md`](docs/framework-api-inventory.md) | The Phase 2 backlog, enumerated from the shipping APK |
-| [`docs/analysis/`](docs/analysis) | Raw enumeration output: linked libraries, undefined symbols, JNI natives, framework classes |
-| [`docs/base-evaluation.md`](docs/base-evaluation.md) | Phase 0: port-vs-write assessment of the minecraft-linux stack |
+| Loads `libroblox.so` natively | ✅ |
+| App shell reaches `APP_READY (Landing)` | ✅ |
+| Renders — Vulkan, with GLES2 fallback | ✅ |
+| Networking / HTTPS | ✅ |
+| Mouse and keyboard reach the engine | ✅ |
+| Stable | ❌ crashes on roughly 1 launch in 3 |
+| Playable frame rate | ❌ about 1 fps |
+| Signed in | ❌ not implemented |
+| Plugins | ❌ designed, not built |
+
+The two blockers are a `SIGSEGV` on an `HttpClient` thread and a render loop that
+ticks once a second. Both are characterised in [`docs/NEXT.md`](docs/NEXT.md),
+along with the explanations that were tested and ruled out.
+
+**Do not install this expecting to play Roblox.** Install it if you want to work
+on it.
+
+## Install
+
+Flatpak, built from source. There is no hosted remote yet.
+
+```bash
+git clone --recursive https://github.com/luohoa97/cordial
+cd cordial
+packaging/build-flatpak.sh --install
+```
+
+Cordial ships **no Roblox code, APK or assets** and never will. You supply the
+official Android client from your own installation — Cordial needs the
+`lib/x86_64/` objects and the base APK.
+
+For development, skip Flatpak and run the loader directly. **Clang is required**
+— AOSP bionic uses C11 `_Atomic` inside C++ headers, which GCC rejects — and
+x86-64 Linux only:
+
+```bash
+cargo build --release
+
+CORDIAL_MONITOR=1 CORDIAL_FULLSCREEN=1 \
+cargo run --release --bin cordial-load -- \
+  --lib-dir /path/to/lib/x86_64 --apk /path/to/base.apk \
+  --host-libc --game-activity --run 30
+```
+
+`CORDIAL_MONITOR=<n>` puts the window on the nth monitor, `CORDIAL_FULLSCREEN=1`
+covers it, `CORDIAL_WINDOW_POS=<x>,<y>` overrides with explicit coordinates, and
+`CORDIAL_ANDROID_TRACE=1` logs the Android API calls — which is how to tell
+whether input is reaching the engine. `cordial-load --help` lists the rest.
+
+The engine also writes its own log to `<files>/appData/logs/`. It is the single
+best diagnostic in the project; read it before forming any theory.
+
+## Documentation
+
+| | |
+|---|---|
+| [`docs/NEXT.md`](docs/NEXT.md) | Where to start, what is blocking, and what has already been ruled out |
+| [`docs/findings.md`](docs/findings.md) | Bootstrap analysis: the architecture verdict and what is unknown |
+| [`docs/framework-api-inventory.md`](docs/framework-api-inventory.md) | The framework backlog, enumerated from the shipping APK |
+| [`docs/traces/`](docs/traces) | A capture of the same APK on real Android — the ground truth this project checks itself against |
 | [`docs/adr/ADR-001-in-process-hooking.md`](docs/adr/ADR-001-in-process-hooking.md) | Why Cordial has no in-process hooking, ever |
-| [`docs/design/path-to-a-frame.md`](docs/design/path-to-a-frame.md) | The remaining Phase 2 core: GameActivity, assets, surface |
-| [`docs/design/instances-and-launch.md`](docs/design/instances-and-launch.md) | Multi-instance, multi-account, and `roblox://` handling |
-| [`crates/cordial-linker-sys/`](crates/cordial-linker-sys) | Rust bindings to the AOSP bionic linker |
-| [`crates/cordial-runtime/`](crates/cordial-runtime) | Symbol table, bionic shims, `cordial-load` |
-| [`third_party/libbadcpu/`](third_party/libbadcpu) | Vendored x86-64 CPU feature emulator (MIT) |
+| [`docs/design/path-to-a-frame.md`](docs/design/path-to-a-frame.md) | GameActivity, assets, surface |
+| [`docs/design/instances-and-launch.md`](docs/design/instances-and-launch.md) | Multi-instance, multi-account, `roblox://` handling |
+| [`docs/base-evaluation.md`](docs/base-evaluation.md) | Port-vs-write assessment of the prior art |
+| [`docs/multiarch.md`](docs/multiarch.md) | Multi-architecture decision |
 
 ## Headline findings
 
-**Roblox ships a complete x86-64 Android build.** Verified against Roblox 2.732.1043:
-`split_config.x86_64.apk` carries `lib/x86_64/libroblox.so`, 116 MB of x86-64 machine code
-built by NDK r28c. Cordial executes it natively and needs **no CPU architecture
-translation** — only CPU *feature* emulation. That is the difference between a tractable
-systems project and one an order of magnitude larger.
+**Roblox ships a complete x86-64 Android build.** `split_config.x86_64.apk`
+carries `lib/x86_64/libroblox.so` — 116 MB of x86-64 machine code built by NDK
+r28c. Cordial executes it natively and needs **no CPU architecture translation**,
+only CPU *feature* emulation. That is the difference between a tractable systems
+project and one an order of magnitude larger.
 
-**The runtime surface is bounded:** 13 Android libraries linked, 644 undefined symbols,
-GLES2 + EGL mandatory with Vulkan `dlopen`ed as an optional upgrade.
+**The runtime surface is bounded:** 13 Android libraries linked, 644 undefined
+symbols, GLES2 + EGL mandatory with Vulkan `dlopen`ed as an optional upgrade.
 
-**Roblox's game surface is AGDK `GameActivity`** — which is Apache-2.0 open source, so the
-activity, surface, input and IME contract Phase 2 must satisfy can be read rather than
+**Roblox's game surface is AGDK `GameActivity`**, which is Apache-2.0 open
+source — so the activity, surface, input and IME contract can be read rather than
 inferred.
-
-**Phase 2 is bigger than the spec implies:** the communities window is a WebView-hosted
-Activity, so fixing it needs an embedded browser as well as window management — and the
-captcha flow puts that on the login path.
-
-Details in [`docs/findings.md`](docs/findings.md) and
-[`docs/framework-api-inventory.md`](docs/framework-api-inventory.md).
 
 ## Not in scope, permanently
 
-No in-process code execution against the Roblox process: no hooking, no memory patching,
-no injected script environment. Not "disabled by default" — absent from the API
-vocabulary. The protection is that no injection primitive exists in the binary to extract.
+No in-process code execution against the Roblox process: no hooking, no memory
+patching, no injected script environment. Not "disabled by default" — absent from
+the API vocabulary, so there is no injection primitive in the binary to extract.
 Reasoning in [ADR-001](docs/adr/ADR-001-in-process-hooking.md).
 
-Also out: client-side integrity flags or watermarks (no root of trust on a machine the
-user owns), and obfuscation-as-security.
-
-## How this was built
-
-Cordial was written almost entirely by **Claude (Anthropic)** — model Opus 5 —
-working from a human's direction, review and hardware. That is not a disclaimer
-bolted on afterwards; it is why the repository looks the way it does. The commit
-messages are long because each one records what was measured and what was
-disproved, and the `docs/` tree exists because an agent that forgets everything
-between sessions has to write down how it knows what it knows.
-
-Read it with that in mind. The engineering is real and the findings were all
-verified by running the thing rather than by reasoning about it — several
-sections of `docs/NEXT.md` are explicitly lists of confident conclusions that
-turned out to be wrong. But nobody should adopt this on the assumption that a
-careful human reviewed every line.
+Also out: client-side integrity flags or watermarks, and obfuscation-as-security.
 
 ## Licence
 
 GPL-3.0-or-later. See [`LICENSE`](LICENSE).
 
-The vendored and submoduled dependencies are MIT and keep their own notices:
+Vendored and submoduled dependencies are MIT and keep their own notices:
 [`third_party/libbadcpu`](third_party/libbadcpu) (from Sober OSS),
-`mcpelauncher-linker` and `libjnivm` (ChristopherHX / MCMrARM). MIT is
-compatible with GPL-3.0 in this direction.
-
-**Roblox itself is not included and never will be.** Cordial ships no Roblox
-code, no APK and no assets. It loads the official Android client that you supply
-from your own installation. Roblox is a trademark of Roblox Corporation, which
-has nothing to do with this project and does not endorse it.
-
-## Build
-
-Rust, with a C++ subtree for the bionic linker. **Clang is required** — AOSP bionic uses
-C11 `_Atomic` inside C++ headers, which GCC rejects (see
-[`docs/base-evaluation.md`](docs/base-evaluation.md) §2.1). x86-64 Linux only.
-
-```bash
-git submodule update --init --recursive
-cargo build --release
-```
-
-To load Roblox's engine, point it at the `lib/x86_64/` objects from an installed APK:
-
-```bash
-cargo run --release --bin cordial-load -- --lib-dir /path/to/lib/x86_64 --host-libc
-```
-
-To bring the client up with a window and input, add `--apk` and `--game-activity`.
-On a multi-monitor setup `CORDIAL_MONITOR=<n>` centres the window on the nth
-monitor instead of the primary one, and `CORDIAL_WINDOW_POS=<x>,<y>` overrides
-with explicit coordinates:
-
-```bash
-CORDIAL_MONITOR=1 cargo run --release --bin cordial-load -- \
-  --lib-dir /path/to/lib/x86_64 --apk /path/to/base.apk \
-  --host-libc --game-activity --run 30
-```
-
-`CORDIAL_ANDROID_TRACE=1` logs the Android API calls, which is how to tell
-whether input is reaching the engine — look for `onTouchEventNative(...) -> true`.
-`cordial-load --help` lists the rest.
-
-## Flatpak
-
-Flatpak is the primary distribution target (spec §11).
-
-```bash
-packaging/build-flatpak.sh --install
-```
-
-The manifest deliberately has no `--filesystem=host` and no
-`--talk-name=org.freedesktop.Flatpak` — the latter is arbitrary host command
-execution and would hand every plugin the sandbox escape the capability model
-exists to prevent, below where any broker could see it
-([ADR-002](docs/adr/ADR-002-core-shell-and-ui-handoff.md) §2).
-
-## Build order
-
-0. **Evaluate prior art** — done. Port, don't write: the AOSP bionic linker, a bionic libc
-   shim and a JNI VM all exist under usable licences and all build here.
-   [`docs/base-evaluation.md`](docs/base-evaluation.md).
-1. **Runtime** — loader, bionic shim, syscall translation, GLES2 + EGL, OpenSL ES → PipeWire,
-   input. Roblox launches and renders. Nothing else matters until this works.
-2. **Framework layer** — JNI stubs against the `GameActivity` contract. Desktop
-   identification, login path, FastFlags, passkeys, WebView. This is where Cordial
-   differentiates.
-3. **Core** — bootstrap shell, instance manager, auth, event bus, capability broker,
-   plugin host.
-4. **Plugin API** — five events, three capabilities, one real plugin.
-5. **Ecosystem** — registry, services, first-party library tier.
-
-Phases 1–2 are the majority of the work. The architecture is designed so partial
-completion still ships something useful: a runtime with a good framework layer and no
-plugin system is already the best Roblox client on Linux.
-
-## Estimation note
-
-Sober is a ~7.1 MB runtime built by a small team since 2022, still described by its
-authors as experimental and liable to be discontinued. Bloxstrap and Fishstrap are Windows
-launchers wrapping an already-working client — they contain no runtime. This is a solo
-project. Report progress honestly: if a component is stubbed, it is stubbed; if the
-runtime does not launch Roblox, it is not working.
-
-## Related
-
-Cordial is independent and unaffiliated with Roblox Corporation or VinegarHQ.
-Naming lineage: Wine → Vinegar → Sober → Cordial.
+`mcpelauncher-linker` and `libjnivm` (ChristopherHX / MCMrARM).

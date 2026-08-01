@@ -35,6 +35,10 @@ struct Xlib {
     set_class_hint: unsafe extern "C" fn(Display, Window, *mut XClassHint) -> c_int,
     set_wm_hints: unsafe extern "C" fn(Display, Window, *mut XWMHints) -> c_int,
     move_window: unsafe extern "C" fn(Display, Window, c_int, c_int) -> c_int,
+    intern_atom: unsafe extern "C" fn(Display, *const c_char, c_int) -> c_ulong,
+    change_property: unsafe extern "C" fn(
+        Display, Window, c_ulong, c_ulong, c_int, c_int, *const c_void, c_int,
+    ) -> c_int,
     store_name: unsafe extern "C" fn(Display, Window, *const c_char) -> c_int,
     flush: unsafe extern "C" fn(Display) -> c_int,
     destroy_window: unsafe extern "C" fn(Display, Window) -> c_int,
@@ -89,6 +93,8 @@ impl Xlib {
             set_class_hint: sym!("XSetClassHint"),
             set_wm_hints: sym!("XSetWMHints"),
             move_window: sym!("XMoveWindow"),
+            intern_atom: sym!("XInternAtom"),
+            change_property: sym!("XChangeProperty"),
             connection_number: sym!("XConnectionNumber"),
             pending: sym!("XPending"),
             next_event: sym!("XNextEvent"),
@@ -202,24 +208,37 @@ struct XWMHints {
 /// management, and every multi-head X server that supports RandR also answers
 /// Xinerama. Returns (0, 0) when nothing is configured or the query fails, which
 /// is exactly the previous behaviour.
-fn window_origin(win_w: c_int, win_h: c_int) -> (c_int, c_int) {
+struct Placement {
+    x: c_int,
+    y: c_int,
+    width: c_int,
+    height: c_int,
+    fullscreen: bool,
+}
+
+fn placement(win_w: c_int, win_h: c_int) -> Placement {
+    let fullscreen = std::env::var_os("CORDIAL_FULLSCREEN").is_some();
+    let mut p = Placement { x: 0, y: 0, width: win_w, height: win_h, fullscreen };
+
     if let Ok(pos) = std::env::var("CORDIAL_WINDOW_POS") {
         let mut parts = pos.split(',').map(str::trim);
         if let (Some(Ok(x)), Some(Ok(y))) = (
             parts.next().map(str::parse::<c_int>),
             parts.next().map(str::parse::<c_int>),
         ) {
-            return (x, y);
+            p.x = x;
+            p.y = y;
+            return p;
         }
         eprintln!("[android] CORDIAL_WINDOW_POS={pos:?} is not <x>,<y>; ignoring");
     }
 
     let Ok(want) = std::env::var("CORDIAL_MONITOR") else {
-        return (0, 0);
+        return p;
     };
     let Ok(want) = want.trim().parse::<usize>() else {
         eprintln!("[android] CORDIAL_MONITOR must be a number; ignoring");
-        return (0, 0);
+        return p;
     };
 
     #[repr(C)]
@@ -237,11 +256,11 @@ fn window_origin(win_w: c_int, win_h: c_int) -> (c_int, c_int) {
         let lib = dlopen(c"libXinerama.so.1".as_ptr(), RTLD_NOW);
         if lib.is_null() {
             eprintln!("[android] CORDIAL_MONITOR needs libXinerama; ignoring");
-            return (0, 0);
+            return p;
         }
         let query = dlsym(lib, c"XineramaQueryScreens".as_ptr());
         if query.is_null() {
-            return (0, 0);
+            return p;
         }
         let query: unsafe extern "C" fn(Display, *mut c_int) -> *mut XineramaScreenInfo =
             std::mem::transmute(query);
@@ -249,12 +268,12 @@ fn window_origin(win_w: c_int, win_h: c_int) -> (c_int, c_int) {
         // second connection for one query, so this runs against the same one.
         let d = CURRENT_DISPLAY.load(std::sync::atomic::Ordering::Relaxed);
         if d == 0 {
-            return (0, 0);
+            return p;
         }
         let mut n: c_int = 0;
         let screens = query(d as Display, &mut n);
         if screens.is_null() || n <= 0 {
-            return (0, 0);
+            return p;
         }
         let list = std::slice::from_raw_parts(screens, n as usize);
         let m = match list.get(want) {
@@ -266,11 +285,22 @@ fn window_origin(win_w: c_int, win_h: c_int) -> (c_int, c_int) {
                 &list[0]
             }
         };
-        // Clamped at the origin so an oversized window still starts on-screen
-        // rather than off the top-left of its monitor.
-        let x = m.x_org as c_int + ((m.width as c_int - win_w) / 2).max(0);
-        let y = m.y_org as c_int + ((m.height as c_int - win_h) / 2).max(0);
-        (x, y)
+        if p.fullscreen {
+            // Cover the monitor exactly. The window manager fullscreens onto
+            // whichever monitor the window occupies, so filling it first is
+            // what pins fullscreen to the requested screen rather than the
+            // primary one.
+            p.x = m.x_org as c_int;
+            p.y = m.y_org as c_int;
+            p.width = m.width as c_int;
+            p.height = m.height as c_int;
+        } else {
+            // Clamped at the origin so an oversized window still starts
+            // on-screen rather than off the top-left of its monitor.
+            p.x = m.x_org as c_int + ((m.width as c_int - win_w) / 2).max(0);
+            p.y = m.y_org as c_int + ((m.height as c_int - win_h) / 2).max(0);
+        }
+        p
     }
 }
 
@@ -302,7 +332,13 @@ pub fn open(width: u32, height: u32, title: &str) -> Result<&'static HostWindow,
     // SAFETY: `display` is open; the geometry and border/background pixels are
     // plain values.
     CURRENT_DISPLAY.store(display as usize, std::sync::atomic::Ordering::Relaxed);
-    let (ox, oy) = window_origin(width as c_int, height as c_int);
+    let place = placement(width as c_int, height as c_int);
+    let (ox, oy) = (place.x, place.y);
+    // Fullscreen resizes the surface as well as the window: the engine sizes
+    // its framebuffers from what `geometry()` reports, so a window covering a
+    // 1920x1200 monitor while the surface still says 1280x720 would render a
+    // corner of the screen.
+    let (width, height) = (place.width as u32, place.height as u32);
 
     let (window, conn_fd) = unsafe {
         let root = (xlib.default_root_window)(display);
@@ -359,6 +395,26 @@ pub fn open(width: u32, height: u32, title: &str) -> Result<&'static HostWindow,
             res_class: res_class.as_ptr() as *mut c_char,
         };
         (xlib.set_class_hint)(display, w, &mut class);
+
+        if place.fullscreen {
+            // EWMH: setting _NET_WM_STATE to include _NET_WM_STATE_FULLSCREEN
+            // *before* mapping is the documented way to come up fullscreen.
+            // Doing it after mapping requires a ClientMessage to the root
+            // window instead, which is a different and more fragile dance.
+            let state = CString::new("_NET_WM_STATE").unwrap_or_default();
+            let fs = CString::new("_NET_WM_STATE_FULLSCREEN").unwrap_or_default();
+            let a_state = (xlib.intern_atom)(display, state.as_ptr(), 0);
+            let a_fs = (xlib.intern_atom)(display, fs.as_ptr(), 0);
+            if a_state != 0 && a_fs != 0 {
+                const XA_ATOM: c_ulong = 4;
+                const PROP_MODE_REPLACE: c_int = 0;
+                let atoms = [a_fs];
+                (xlib.change_property)(
+                    display, w, a_state, XA_ATOM, 32, PROP_MODE_REPLACE,
+                    atoms.as_ptr() as *const c_void, 1,
+                );
+            }
+        }
 
         (xlib.select_input)(display, w, INPUT_EVENT_MASK);
         (xlib.map_window)(display, w);
