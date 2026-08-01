@@ -1,5 +1,20 @@
 # Cordial
 
+> **Warning — read this before you use Cordial with an account you care about.**
+>
+> Roblox does not support third-party clients and operates automated systems that
+> ban accounts for using them, up to permanent termination. Those systems have
+> produced false positives against innocent players. Sober has survived this for
+> years; Cordial is a different project with no track record whatsoever.
+>
+> Cordial does not modify the Roblox client — it runs the official Android build
+> unmodified — but it necessarily presents a synthesised Android environment, and
+> a heuristic detector does not owe you that distinction. Alternate accounts are
+> not a shield: Roblox's Terms reserve the right to terminate those too.
+>
+> **If your account matters to you, do not use it here.** If you use Cordial and
+> get banned, that is on you, and the maintainers cannot get it reversed.
+
 A Linux runtime for Roblox with a first-class plugin ecosystem.
 
 Roblox ships no Linux client, and Hyperion blocks the Windows client under Wine. Cordial
@@ -7,17 +22,25 @@ runs the official x86-64 Android build on Linux through a purpose-built runtime,
 Android-on-desktop gaps at the framework layer rather than by patching the client, and
 exposes a sandboxed, capability-scoped plugin surface on top.
 
-**Status: Phase 1 substantially done, Phase 2 underway. Nothing renders yet.**
+**Status: Phase 1 done, Phase 2 underway. It renders — slowly.**
 
 `cordial-load` maps Roblox's 105.6 MB `libroblox.so` with the AOSP bionic linker,
-resolves every relocation, runs all of its static constructors, and completes
-`JNI_OnLoad` — in ~35 ms, exit 0. Eight of Roblox's Java classes are implemented and
-the client narrates itself through Cordial's `liblog`.
+resolves every relocation, runs all of its static constructors, completes
+`JNI_OnLoad`, brings the app bridge up, hands the engine an EGL surface and
+**draws frames**: `eglSwapBuffers` 96, `glDrawElements` 665, `glCompileShader`
+612, clean exit after twelve seconds. The client narrates itself through
+Cordial's `liblog` and writes its own FastLog to `<files>/appData/logs/`.
 
-There is still **no window, no frame and no input**. The remaining Phase 2 core is
-mapped in [`docs/design/path-to-a-frame.md`](docs/design/path-to-a-frame.md):
-an asset manager over the APK, a host window with an EGL surface, and
-`GameActivity.initializeNativeCode`. See [`docs/findings.md`](docs/findings.md) §8.
+Two things are badly wrong and both are known:
+
+- **It runs at about 1 fps.** Not compute-bound — 8% CPU over thirty seconds —
+  so it is waiting, not working. No FastFlag currently reaches the engine, and
+  the surface path says so (`onSurfaceChanged: ... Flags-Not-Received. Return.`).
+  Repairing the flag pipeline is the next job.
+- **No network.** The engine's own HTTP cannot resolve any host, so no remote
+  content ever arrives and no texture is ever uploaded.
+
+Input is still unimplemented. See [`docs/NEXT.md`](docs/NEXT.md).
 
 ## What is here
 
