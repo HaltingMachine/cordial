@@ -167,6 +167,32 @@ One correction that came out of it: the `The requested Ids are invalid`
 thumbnail failure is what the **real, logged-out Android client** also produces.
 It is not a Cordial defect and it is not evidence of anything.
 
+## 2a. `CORDIAL_COUNT_GL=1` is a broken instrument. Do not trust it.
+
+It reports zero for `eglCreateWindowSurface`, `eglSwapBuffers` and `glClear` on
+**both** backends, including the X11 one that demonstrably renders Roblox — the
+landing page has been screenshotted from it repeatedly. A counter that reads zero
+for a path known to be running is measuring something other than what its name
+says.
+
+This is the third instrument in this project to mislead in the same way. The
+first was measuring `eglSwapBuffers` after Vulkan had become the renderer; the
+second was a `vkQueuePresentKHR` counter that read zero because device-level
+functions resolve through `vkGetDeviceProcAddr`, which the shim did not
+intercept. The pattern is always the same: the counter sits in an override that
+the engine turns out not to be calling, and zero is read as "it did not happen"
+rather than "I am not watching the right place".
+
+Suspected cause, **not confirmed**: `android::mod` extends the override list with
+`glcount::overrides()` *after* the backend's own, so the counting wrappers may be
+replacing `window.rs`/`wayland.rs`'s `eglCreateWindowSurface` — which would both
+lose the native-window substitution and count a different static. If that is
+right, `CORDIAL_COUNT_GL=1` does not merely fail to measure, it breaks rendering
+while it is set. Worth confirming before the flag is used for anything.
+
+**Do not use it to decide whether a backend renders.** Use the engine's own FLog
+(`GL Renderer`, `GL Version`, `SurfaceController`) or look at the window.
+
 ## 2b. Audio never initialises before sign-in, and AAudio is not why
 
 The OpenSL ES backend over PipeWire works in a standalone harness and has never

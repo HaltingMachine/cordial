@@ -2111,6 +2111,40 @@ extern "C" fn egl_get_display(native_display: *mut c_void) -> *mut c_void {
     plain_get_display()
 }
 
+/// `eglSwapInterval`, forced to 0 — the same override the X11 backend applies,
+/// for a worse reason.
+///
+/// With a non-zero interval Mesa's Wayland EGL will not return from
+/// `eglSwapBuffers` until the compositor delivers a `wl_surface.frame`
+/// callback. On X11 the equivalent wait was for a vblank source the host could
+/// not supply and cost frame rate; here it costs everything, because the
+/// callback is delivered on a Wayland event queue and a render thread blocked
+/// inside `eglSwapBuffers` is not dispatching one. The first frame never
+/// returns, no buffer is ever attached to the surface, and the compositor shows
+/// a window with nothing in it — present in the dock and in alt-tab, blank on
+/// screen, which is exactly what this looked like.
+///
+/// Forcing the interval Mesa actually receives to 0 makes `eglSwapBuffers`
+/// return as soon as the frame is submitted. The engine still paces itself
+/// through its own `RenderJob` timing, so this removes a broken throttle rather
+/// than handing it a runaway framerate.
+extern "C" fn egl_swap_interval(dpy: *mut c_void, _interval: c_int) -> u32 {
+    extern "C" {
+        fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+    }
+    let name = std::ffi::CString::new("eglSwapInterval").unwrap_or_default();
+    // SAFETY: RTLD_DEFAULT; libEGL is in the global scope by the time the
+    // engine reaches this call.
+    let f = unsafe { dlsym(std::ptr::null_mut(), name.as_ptr()) };
+    if f.is_null() {
+        return 0;
+    }
+    type Fn_ = extern "C" fn(*mut c_void, c_int) -> u32;
+    // SAFETY: resolved from the host for exactly this name.
+    let f: Fn_ = unsafe { std::mem::transmute(f) };
+    f(dpy, 0)
+}
+
 pub fn overrides() -> Vec<(&'static str, *mut c_void)> {
     macro_rules! f {
         ($name:literal, $fn:expr) => {
@@ -2128,6 +2162,7 @@ pub fn overrides() -> Vec<(&'static str, *mut c_void)> {
         f!("ANativeWindow_lock", native_window_lock),
         f!("ANativeWindow_unlockAndPost", native_window_unlock_and_post),
         f!("eglCreateWindowSurface", egl_create_window_surface),
+        f!("eglSwapInterval", egl_swap_interval),
         f!("eglGetDisplay", egl_get_display),
     ]
 }
