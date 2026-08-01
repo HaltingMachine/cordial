@@ -57,6 +57,18 @@ pub enum Capability {
     /// this cannot become `file://` traversal or a handler-hijack for some
     /// arbitrary registered scheme.
     UrlOpen,
+    /// Register a directory of files that resolve before Roblox's own assets
+    /// of the same name — see
+    /// [ADR-010](../../../docs/adr/ADR-010-plugin-asset-overlays.md).
+    ///
+    /// Narrow on purpose: this is one filesystem root the plugin owns, checked
+    /// ahead of the APK for a name match, not a general filesystem capability.
+    /// It cannot write into the APK or into anything Cordial extracts from it
+    /// — both stay untouched — and it cannot read anything outside the root it
+    /// registers. Uninstalling the plugin (or it giving up the root) makes the
+    /// original asset resolve again with nothing to clean up, because nothing
+    /// was ever overwritten to begin with.
+    AssetsOverride,
 }
 
 impl Capability {
@@ -71,6 +83,7 @@ impl Capability {
             Capability::PresenceSet => "presence.set",
             Capability::NotifySend => "notify.send",
             Capability::UrlOpen => "url.open",
+            Capability::AssetsOverride => "assets.override",
         }
     }
 
@@ -84,6 +97,7 @@ impl Capability {
             "presence.set" => Capability::PresenceSet,
             "notify.send" => Capability::NotifySend,
             "url.open" => Capability::UrlOpen,
+            "assets.override" => Capability::AssetsOverride,
             _ => return None,
         })
     }
@@ -100,6 +114,7 @@ impl Capability {
             Capability::PresenceSet,
             Capability::NotifySend,
             Capability::UrlOpen,
+            Capability::AssetsOverride,
         ]
     }
 }

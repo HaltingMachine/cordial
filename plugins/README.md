@@ -30,11 +30,19 @@ network, environment or subprocess access. That is a second, independent layer
 under Cordial's own capability broker, so a plugin cannot reach the machine even
 if the broker had a hole in it.
 
-There is no script execution against Roblox, no memory access, and no way to
-replace Roblox's assets. Those are absent from the API rather than disabled — see
-[ADR-001](../docs/adr/ADR-001-in-process-hooking.md),
-[ADR-003](../docs/adr/ADR-003-plugin-isolation.md) and
-[ADR-004](../docs/adr/ADR-004-plugin-asset-overrides.md).
+There is no script execution against Roblox and no memory access. Those are
+absent from the API rather than disabled — see
+[ADR-001](../docs/adr/ADR-001-in-process-hooking.md) and
+[ADR-003](../docs/adr/ADR-003-plugin-isolation.md).
+
+A plugin granted `assets.override` **may** provide files that resolve in place
+of Roblox's own for the same name — a non-destructive overlay, never a write
+into the APK or anything extracted from it. See
+[ADR-010](../docs/adr/ADR-010-plugin-asset-overlays.md) for what that does and
+does not permit: it covers cosmetic substitution, and it explicitly does not
+protect you from a plugin that overlays a gameplay-affecting asset such as a
+collision mesh. That is the same trust decision you already make in approving
+the capability at all.
 
 ## Host resources are brokered, never handed over
 

@@ -60,6 +60,7 @@ pub fn required_capability(method: &str) -> Option<Capability> {
         "presence.clear" => Capability::PresenceSet,
         "notify.send" => Capability::NotifySend,
         "url.open" => Capability::UrlOpen,
+        "assets.override" => Capability::AssetsOverride,
         _ => return None,
     })
 }
@@ -108,6 +109,15 @@ mod tests {
         assert_eq!(required_capability("url.open"), Some(Capability::UrlOpen));
         assert_ne!(required_capability("notify.send"), required_capability("url.open"));
         assert_ne!(required_capability("notify.send"), required_capability("presence.set"));
+    }
+
+    #[test]
+    fn registering_an_asset_overlay_needs_its_own_capability() {
+        // Distinct from every other capability for the same reason
+        // notify.send and url.open are distinct from each other: a plugin
+        // granted something unrelated should not incidentally be able to
+        // shadow Roblox's own files.
+        assert_eq!(required_capability("assets.override"), Some(Capability::AssetsOverride));
     }
 
     #[test]

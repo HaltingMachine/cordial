@@ -1,7 +1,7 @@
 # ADR-009: Cordial is capturable, and ships no overlay injection point
 
 **Status:** accepted
-**Related:** [ADR-001](ADR-001-in-process-hooking.md), [ADR-004](ADR-004-plugin-asset-overrides.md), [ADR-007](ADR-007-host-resources-are-brokered.md)
+**Related:** [ADR-001](ADR-001-in-process-hooking.md), [ADR-004](ADR-004-plugin-asset-overrides.md) (superseded by [ADR-010](ADR-010-plugin-asset-overlays.md)), [ADR-007](ADR-007-host-resources-are-brokered.md)
 
 ## Decision
 
@@ -28,9 +28,16 @@ engine's address space, hooking the exact call Cordial uses to present. Cordial
 refuses to do that itself ([ADR-001](ADR-001-in-process-hooking.md)); shipping a
 supported way for someone else to do it would be that refusal in name only.
 
-**So the same rule applies a third time.** ADR-001 refused it for code, ADR-004
-refused it for content, and this refuses it for other people's code in our
-address space. In each case the protection is that the primitive does not exist.
+**So the same rule applies a second time, for someone else's code.** ADR-001
+refuses in-process execution for Cordial's own code; this refuses it for a
+third party's. In each case the protection is that the primitive does not
+exist. (ADR-004 once made a third case, refusing plugin asset substitution by
+the same reasoning; it has since been superseded by
+[ADR-010](ADR-010-plugin-asset-overlays.md), which found that a *non-destructive,
+out-of-process* asset overlay is not the same primitive as in-process
+injection. That reversal does not touch this decision — an overlay that hooks
+`glXSwapBuffers` still executes inside the engine's address space, which is the
+one thing this ADR and ADR-001 both refuse.)
 
 ## What "capturable" concretely requires
 
@@ -64,7 +71,9 @@ the injection case above, and is neither supported nor blocked.
 **Accepted:** a plugin cannot draw on top of the game. A plugin that wants to
 show something during play has Cordial's own surfaces and brokered effects
 (`notify.send`, `presence.set`) and no path into the rendered frame. This is a
-real limitation and the same one ADR-004 accepts for textures.
+real limitation, and a different one from what
+[ADR-010](ADR-010-plugin-asset-overlays.md) permits: ADR-010 changes what
+loads before the frame exists, not what gets drawn on top of it once it does.
 
 **Accepted:** Cordial does not detect, warn about, or attempt to block an
 injected overlay. Detecting other processes' hooks is anti-cheat work, it is
