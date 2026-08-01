@@ -15,7 +15,7 @@
 //! `xcb_window_t`/`Window` directly, whereas Wayland needs an `wl_egl_window`
 //! and a surface role — more moving parts for the same first frame.
 
-use std::ffi::{c_char, c_int, c_ulong, c_void, CString};
+use std::ffi::{c_char, c_int, c_long, c_uint, c_ulong, c_void, CString};
 use std::sync::{Mutex, OnceLock};
 
 /// Android pixel formats, from `android/native_window.h`.
@@ -34,6 +34,17 @@ struct Xlib {
     store_name: unsafe extern "C" fn(Display, Window, *const c_char) -> c_int,
     flush: unsafe extern "C" fn(Display) -> c_int,
     destroy_window: unsafe extern "C" fn(Display, Window) -> c_int,
+    // ---- input, added for keyboard/mouse delivery ----
+    select_input: unsafe extern "C" fn(Display, Window, c_long),
+    connection_number: unsafe extern "C" fn(Display) -> c_int,
+    pending: unsafe extern "C" fn(Display) -> c_int,
+    next_event: unsafe extern "C" fn(Display, *mut c_void) -> c_int,
+    /// `XLookupString` doubles as the keysym lookup and the ASCII/Latin-1 text
+    /// lookup, and — unlike `XKeycodeToKeysym` — takes the event's `state` into
+    /// account, so Shift and the rest of the modifier state do not have to be
+    /// reimplemented by hand.
+    lookup_string:
+        unsafe extern "C" fn(*mut c_void, *mut c_char, c_int, *mut c_ulong, *mut c_void) -> c_int,
 }
 
 extern "C" {
@@ -69,6 +80,11 @@ impl Xlib {
             store_name: sym!("XStoreName"),
             flush: sym!("XFlush"),
             destroy_window: sym!("XDestroyWindow"),
+            select_input: sym!("XSelectInput"),
+            connection_number: sym!("XConnectionNumber"),
+            pending: sym!("XPending"),
+            next_event: sym!("XNextEvent"),
+            lookup_string: sym!("XLookupString"),
         })
     }
 }
@@ -78,11 +94,30 @@ pub struct HostWindow {
     xlib: Xlib,
     display: Display,
     window: Window,
+    /// `XConnectionNumber(display)` — the socket Xlib reads the wire protocol
+    /// from. Polling this with a zero timeout is what lets input delivery avoid
+    /// ever calling into Xlib when there is nothing queued, which is what keeps
+    /// it from blocking the render loop (see `pump_input_events`, below).
+    conn_fd: c_int,
     /// Dimensions the engine asked for via `ANativeWindow_setBuffersGeometry`,
     /// which override the window's own size in every query. Android reports the
     /// buffer geometry, not the surface geometry, and the engine sizes its
     /// framebuffers from the answer.
     buffers: Mutex<Geometry>,
+    input: Mutex<InputState>,
+}
+
+/// Buttons and timing carried across calls to `pump_input_events`, the way a
+/// real `InputDevice` accumulates gesture state between individual X11 events.
+struct InputState {
+    /// Android `MotionEvent.BUTTON_*` bits currently held down.
+    buttons: i32,
+    /// `uptimeMillis()` of the button that started the current gesture — reset
+    /// to the current time whenever `buttons` goes from zero to non-zero, and
+    /// left alone until it goes back to zero. Android's own `downTime` has this
+    /// exact meaning: constant across a MOVE/UP sequence, not per-event.
+    down_time_ms: i64,
+    clock: std::time::Instant,
 }
 
 #[derive(Clone, Copy)]
@@ -112,9 +147,15 @@ pub fn open(width: u32, height: u32, title: &str) -> Result<&'static HostWindow,
         return Err("no X display (is DISPLAY set?)".into());
     }
 
+    // KeyPressMask | KeyReleaseMask | ButtonPressMask | ButtonReleaseMask |
+    // PointerMotionMask, from X.h. Not StructureNotifyMask or FocusChangeMask —
+    // this window's size is fixed for its lifetime and AGDK's own focus call
+    // already runs once, unconditionally, in `game_activity.cpp`.
+    const INPUT_EVENT_MASK: c_long = 0x1 | 0x2 | 0x4 | 0x8 | 0x40;
+
     // SAFETY: `display` is open; the geometry and border/background pixels are
     // plain values.
-    let window = unsafe {
+    let (window, conn_fd) = unsafe {
         let root = (xlib.default_root_window)(display);
         let w = (xlib.create_simple_window)(display, root, 0, 0, width, height, 0, 0, 0);
         // XStoreName sets WM_NAME, which is XA_STRING — Latin-1, not UTF-8.
@@ -126,19 +167,26 @@ pub fn open(width: u32, height: u32, title: &str) -> Result<&'static HostWindow,
             .collect();
         let name = CString::new(ascii).unwrap_or_default();
         (xlib.store_name)(display, w, name.as_ptr());
+        (xlib.select_input)(display, w, INPUT_EVENT_MASK);
         (xlib.map_window)(display, w);
         (xlib.flush)(display);
-        w
+        (w, (xlib.connection_number)(display))
     };
 
     let host = HostWindow {
         xlib,
         display,
         window,
+        conn_fd,
         buffers: Mutex::new(Geometry {
             width: width as i32,
             height: height as i32,
             format: WINDOW_FORMAT_RGBA_8888,
+        }),
+        input: Mutex::new(InputState {
+            buttons: 0,
+            down_time_ms: 0,
+            clock: std::time::Instant::now(),
         }),
     };
     Ok(WINDOW.get_or_init(|| host))
@@ -171,6 +219,380 @@ impl HostWindow {
 
 pub fn current() -> Option<&'static HostWindow> {
     WINDOW.get()
+}
+
+// ------------------------------------------------------------- input pump
+//
+// Mouse and keyboard, delivered to the engine through the same AGDK
+// `GameActivity` natives real Android input goes through — `onTouchEventNative`
+// and `onKeyDownNative`/`onKeyUpNative` — via `cordial-linker-sys`'s
+// `game_activity` module and the synthesised `MotionEvent`/`KeyEvent` objects in
+// `native/game_activity.cpp`.
+//
+// The design constraint is that this must never block: it runs inside
+// `looper::pump`'s own ~50ms-timeout loop, on the thread that also owns the
+// engine's message pump, so any call here that waits is a frame the engine
+// never gets to render. `XPending`/`XNextEvent` are what actually read queued
+// events, but calling either when nothing is queued risks a blocking read in
+// at least some libX11 builds. So every drain starts with a zero-timeout
+// `poll(2)` on Xlib's own connection fd (`XConnectionNumber`) — a pure
+// kernel-side check that can only return immediately — and only touches Xlib
+// at all when that says there is something to read.
+
+/// The common prefix shared by `XKeyEvent`, `XButtonEvent` and `XMotionEvent`.
+///
+/// Xlib deliberately lays these three structs out identically — that is
+/// documented behaviour, not a coincidence being relied on here — except for
+/// one field whose *meaning* differs: `keycode` for key events, `button` for
+/// button events, `is_hint` for motion. It is read generically as `detail` and
+/// interpreted according to `type_`.
+#[repr(C)]
+struct XInputEvent {
+    type_: c_int,
+    serial: c_ulong,
+    send_event: c_int,
+    display: *mut c_void,
+    window: c_ulong,
+    root: c_ulong,
+    subwindow: c_ulong,
+    time: c_ulong,
+    x: c_int,
+    y: c_int,
+    x_root: c_int,
+    y_root: c_int,
+    state: c_uint,
+    detail: c_uint,
+    same_screen: c_int,
+}
+
+// X11 event `type` values, from X.h.
+const KEY_PRESS: c_int = 2;
+const KEY_RELEASE: c_int = 3;
+const BUTTON_PRESS: c_int = 4;
+const BUTTON_RELEASE: c_int = 5;
+const MOTION_NOTIFY: c_int = 6;
+
+// X11 modifier bits (X.h) actually consulted below.
+const SHIFT_MASK: c_uint = 1 << 0;
+const LOCK_MASK: c_uint = 1 << 1; // Caps Lock
+const CONTROL_MASK: c_uint = 1 << 2;
+const MOD1_MASK: c_uint = 1 << 3; // Alt, on essentially every layout in practice
+
+// `android.view.KeyEvent.META_*`.
+const META_SHIFT_ON: i32 = 1;
+const META_ALT_ON: i32 = 2;
+const META_CTRL_ON: i32 = 0x1000;
+const META_CAPS_LOCK_ON: i32 = 0x100000;
+
+fn android_meta_state(x11_state: c_uint) -> i32 {
+    let mut m = 0;
+    if x11_state & SHIFT_MASK != 0 {
+        m |= META_SHIFT_ON;
+    }
+    if x11_state & CONTROL_MASK != 0 {
+        m |= META_CTRL_ON;
+    }
+    if x11_state & MOD1_MASK != 0 {
+        m |= META_ALT_ON;
+    }
+    if x11_state & LOCK_MASK != 0 {
+        m |= META_CAPS_LOCK_ON;
+    }
+    m
+}
+
+// `android.view.MotionEvent.BUTTON_*` / `ACTION_*` — only the ones this module
+// produces.
+const BUTTON_PRIMARY: i32 = 1;
+const BUTTON_SECONDARY: i32 = 2;
+const BUTTON_TERTIARY: i32 = 4;
+const ACTION_DOWN: i32 = 0;
+const ACTION_UP: i32 = 1;
+const ACTION_MOVE: i32 = 2;
+const ACTION_HOVER_MOVE: i32 = 7;
+const ACTION_BUTTON_PRESS: i32 = 11;
+const ACTION_BUTTON_RELEASE: i32 = 12;
+
+/// X11 numbers buttons 1/2/3 as left/middle/right; Android's bit assignment
+/// puts secondary (right) before tertiary (middle). Buttons 4/5 are X11's
+/// representation of the scroll wheel as button clicks — Android instead wants
+/// `ACTION_SCROLL` with an axis value, which this does not yet synthesise (see
+/// the report), so they are dropped rather than delivered as wrong clicks.
+fn x11_button_to_android(button: c_uint) -> Option<i32> {
+    match button {
+        1 => Some(BUTTON_PRIMARY),
+        2 => Some(BUTTON_TERTIARY),
+        3 => Some(BUTTON_SECONDARY),
+        _ => None,
+    }
+}
+
+/// A pragmatic subset of X11 keysyms mapped to `android.view.KeyEvent.KEYCODE_*`.
+/// Covers what a desktop text field and basic UI navigation need — letters,
+/// digits, common punctuation, arrows, and the usual control keys. Anything
+/// outside this set is dropped rather than guessed at; see the report for what
+/// that leaves out.
+fn keysym_to_android(keysym: c_ulong) -> Option<i32> {
+    let k = keysym as u32;
+    Some(match k {
+        0x30..=0x39 => 7 + (k - 0x30) as i32,  // 0..9 -> AKEYCODE_0..9
+        0x61..=0x7a => 29 + (k - 0x61) as i32, // a..z -> AKEYCODE_A..Z
+        0x41..=0x5a => 29 + (k - 0x41) as i32, // A..Z (shifted) -> the same keycodes
+        0x0020 => 62,                          // space
+        0xff0d | 0xff8d => 66,                 // Return, KP_Enter
+        0xff08 => 67,                          // BackSpace
+        0xff09 => 61,                          // Tab
+        0xff1b => 111,                         // Escape
+        0xff51 => 21,                          // Left
+        0xff52 => 19,                          // Up
+        0xff53 => 22,                          // Right
+        0xff54 => 20,                          // Down
+        0xffe1 => 59,                          // Shift_L
+        0xffe2 => 60,                          // Shift_R
+        0xffe3 => 113,                         // Control_L
+        0xffe4 => 114,                         // Control_R
+        0xffe9 => 57,                          // Alt_L
+        0xffea => 58,                          // Alt_R
+        0xffe5 => 115,                         // Caps_Lock
+        0xffff => 112,                         // Delete (forward delete)
+        0xff50 => 122,                         // Home
+        0xff57 => 123,                         // End
+        0xff55 => 92,                          // Page_Up
+        0xff56 => 93,                          // Page_Down
+        0xff63 => 124,                         // Insert
+        0x002c => 55,                          // comma
+        0x002e => 56,                          // period
+        0x002f => 76,                          // slash
+        0x003b => 74,                          // semicolon
+        0x0027 => 75,                          // apostrophe
+        0x0060 => 68,                          // grave
+        0x002d => 69,                          // minus
+        0x003d => 70,                          // equal
+        0x005b => 71,                          // bracketleft
+        0x005d => 72,                          // bracketright
+        0x005c => 73,                          // backslash
+        _ => return None,
+    })
+}
+
+// `*mut c_void` rather than a typed `*mut PollFd`, to match the `poll`
+// declaration `bionic::mod` already has for the emulated libc's own use of the
+// same host symbol — `rustc` warns (`clashing_extern_declarations`) about two
+// `extern "C" fn poll` with different signatures anywhere in the crate, since
+// both ultimately bind the one process-wide C symbol.
+extern "C" {
+    fn poll(fds: *mut c_void, nfds: c_ulong, timeout_ms: c_int) -> c_int;
+}
+#[repr(C)]
+struct PollFd {
+    fd: c_int,
+    events: i16,
+    revents: i16,
+}
+const POLLIN: i16 = 0x001;
+
+fn deliver_touch(
+    handle: i64,
+    action: i32,
+    x: f32,
+    y: f32,
+    button_state: i32,
+    action_button: i32,
+    event_time_ms: i64,
+    down_time_ms: i64,
+) {
+    match cordial_linker_sys::game_activity::touch(
+        handle,
+        action,
+        x,
+        y,
+        button_state,
+        action_button,
+        event_time_ms,
+        down_time_ms,
+    ) {
+        Ok(Some(consumed)) => {
+            super::trace(format_args!("onTouchEventNative(action={action}) -> {consumed}"))
+        }
+        // Not registered yet — a normal race against initializeNativeCode
+        // early in startup.
+        Ok(None) => {}
+        Err(e) => super::trace(format_args!("onTouchEventNative(action={action}) failed: {e}")),
+    }
+}
+
+fn deliver_key(
+    handle: i64,
+    down: bool,
+    key_code: i32,
+    scan_code: i32,
+    meta_state: i32,
+    repeat_count: i32,
+    unicode_char: i32,
+    event_time_ms: i64,
+    down_time_ms: i64,
+) {
+    match cordial_linker_sys::game_activity::key(
+        handle,
+        down,
+        key_code,
+        scan_code,
+        meta_state,
+        repeat_count,
+        unicode_char,
+        event_time_ms,
+        down_time_ms,
+    ) {
+        Ok(Some(consumed)) => {
+            super::trace(format_args!("onKey{}Native(code={key_code}) -> {consumed}",
+                if down { "Down" } else { "Up" }))
+        }
+        Ok(None) => {}
+        Err(e) => super::trace(format_args!(
+            "onKey{}Native(code={key_code}) failed: {e}",
+            if down { "Down" } else { "Up" }
+        )),
+    }
+}
+
+impl HostWindow {
+    fn now_ms(&self) -> i64 {
+        let state = self.input.lock().unwrap_or_else(|e| e.into_inner());
+        state.clock.elapsed().as_millis() as i64
+    }
+
+    fn dispatch_button(&self, handle: i64, ev: &XInputEvent, press: bool) {
+        let Some(android_button) = x11_button_to_android(ev.detail) else {
+            return;
+        };
+        let (x, y) = (ev.x as f32, ev.y as f32);
+
+        let mut state = self.input.lock().unwrap_or_else(|e| e.into_inner());
+        let now = state.clock.elapsed().as_millis() as i64;
+
+        if press {
+            if state.buttons == 0 {
+                state.down_time_ms = now;
+            }
+            state.buttons |= android_button;
+            let (buttons, down_time) = (state.buttons, state.down_time_ms);
+            drop(state);
+            // Real Android mouse input delivers exactly this pair for a
+            // click: ACTION_DOWN establishes the gesture, then
+            // ACTION_BUTTON_PRESS names which button did it.
+            deliver_touch(handle, ACTION_DOWN, x, y, buttons, 0, now, down_time);
+            deliver_touch(handle, ACTION_BUTTON_PRESS, x, y, buttons, android_button, now, down_time);
+        } else {
+            state.buttons &= !android_button;
+            let (buttons, down_time) = (state.buttons, state.down_time_ms);
+            drop(state);
+            deliver_touch(handle, ACTION_BUTTON_RELEASE, x, y, buttons, android_button, now, down_time);
+            deliver_touch(handle, ACTION_UP, x, y, buttons, 0, now, down_time);
+        }
+    }
+
+    fn dispatch_motion(&self, handle: i64, ev: &XInputEvent) {
+        let (x, y) = (ev.x as f32, ev.y as f32);
+        let state = self.input.lock().unwrap_or_else(|e| e.into_inner());
+        let now = state.clock.elapsed().as_millis() as i64;
+        let (buttons, down_time) = (state.buttons, state.down_time_ms);
+        drop(state);
+        // A held button makes this a drag — part of the gesture the DOWN
+        // started, hence ACTION_MOVE with the same down_time. No button held
+        // makes it a hover, which is what a mouse (as opposed to touch) sends
+        // when it moves without a button down.
+        let action = if buttons != 0 { ACTION_MOVE } else { ACTION_HOVER_MOVE };
+        deliver_touch(handle, action, x, y, buttons, 0, now, down_time);
+    }
+
+    fn dispatch_key(&self, handle: i64, buf: &mut [u8; 256], down: bool) {
+        let mut keysym: c_ulong = 0;
+        let mut text = [0u8; 8];
+        // SAFETY: `buf` holds the XKeyEvent `XNextEvent` just filled, laid out
+        // identically to `XInputEvent` above (that layout compatibility is
+        // documented Xlib behaviour). A null compose-status argument is
+        // documented to mean "skip compose-key processing", not "pass a valid
+        // pointer" — Xlib treats it as optional.
+        let n = unsafe {
+            (self.xlib.lookup_string)(
+                buf.as_mut_ptr() as *mut c_void,
+                text.as_mut_ptr() as *mut c_char,
+                text.len() as c_int,
+                &mut keysym,
+                std::ptr::null_mut(),
+            )
+        };
+        let ev = unsafe { &*(buf.as_ptr() as *const XInputEvent) };
+        let Some(keycode) = keysym_to_android(keysym) else {
+            super::trace(format_args!("unmapped X11 keysym {keysym:#x}"));
+            return;
+        };
+        let unicode = if n > 0 { text[0] as i32 } else { 0 };
+        let meta = android_meta_state(ev.state);
+        let now = self.now_ms();
+
+        // Real per-key downTime tracking (one slot per held key) is not
+        // implemented; both fields use the current time on every call. That
+        // is a simplification, not a faithful `downTime`, and is called out in
+        // the report — it does not block a key reaching the engine, only the
+        // precision of one timing field most UI code does not consult.
+        deliver_key(handle, down, keycode, ev.detail as i32, meta, 0, unicode, now, now);
+    }
+
+    /// Drain and deliver whatever X11 input is already queued, then return.
+    /// See the module-level comment above for why this never blocks.
+    fn pump_input_events(&self, handle: i64) {
+        let mut pfd = PollFd { fd: self.conn_fd, events: POLLIN, revents: 0 };
+        // SAFETY: `pfd` is a live array of length 1; a 0ms timeout makes this a
+        // pure non-blocking check.
+        let ready = unsafe { poll(&mut pfd as *mut PollFd as *mut c_void, 1, 0) };
+        if ready <= 0 {
+            return;
+        }
+
+        // Bounded so a burst of queued motion events cannot turn one drain
+        // call into unbounded work inside the render loop's own timing
+        // budget.
+        const MAX_EVENTS_PER_DRAIN: usize = 64;
+        for _ in 0..MAX_EVENTS_PER_DRAIN {
+            // SAFETY: `self.display` is open; reached only after `poll` above
+            // found the connection readable (or a previous iteration left
+            // events already queued client-side).
+            if unsafe { (self.xlib.pending)(self.display) } <= 0 {
+                break;
+            }
+            let mut buf = [0u8; 256];
+            // SAFETY: 256 bytes covers every concrete event struct in the
+            // `XEvent` union on every platform Xlib ships for; `buf` is live
+            // for the call.
+            unsafe { (self.xlib.next_event)(self.display, buf.as_mut_ptr() as *mut c_void) };
+            let event_type = unsafe { *(buf.as_ptr() as *const c_int) };
+
+            match event_type {
+                BUTTON_PRESS | BUTTON_RELEASE => {
+                    let ev = unsafe { &*(buf.as_ptr() as *const XInputEvent) };
+                    self.dispatch_button(handle, ev, event_type == BUTTON_PRESS);
+                }
+                MOTION_NOTIFY => {
+                    let ev = unsafe { &*(buf.as_ptr() as *const XInputEvent) };
+                    self.dispatch_motion(handle, ev);
+                }
+                KEY_PRESS | KEY_RELEASE => {
+                    self.dispatch_key(handle, &mut buf, event_type == KEY_PRESS);
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Drain and deliver whatever host input is queued, for the current window (if
+/// one is open — the loader/asset-only paths that never call `open()` make
+/// this a no-op).
+pub fn pump_input_events(handle: i64) {
+    if let Some(w) = current() {
+        w.pump_input_events(handle);
+    }
 }
 
 // ------------------------------------------------------- ANativeWindow_*

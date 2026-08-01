@@ -737,4 +737,119 @@ pub mod game_activity {
             Ok(handle)
         }
     }
+
+    extern "C" {
+        fn cordial_game_activity_touch(
+            handle: i64,
+            action: c_int,
+            x: f32,
+            y: f32,
+            button_state: c_int,
+            action_button: c_int,
+            event_time_ms: i64,
+            down_time_ms: i64,
+            consumed: *mut c_int,
+            err: *mut c_char,
+            err_len: usize,
+        ) -> c_int;
+        fn cordial_game_activity_key(
+            handle: i64,
+            down: c_int,
+            key_code: c_int,
+            scan_code: c_int,
+            meta_state: c_int,
+            repeat_count: c_int,
+            unicode_char: c_int,
+            event_time_ms: i64,
+            down_time_ms: i64,
+            consumed: *mut c_int,
+            err: *mut c_char,
+            err_len: usize,
+        ) -> c_int;
+    }
+
+    /// Deliver a synthesised mouse pointer event through `onTouchEventNative`.
+    ///
+    /// `action` is an Android `MotionEvent.ACTION_*` constant. Returns
+    /// `Ok(Some(consumed))` on success; `Ok(None)` if `onTouchEventNative` has
+    /// not been registered yet, which happens for every call that arrives
+    /// before `initializeNativeCode` has finished — a normal race during
+    /// startup, not a failure. `x`/`y` are window-relative pixels, matching the
+    /// `dpiScale = 1.0` Cordial reports in `PlatformParams`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn touch(
+        handle: i64,
+        action: i32,
+        x: f32,
+        y: f32,
+        button_state: i32,
+        action_button: i32,
+        event_time_ms: i64,
+        down_time_ms: i64,
+    ) -> Result<Option<bool>, String> {
+        let mut err = vec![0u8; 512];
+        let mut consumed: c_int = 0;
+        // SAFETY: `handle` came from `initialize`; `err`/`consumed` are live.
+        let rc = unsafe {
+            cordial_game_activity_touch(
+                handle,
+                action,
+                x,
+                y,
+                button_state,
+                action_button,
+                event_time_ms,
+                down_time_ms,
+                &mut consumed,
+                err.as_mut_ptr() as *mut c_char,
+                err.len(),
+            )
+        };
+        match rc {
+            0 => Ok(Some(consumed != 0)),
+            -2 => Ok(None),
+            _ => Err(take_err(err)),
+        }
+    }
+
+    /// Deliver a synthesised key event through `onKeyDownNative`/`onKeyUpNative`.
+    ///
+    /// See `touch`'s doc comment for the `Ok(None)` convention.
+    #[allow(clippy::too_many_arguments)]
+    pub fn key(
+        handle: i64,
+        down: bool,
+        key_code: i32,
+        scan_code: i32,
+        meta_state: i32,
+        repeat_count: i32,
+        unicode_char: i32,
+        event_time_ms: i64,
+        down_time_ms: i64,
+    ) -> Result<Option<bool>, String> {
+        let mut err = vec![0u8; 512];
+        let mut consumed: c_int = 0;
+        // SAFETY: as above.
+        let rc = unsafe {
+            cordial_game_activity_key(
+                handle,
+                down as c_int,
+                key_code,
+                scan_code,
+                meta_state,
+                repeat_count,
+                unicode_char,
+                event_time_ms,
+                down_time_ms,
+                &mut consumed,
+                err.as_mut_ptr() as *mut c_char,
+                err.len(),
+            )
+        };
+        match rc {
+            0 => Ok(Some(consumed != 0)),
+            -2 => Ok(None),
+            _ => Err(take_err(err)),
+        }
+    }
 }

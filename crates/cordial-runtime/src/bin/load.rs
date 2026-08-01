@@ -498,8 +498,13 @@ fn main() -> ExitCode {
                                 }
                             }
                             println!("  pumping for {}s", opt.run_seconds);
+                            // No AGDK handle on this path — it drives the app
+                            // bridge directly and never calls
+                            // initializeNativeCode, so onTouchEventNative etc.
+                            // are never registered to deliver input to.
                             cordial_runtime::android::looper::pump(
                                 std::time::Duration::from_secs(opt.run_seconds),
+                                None,
                             );
                         }
                     }
@@ -1090,8 +1095,14 @@ fn main() -> ExitCode {
                                                 // Android's UI thread runs the
                                                 // message loop; AGDK put its
                                                 // pipes on this thread's looper.
+                                                // The same loop also drains
+                                                // host mouse/keyboard input and
+                                                // delivers it through this
+                                                // handle's onTouchEventNative /
+                                                // onKeyDownNative/UpNative.
                                                 cordial_runtime::android::looper::pump(
                                                     std::time::Duration::from_secs(secs),
+                                                    Some(handle),
                                                 );
                                                 if std::env::var_os("CORDIAL_COUNT_GL").is_some() {
                                                     // What each thread is blocked on. A game thread

@@ -157,9 +157,23 @@ pub fn prepare_for_current_thread() -> bool {
 /// polling. Sleeping instead means the engine's own messages — including the one
 /// that says the window is ready — are queued and never delivered, so it sits
 /// with a surface it has not been told about and never draws.
-pub fn pump(duration: std::time::Duration) {
+///
+/// `game_activity_handle`, when set, is also where host input joins this same
+/// loop: every ~50ms iteration — the bounded timeout below — is a chance to
+/// drain whatever X11 mouse/keyboard events queued up and deliver them through
+/// `onTouchEventNative`/`onKeyDownNative`/`onKeyUpNative`, via
+/// `android::window::pump_input_events`. That function is non-blocking by
+/// construction (see its own doc comment), so folding it into this loop does
+/// not change this function's own timing behaviour — it is still bounded by
+/// the same 50ms `epoll_wait` timeout either way. `None` (no handle) is the
+/// case for callers that never bring AGDK up at all, e.g. the app-bridge-only
+/// path driven by `CORDIAL_SKIP_AGDK`.
+pub fn pump(duration: std::time::Duration, game_activity_handle: Option<i64>) {
     let deadline = std::time::Instant::now() + duration;
     while std::time::Instant::now() < deadline {
+        if let Some(handle) = game_activity_handle {
+            super::window::pump_input_events(handle);
+        }
         // A bounded timeout rather than -1: the loop has to notice the deadline
         // even when nothing is happening.
         looper_poll_once(

@@ -126,11 +126,187 @@ public:
     }
 };
 
+/// `android.view.MotionEvent`, synthesised from an X11 pointer event.
+///
+/// `onTouchEventNative`'s signature carries the event's scalar fields as
+/// unpacked primitive arguments (see `cordial_game_activity_touch`, below) — that
+/// unpacking is exactly what AGDK's own Java-side `processMotionEvent` does
+/// before calling the native. What is *not* unpacked, and has to come from this
+/// object when the native side (`GameActivityMotionEvent_fromJava` in AGDK's own
+/// C++, statically linked into libroblox.so) asks for it, is the per-pointer
+/// data: `getPointerId`, `getToolType`, `getRawX`/`getRawY` (SDK 29+), and
+/// `getAxisValue` for whichever axes AGDK has enabled — X and Y by default,
+/// which is all a single mouse pointer needs.
+///
+/// This mapping is not guessed: it is read directly out of AGDK's own
+/// `GameActivityEvents.cpp` (Apache-2.0, google/agdk via the game-activity
+/// prefab), which is the code that actually calls back onto whatever object
+/// Roblox was handed here. With `historySize` always 0 in this implementation
+/// (no motion coalescing), `getHistoricalEventTime`/`getHistoricalAxisValue` are
+/// registered — because AGDK unconditionally resolves the method IDs at
+/// `initializeNativeCode` time — but never actually invoked.
+class MotionEvent : public Object {
+public:
+    jint deviceId = 1;
+    // InputDevice.SOURCE_MOUSE = SOURCE_CLASS_POINTER(0x2) | 0x2000.
+    jint source = 0x00002002;
+    jint action = 0;
+    jlong eventTime = 0, downTime = 0;
+    jint flags = 0, metaState = 0, actionButton = 0, buttonState = 0;
+    jfloat x = 0.0f, y = 0.0f;
+    // TOOL_TYPE_MOUSE. Cordial reports isMouseDevice/isTouchDevice accordingly
+    // in PlatformParams (init_params.cpp), and this is the same claim made
+    // consistently on the event itself.
+    jint toolType = 3;
+
+    jint getPointerId(ENV*, jint) { return 0; }
+    jint getToolType(ENV*, jint) { return toolType; }
+    jfloat getRawX(ENV*, jint) { return x; }
+    jfloat getRawY(ENV*, jint) { return y; }
+    jfloat getXPrecision(ENV*) { return 1.0f; }
+    jfloat getYPrecision(ENV*) { return 1.0f; }
+    // AMOTION_EVENT_AXIS_X = 0, AMOTION_EVENT_AXIS_Y = 1 — the only two axes
+    // AGDK enables by default (GameActivityEvents.cpp's `enabledAxes`).
+    jfloat getAxisValue(ENV*, jint axis, jint) {
+        if (axis == 0) return x;
+        if (axis == 1) return y;
+        return 0.0f;
+    }
+    jlong getHistoricalEventTime(ENV*, jint) { return eventTime; }
+    jfloat getHistoricalAxisValue(ENV*, jint, jint, jint) { return 0.0f; }
+
+    // Registered for completeness — any caller reading the object directly
+    // rather than through the unpacked primitives gets real values instead of
+    // an unresolved-symbol stub — but not on AGDK's own call path.
+    jint getDeviceId(ENV*) { return deviceId; }
+    jint getSource(ENV*) { return source; }
+    jint getAction(ENV*) { return action; }
+    jlong getEventTime(ENV*) { return eventTime; }
+    jlong getDownTime(ENV*) { return downTime; }
+    jint getFlags(ENV*) { return flags; }
+    jint getMetaState(ENV*) { return metaState; }
+    jint getActionButton(ENV*) { return actionButton; }
+    jint getButtonState(ENV*) { return buttonState; }
+    jint getClassification(ENV*) { return 0; }
+    jint getEdgeFlags(ENV*) { return 0; }
+    jint getHistorySize(ENV*) { return 0; }
+    jint getPointerCount(ENV*) { return 1; }
+
+    static std::shared_ptr<MotionEvent> Create(ENV* env, jfloat x, jfloat y, jint action,
+                                               jint buttonState, jint actionButton,
+                                               jlong eventTime, jlong downTime) {
+        auto p = std::make_shared<MotionEvent>();
+        p->x = x;
+        p->y = y;
+        p->action = action;
+        p->buttonState = buttonState;
+        p->actionButton = actionButton;
+        p->eventTime = eventTime;
+        p->downTime = downTime;
+        to_jni(env, p);
+        return p;
+    }
+
+    static void Register(ENV* env) {
+        env->GetClass<MotionEvent>("android/view/MotionEvent");
+        auto c = env->GetClass("android/view/MotionEvent");
+        c->HookInstanceFunction(env, "getPointerId", &MotionEvent::getPointerId);
+        c->HookInstanceFunction(env, "getToolType", &MotionEvent::getToolType);
+        c->HookInstanceFunction(env, "getRawX", &MotionEvent::getRawX);
+        c->HookInstanceFunction(env, "getRawY", &MotionEvent::getRawY);
+        c->HookInstanceFunction(env, "getXPrecision", &MotionEvent::getXPrecision);
+        c->HookInstanceFunction(env, "getYPrecision", &MotionEvent::getYPrecision);
+        c->HookInstanceFunction(env, "getAxisValue", &MotionEvent::getAxisValue);
+        c->HookInstanceFunction(env, "getHistoricalEventTime", &MotionEvent::getHistoricalEventTime);
+        c->HookInstanceFunction(env, "getHistoricalAxisValue", &MotionEvent::getHistoricalAxisValue);
+        c->HookInstanceFunction(env, "getDeviceId", &MotionEvent::getDeviceId);
+        c->HookInstanceFunction(env, "getSource", &MotionEvent::getSource);
+        c->HookInstanceFunction(env, "getAction", &MotionEvent::getAction);
+        c->HookInstanceFunction(env, "getEventTime", &MotionEvent::getEventTime);
+        c->HookInstanceFunction(env, "getDownTime", &MotionEvent::getDownTime);
+        c->HookInstanceFunction(env, "getFlags", &MotionEvent::getFlags);
+        c->HookInstanceFunction(env, "getMetaState", &MotionEvent::getMetaState);
+        c->HookInstanceFunction(env, "getActionButton", &MotionEvent::getActionButton);
+        c->HookInstanceFunction(env, "getButtonState", &MotionEvent::getButtonState);
+        c->HookInstanceFunction(env, "getClassification", &MotionEvent::getClassification);
+        c->HookInstanceFunction(env, "getEdgeFlags", &MotionEvent::getEdgeFlags);
+        c->HookInstanceFunction(env, "getHistorySize", &MotionEvent::getHistorySize);
+        c->HookInstanceFunction(env, "getPointerCount", &MotionEvent::getPointerCount);
+    }
+};
+
+/// `android.view.KeyEvent`, synthesised from an X11 key event.
+///
+/// Unlike `MotionEvent`, `onKeyDownNative`/`onKeyUpNative` carry no unpacked
+/// primitives at all — the whole event is this object, and AGDK's
+/// `GameActivityKeyEvent_fromJava` (same source file as the MotionEvent mapping
+/// above) calls every one of these accessors directly.
+class KeyEvent : public Object {
+public:
+    jint deviceId = 1;
+    // InputDevice.SOURCE_KEYBOARD = SOURCE_CLASS_BUTTON(0x1) | 0x100.
+    jint source = 0x00000101;
+    jint action = 0;
+    jlong eventTime = 0, downTime = 0;
+    jint flags = 0, metaState = 0, modifiers = 0, repeatCount = 0;
+    jint keyCode = 0, scanCode = 0, unicodeChar = 0;
+
+    jint getDeviceId(ENV*) { return deviceId; }
+    jint getSource(ENV*) { return source; }
+    jint getAction(ENV*) { return action; }
+    jlong getEventTime(ENV*) { return eventTime; }
+    jlong getDownTime(ENV*) { return downTime; }
+    jint getFlags(ENV*) { return flags; }
+    jint getMetaState(ENV*) { return metaState; }
+    jint getModifiers(ENV*) { return modifiers; }
+    jint getRepeatCount(ENV*) { return repeatCount; }
+    jint getKeyCode(ENV*) { return keyCode; }
+    jint getScanCode(ENV*) { return scanCode; }
+    jint getUnicodeChar(ENV*) { return unicodeChar; }
+
+    static std::shared_ptr<KeyEvent> Create(ENV* env, jboolean down, jint keyCode, jint scanCode,
+                                            jint metaState, jint repeatCount, jint unicodeChar,
+                                            jlong eventTime, jlong downTime) {
+        auto p = std::make_shared<KeyEvent>();
+        // ACTION_DOWN = 0, ACTION_UP = 1.
+        p->action = down ? 0 : 1;
+        p->keyCode = keyCode;
+        p->scanCode = scanCode;
+        p->metaState = metaState;
+        p->modifiers = metaState;
+        p->repeatCount = repeatCount;
+        p->unicodeChar = unicodeChar;
+        p->eventTime = eventTime;
+        p->downTime = downTime;
+        to_jni(env, p);
+        return p;
+    }
+
+    static void Register(ENV* env) {
+        env->GetClass<KeyEvent>("android/view/KeyEvent");
+        auto c = env->GetClass("android/view/KeyEvent");
+        c->HookInstanceFunction(env, "getDeviceId", &KeyEvent::getDeviceId);
+        c->HookInstanceFunction(env, "getSource", &KeyEvent::getSource);
+        c->HookInstanceFunction(env, "getAction", &KeyEvent::getAction);
+        c->HookInstanceFunction(env, "getEventTime", &KeyEvent::getEventTime);
+        c->HookInstanceFunction(env, "getDownTime", &KeyEvent::getDownTime);
+        c->HookInstanceFunction(env, "getFlags", &KeyEvent::getFlags);
+        c->HookInstanceFunction(env, "getMetaState", &KeyEvent::getMetaState);
+        c->HookInstanceFunction(env, "getModifiers", &KeyEvent::getModifiers);
+        c->HookInstanceFunction(env, "getRepeatCount", &KeyEvent::getRepeatCount);
+        c->HookInstanceFunction(env, "getKeyCode", &KeyEvent::getKeyCode);
+        c->HookInstanceFunction(env, "getScanCode", &KeyEvent::getScanCode);
+        c->HookInstanceFunction(env, "getUnicodeChar", &KeyEvent::getUnicodeChar);
+    }
+};
+
 void register_game_activity_classes(ENV* env) {
     ClassLoader::Register(env);
     AssetManager::Register(env);
     Configuration::Register(env);
     GameActivity::Register(env);
+    MotionEvent::Register(env);
+    KeyEvent::Register(env);
 }
 
 } // namespace cordial
@@ -281,6 +457,145 @@ int cordial_game_activity_start(long handle, int width, int height, int format,
         using FocusFn = void (*)(JNIEnv*, jobject, jlong, jboolean);
         if (auto f = native("onWindowFocusChangedNative")) {
             reinterpret_cast<FocusFn>(f)(jni, jactivity, (jlong)handle, JNI_TRUE);
+        }
+        return 0;
+    } catch (const std::exception& e) {
+        snprintf(err, err_len, "%s", e.what());
+        return -1;
+    } catch (...) {
+        snprintf(err, err_len, "non-standard C++ exception");
+        return -1;
+    }
+}
+
+} // extern "C"
+
+extern "C" {
+
+/// Deliver a synthesised mouse pointer event through `onTouchEventNative`.
+///
+/// `action` is a caller-supplied Android `MotionEvent.ACTION_*` constant; this
+/// function does not interpret X11 semantics itself, only the AGDK call
+/// contract — the X11-to-Android policy (which button maps to which action,
+/// hover vs. drag) lives on the Rust side, in `android::window`.
+///
+/// Returns 0 on success with `*consumed` set to the engine's boolean result,
+/// -1 on error (`err` populated), or -2 if `onTouchEventNative` has not been
+/// registered yet — a normal race against `initializeNativeCode` early in
+/// startup, not a failure worth reporting as one.
+///
+/// Wrapped in `PushLocalFrame`/`PopLocalFrame`: unlike the once-per-launch
+/// calls elsewhere in this file, this runs once per input event, and
+/// `cordial::to_jni` parks every object it touches in the current local frame
+/// (see its own doc comment) — without popping, a long session would grow that
+/// frame without bound.
+int cordial_game_activity_touch(long handle, int action, float x, float y, int button_state,
+                                int action_button, long long event_time_ms,
+                                long long down_time_ms, int* consumed, char* err,
+                                size_t err_len) {
+    auto* env = cordial::process_env();
+    if (!env || handle == 0) {
+        snprintf(err, err_len, "no JavaVM, or no native handle");
+        return -1;
+    }
+    try {
+        JNIEnv* jni = env->GetJNIEnv();
+        auto cls = env->GetClass("com/google/androidgamesdk/GameActivity");
+        if (!cls) {
+            snprintf(err, err_len, "GameActivity class is not registered");
+            return -1;
+        }
+        void* fn;
+        {
+            std::lock_guard<std::mutex> lock(cls->mtx);
+            auto it = cls->natives.find("onTouchEventNative");
+            fn = it == cls->natives.end() ? nullptr : it->second;
+        }
+        if (!fn) {
+            return -2;
+        }
+
+        jni->PushLocalFrame(8);
+
+        auto activity = std::make_shared<cordial::GameActivity>();
+        auto jactivity = cordial::to_jni(env, activity);
+        auto event = cordial::MotionEvent::Create(env, x, y, action, button_state, action_button,
+                                                  (jlong)event_time_ms, (jlong)down_time_ms);
+        auto jevent = cordial::to_jni(env, event);
+
+        using TouchFn = jboolean (*)(JNIEnv*, jobject, jlong, jobject, jint, jint, jint, jint,
+                                     jint, jlong, jlong, jint, jint, jint, jint, jint, jint,
+                                     jfloat, jfloat);
+        jboolean r = reinterpret_cast<TouchFn>(fn)(
+            jni, jactivity, (jlong)handle, jevent,
+            /*pointerCount=*/1, /*historySize=*/0, /*deviceId=*/event->deviceId,
+            /*source=*/event->source, /*action=*/(jint)action,
+            /*eventTime=*/(jlong)event_time_ms, /*downTime=*/(jlong)down_time_ms,
+            /*flags=*/0, /*metaState=*/0, /*actionButton=*/(jint)action_button,
+            /*buttonState=*/(jint)button_state, /*classification=*/0, /*edgeFlags=*/0,
+            /*precisionX=*/1.0f, /*precisionY=*/1.0f);
+
+        jni->PopLocalFrame(nullptr);
+        if (consumed) {
+            *consumed = r ? 1 : 0;
+        }
+        return 0;
+    } catch (const std::exception& e) {
+        snprintf(err, err_len, "%s", e.what());
+        return -1;
+    } catch (...) {
+        snprintf(err, err_len, "non-standard C++ exception");
+        return -1;
+    }
+}
+
+/// Deliver a synthesised key event through `onKeyDownNative`/`onKeyUpNative`.
+///
+/// `down` selects which of the two natives is called; both share the single
+/// `(J, KeyEvent) -> Z` signature. See `cordial_game_activity_touch`'s doc
+/// comment for the return-code convention and the local-frame wrapping.
+int cordial_game_activity_key(long handle, int down, int key_code, int scan_code, int meta_state,
+                              int repeat_count, int unicode_char, long long event_time_ms,
+                              long long down_time_ms, int* consumed, char* err, size_t err_len) {
+    auto* env = cordial::process_env();
+    if (!env || handle == 0) {
+        snprintf(err, err_len, "no JavaVM, or no native handle");
+        return -1;
+    }
+    try {
+        JNIEnv* jni = env->GetJNIEnv();
+        auto cls = env->GetClass("com/google/androidgamesdk/GameActivity");
+        if (!cls) {
+            snprintf(err, err_len, "GameActivity class is not registered");
+            return -1;
+        }
+        const char* name = down ? "onKeyDownNative" : "onKeyUpNative";
+        void* fn;
+        {
+            std::lock_guard<std::mutex> lock(cls->mtx);
+            auto it = cls->natives.find(name);
+            fn = it == cls->natives.end() ? nullptr : it->second;
+        }
+        if (!fn) {
+            return -2;
+        }
+
+        jni->PushLocalFrame(8);
+
+        auto activity = std::make_shared<cordial::GameActivity>();
+        auto jactivity = cordial::to_jni(env, activity);
+        auto event = cordial::KeyEvent::Create(env, down ? JNI_TRUE : JNI_FALSE, (jint)key_code,
+                                               (jint)scan_code, (jint)meta_state,
+                                               (jint)repeat_count, (jint)unicode_char,
+                                               (jlong)event_time_ms, (jlong)down_time_ms);
+        auto jevent = cordial::to_jni(env, event);
+
+        using KeyFn = jboolean (*)(JNIEnv*, jobject, jlong, jobject);
+        jboolean r = reinterpret_cast<KeyFn>(fn)(jni, jactivity, (jlong)handle, jevent);
+
+        jni->PopLocalFrame(nullptr);
+        if (consumed) {
+            *consumed = r ? 1 : 0;
         }
         return 0;
     } catch (const std::exception& e) {

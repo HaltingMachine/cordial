@@ -32,6 +32,9 @@ counters! {
     DRAW_ARRAYS           => "glDrawArrays",
     COMPILE_SHADER        => "glCompileShader",
     TEX_IMAGE_2D          => "glTexImage2D",
+    // Vulkan's counterpart to eglSwapBuffers. Without it the report reads all
+    // zeros on a Vulkan session and looks exactly like "nothing rendered".
+    QUEUE_PRESENT         => "vkQueuePresentKHR",
 }
 
 /// The host implementation each wrapper forwards to, resolved once.

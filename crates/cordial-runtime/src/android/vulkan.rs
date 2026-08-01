@@ -262,6 +262,16 @@ extern "C" fn vk_get_instance_proc_addr(instance: *mut c_void, name: *const c_ch
             vk_enumerate_instance_extension_properties as *const () as *mut c_void
         }
         b"vkCreateAndroidSurfaceKHR" => vk_create_android_surface_khr as *const () as *mut c_void,
+        // Counted, not altered. A Vulkan session leaves every GLES counter at
+        // zero, so without this the graphics report cannot tell "Vulkan is
+        // presenting frames" from "nothing is drawing at all".
+        b"vkQueuePresentKHR" => {
+            HOST_QUEUE_PRESENT.store(
+                unsafe { (h.get_instance_proc_addr)(instance, name) } as usize,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            vk_queue_present_khr as *const () as *mut c_void
+        }
         // Every other name — `vkCreateDevice`, every `vkCmd*`, everything a real
         // `VkInstance` answers for once one exists — is exactly what the host
         // loader would give a native Linux Vulkan app. Forwarding unconditionally
@@ -269,6 +279,23 @@ extern "C" fn vk_get_instance_proc_addr(instance: *mut c_void, name: *const c_ch
         // `VkInstance`: see `vk_create_instance`.
         _ => unsafe { (h.get_instance_proc_addr)(instance, name) },
     }
+}
+
+/// The real `vkQueuePresentKHR`, resolved on first request and then called
+/// through unchanged.
+static HOST_QUEUE_PRESENT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+extern "C" fn vk_queue_present_khr(queue: *mut c_void, info: *const c_void) -> i32 {
+    crate::android::glcount::QUEUE_PRESENT
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let f = HOST_QUEUE_PRESENT.load(std::sync::atomic::Ordering::Relaxed);
+    if f == 0 {
+        return 0;
+    }
+    // SAFETY: resolved from the host loader for exactly this name.
+    let f: extern "C" fn(*mut c_void, *const c_void) -> i32 = unsafe { std::mem::transmute(f) };
+    f(queue, info)
 }
 
 extern "C" fn vk_create_instance(
