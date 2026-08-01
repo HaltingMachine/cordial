@@ -9,6 +9,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <deque>
+#include <vector>
 
 namespace cordial::audio {
 
@@ -92,5 +94,32 @@ private:
     struct Impl;
     Impl* impl_;
 };
+
+/// Exposed only so `pipewire_backend_test.cpp` can check the underrun
+/// behaviour without a live PipeWire session, hardware, or any risk of
+/// producing sound: a periodic replay of stale buffer contents is exactly
+/// what turns a silent gap into an audible tone, so the "pad with zeroed
+/// silence rather than whatever the buffer held last cycle" rule is worth
+/// checking on its own, not only by ear.
+namespace testing {
+
+struct PendingBuffer {
+    const uint8_t* data;
+    uint32_t size;
+    uint32_t offset;
+    void* context;
+};
+
+/// Copies from the front of `pending` into `dst[0, want)`, popping buffers
+/// as they empty (and recording their `context` in `drained_contexts`, in
+/// order) and zero-filling any shortfall. Returns the number of trailing
+/// bytes that had to be silence-padded — zero on a clean fill. This is
+/// exactly what `PlaybackStream::Impl::process()` does each PipeWire
+/// cycle, factored out because that method also touches real `pw_buffer`
+/// and `pw_stream` objects that only exist with a live stream connected.
+uint32_t fill_pcm(std::deque<PendingBuffer>& pending, uint8_t* dst, uint32_t want,
+                   std::vector<void*>& drained_contexts);
+
+} // namespace testing
 
 } // namespace cordial::audio

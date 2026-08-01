@@ -42,7 +42,9 @@
 #include <dlfcn.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <mutex>
@@ -312,12 +314,51 @@ bool map_format(uint32_t bits_per_sample, uint32_t container_bits, bool big_endi
 
 // ------------------------------------------------------------------- Impl
 
-struct PendingBuffer {
-    const uint8_t* data;
-    uint32_t size;
-    uint32_t offset;
-    void* context;
-};
+using PendingBuffer = testing::PendingBuffer;
+
+namespace testing {
+
+uint32_t fill_pcm(std::deque<PendingBuffer>& pending, uint8_t* dst, uint32_t want,
+                   std::vector<void*>& drained_contexts) {
+    uint32_t filled = 0;
+    while (filled < want && !pending.empty()) {
+        PendingBuffer& front = pending.front();
+        uint32_t avail = front.size - front.offset;
+        uint32_t take = avail < (want - filled) ? avail : (want - filled);
+        std::memcpy(dst + filled, front.data + front.offset, take);
+        front.offset += take;
+        filled += take;
+        if (front.offset >= front.size) {
+            drained_contexts.push_back(front.context);
+            pending.pop_front();
+        }
+    }
+    // Roblox has not kept the queue fed if this is nonzero. Silence, not
+    // whatever this buffer held last cycle: pw_stream reuses its buffer
+    // pool, so leaving the tail alone would replay stale audio on a loop —
+    // which is exactly how a silent gap turns into an audible tone —
+    // instead of producing the gap an underrun actually is.
+    uint32_t padded = want - filled;
+    if (padded != 0) {
+        std::memset(dst + filled, 0, padded);
+    }
+    return padded;
+}
+
+} // namespace testing
+
+namespace {
+
+/// `CORDIAL_TRACE_AUDIO=1` prints a running tally every second: buffers
+/// enqueued, buffers drained, and how many frames were silence-padded for
+/// lack of a fed queue. Off by default — this is a diagnostic for chasing a
+/// stalled or underrunning stream, not routine output.
+bool trace_audio_enabled() {
+    static const bool enabled = std::getenv("CORDIAL_TRACE_AUDIO") != nullptr;
+    return enabled;
+}
+
+} // namespace
 
 struct PlaybackStream::Impl {
     pw_stream* stream = nullptr;
@@ -330,6 +371,11 @@ struct PlaybackStream::Impl {
     void* drain_user = nullptr;
     uint32_t enqueued_index = 0;
     uint64_t underrun_frames = 0; // diagnostic counter, not surfaced through the OpenSL API
+
+    // CORDIAL_TRACE_AUDIO=1 bookkeeping only; untouched otherwise.
+    uint64_t trace_process_cycles = 0;
+    uint64_t trace_drains = 0;
+    std::chrono::steady_clock::time_point trace_last_report{};
 
     static void on_process(void* data) { static_cast<Impl*>(data)->process(); }
 
@@ -364,7 +410,6 @@ struct PlaybackStream::Impl {
             if (requested_bytes < capacity) want = static_cast<uint32_t>(requested_bytes);
         }
 
-        uint32_t filled = 0;
         DrainCallback cb;
         void* user;
         // Contexts of buffers this cycle fully drained. The callback for each
@@ -372,41 +417,41 @@ struct PlaybackStream::Impl {
         // the ordinary OpenSL pattern is to re-enqueue the next buffer from
         // inside this callback, which would deadlock against its own lock.
         std::vector<void*> drained;
+        uint32_t padded;
         {
             std::lock_guard<std::mutex> lock(mutex);
             cb = drain_cb;
             user = drain_user;
-            while (filled < want && !pending.empty()) {
-                PendingBuffer& front = pending.front();
-                uint32_t avail = front.size - front.offset;
-                uint32_t take = avail < (want - filled) ? avail : (want - filled);
-                std::memcpy(dst + filled, front.data + front.offset, take);
-                front.offset += take;
-                filled += take;
-                if (front.offset >= front.size) {
-                    drained.push_back(front.context);
-                    pending.pop_front();
-                }
-            }
+            padded = testing::fill_pcm(pending, dst, want, drained);
         }
-        if (filled < want) {
-            // Roblox has not kept the queue fed. Silence, not whatever this
-            // buffer held last cycle: pw_stream reuses its buffer pool, so
-            // leaving the tail alone would replay stale audio instead of
-            // producing the gap an underrun actually is.
-            std::memset(dst + filled, 0, want - filled);
-            underrun_frames += (want - filled) / (bytes_per_frame ? bytes_per_frame : 1);
-            filled = want;
+        if (padded != 0) {
+            underrun_frames += padded / (bytes_per_frame ? bytes_per_frame : 1);
         }
 
         buf->datas[0].chunk->offset = 0;
         buf->datas[0].chunk->stride = bytes_per_frame;
-        buf->datas[0].chunk->size = filled;
+        buf->datas[0].chunk->size = want;
 
         g_lib.stream_queue_buffer(stream, b);
 
         if (cb) {
             for (void* ctx : drained) cb(ctx, user);
+        }
+
+        if (trace_audio_enabled()) {
+            ++trace_process_cycles;
+            trace_drains += drained.size();
+            auto now = std::chrono::steady_clock::now();
+            if (now - trace_last_report >= std::chrono::seconds(1)) {
+                trace_last_report = now;
+                std::fprintf(stderr,
+                    "D/Cordial-OpenSLES         audio trace: %llu buffers enqueued, %llu process "
+                    "cycles, %llu drained, %llu underrun frames padded with silence\n",
+                    static_cast<unsigned long long>(enqueued_index),
+                    static_cast<unsigned long long>(trace_process_cycles),
+                    static_cast<unsigned long long>(trace_drains),
+                    static_cast<unsigned long long>(underrun_frames));
+            }
         }
     }
 

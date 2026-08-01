@@ -46,6 +46,21 @@ add_library(cordial_liblog STATIC
 if(PIPEWIRE_FOUND)
   target_include_directories(cordial_liblog PRIVATE ${PIPEWIRE_INCLUDE_DIRS})
   target_compile_definitions(cordial_liblog PRIVATE CORDIAL_HAVE_PIPEWIRE=1)
+
+  # Checks pipewire_backend.cpp's buffer-queue fill logic (the underrun ->
+  # silence rule in particular) without a live PipeWire session, a daemon, or
+  # any way to produce sound — see pipewire_backend_test.cpp for why that
+  # property matters here specifically. Run as part of the ordinary build
+  # rather than left for someone to remember to invoke separately: a check
+  # that only runs when asked for is a check that silently stops running.
+  add_executable(cordial_pipewire_backend_test EXCLUDE_FROM_ALL
+    pipewire_backend.cpp pipewire_backend_test.cpp)
+  target_include_directories(cordial_pipewire_backend_test PRIVATE ${PIPEWIRE_INCLUDE_DIRS})
+  target_compile_definitions(cordial_pipewire_backend_test PRIVATE CORDIAL_HAVE_PIPEWIRE=1)
+  add_custom_command(TARGET cordial_pipewire_backend_test POST_BUILD
+    COMMAND cordial_pipewire_backend_test
+    COMMENT "Running pipewire_backend fill_pcm checks (no PipeWire session needed)")
+  add_dependencies(cordial_liblog cordial_pipewire_backend_test)
 endif()
 
 add_library(cordial_linker_shim STATIC shim.cpp)
