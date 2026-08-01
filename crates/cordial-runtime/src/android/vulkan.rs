@@ -174,6 +174,16 @@ use std::ffi::c_int;
 const RTLD_NOW: c_int = 2;
 
 fn load_host() -> Option<HostVulkan> {
+    // `CORDIAL_NO_VULKAN=1` makes the host look exactly like a machine with no
+    // Vulkan loader at all: `host()` returns `None`, `symtab::build` leaves both
+    // virtual `libvulkan.so`/`libvulkan.so.1` sonames unregistered, and Roblox's
+    // own `dlopen` fails the same way it did before this module existed — a
+    // clean, deliberate fall-through to GLES. Useful on its own (forcing the
+    // fallback path to test it) independent of whatever bug prompted adding it.
+    if std::env::var_os("CORDIAL_NO_VULKAN").is_some() {
+        return None;
+    }
+
     let mut handle = std::ptr::null_mut();
     // The Linux soname first, then the Android one Roblox actually asks for —
     // either is fine to load from, since what matters is which real library

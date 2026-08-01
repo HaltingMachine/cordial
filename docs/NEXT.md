@@ -59,18 +59,24 @@ One correction that came out of it: the `The requested Ids are invalid`
 thumbnail failure is what the **real, logged-out Android client** also produces.
 It is not a Cordial defect and it is not evidence of anything.
 
-## 2. The GLES fallback runs at about 1 fps
+## 2. ~~The GLES fallback runs at about 1 fps~~ — fixed
 
-Vulkan is fine — 656 presents in 24 s across three runs, unchanged by injected
-input, so it is a continuous loop and not render-on-demand. GLES is not: 20
-`eglSwapBuffers` in 20 s, repeatedly. It matters because GLES is the fallback for
-any host without Vulkan.
+Every `eglSwapBuffers` blocked for almost exactly 1.00 s inside Mesa itself. The
+engine asks for vsync (`eglSwapInterval(1)`), and this host's X server is
+Xwayland, which owns no CRTC and cannot answer DRI3's vblank queries the way real
+Xorg can — so Mesa fell back to a one-second wait. Vulkan's WSI path does not go
+through that loader code, which is why only GLES was affected.
 
-**Counting trap that has already produced one wrong conclusion:** a Vulkan
-session leaves every GLES counter at zero, and a GLES session leaves
-`vkQueuePresentKHR` at zero. `CORDIAL_COUNT_GL=1` reports both. Check which
-renderer actually ran, in the engine's log, before reading a zero as "nothing
-drew".
+`eglSwapInterval` is now intercepted and the interval Mesa receives is forced to
+0, scoped to that call rather than setting `vblank_mode=0` for the whole process.
+The engine still paces itself through its own `RenderJob`, so this removes a
+broken 1 Hz clamp underneath that pacing rather than uncapping anything.
+
+**20 → 652 swaps in 20 s, identical across three runs. About 1 fps to about 33.**
+
+`CORDIAL_NO_VULKAN=1` forces the GLES path for testing, and
+`CORDIAL_SWAP_TIMES=1` reports how long each swap blocks — which is what found
+this.
 
 ## 3. Plugins: the host exists, the runtime is not wired to it yet
 

@@ -80,14 +80,13 @@ will be declined.
 | Networking / HTTPS | ✅ |
 | Mouse and keyboard reach the engine | ✅ |
 | Stable | ✅ 26 consecutive clean launches |
-| Frame rate | ✅ ~27 fps steady on Vulkan (GLES fallback is much slower) |
+| Frame rate | ✅ ~27 fps on Vulkan, ~33 fps on GLES |
 | Signed in | ❌ not implemented |
 | Plugins | 🟡 host and capability broker built; not yet wired to the running client |
 
 Measured with `vkQueuePresentKHR`: 656, 656 and 655 presents over 24 s across
 three runs, unchanged by injected input — so it renders continuously rather than
-on demand. The GLES fallback path is far slower (about 1 fps) and is a separate
-open problem for hosts without Vulkan; see [`docs/NEXT.md`](docs/NEXT.md).
+on demand.
 
 The blocker now is sign-in. Without a session the client sits on the logged-out
 landing page, so there is nothing much to do with it.

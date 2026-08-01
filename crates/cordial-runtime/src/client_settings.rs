@@ -232,6 +232,12 @@ mod tests {
         assert!(plausible(r#"{"applicationSettings":{"FFlagX":"True"}}"#));
     }
 
+    /// Exercises `load_base` rather than `load` on purpose. `load` merges the
+    /// user's own overrides from `~/.config/cordial/flags.json`, so going
+    /// through it would make this test read the developer's real home directory
+    /// and fail for anyone who has that file — which is exactly what it did
+    /// once one existed. The behaviour under test is path-versus-network, and
+    /// that is `load_base`.
     #[test]
     fn an_explicit_path_bypasses_the_network() {
         let dir = std::env::temp_dir().join("cordial-cs-test");
@@ -239,7 +245,7 @@ mod tests {
         let p = dir.join("settings.json");
         std::fs::write(&p, r#"{"applicationSettings":{}}"#).unwrap();
         assert_eq!(
-            load(Some(p.to_str().unwrap())).as_deref(),
+            load_base(Some(p.to_str().unwrap())).as_deref(),
             Some(r#"{"applicationSettings":{}}"#)
         );
     }

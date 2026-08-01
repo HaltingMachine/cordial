@@ -73,14 +73,46 @@ macro_rules! replace {
     ($a:ident) => { *mut c_void };
 }
 
+// CORDIAL_SWAP_TIMES=1 prints a wall-clock timestamp and how long the real
+// eglSwapBuffers blocked, around every call. This is what found the ~1fps
+// GLES bug: it showed every swap blocking for 0.97-1.00s inside the host
+// call itself (see the comment on `egl_swap_interval` in window.rs), settling
+// "swaps are evenly spaced but each one blocks too long" against "swaps come
+// in a burst then the engine stalls" without needing lldb, which does not
+// break inside libroblox.so. Kept as a standing diagnostic — cheap when off,
+// and the next swap-pacing regression on some other host will want it again.
+// Not wired to any counter; purely stderr timing.
+static SWAP_TRACE_T0: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
+extern "C" fn swap_buffers_timed(a: *mut c_void, b: *mut c_void) -> *mut c_void {
+    SWAP_BUFFERS.fetch_add(1, Ordering::Relaxed);
+    let t0 = *SWAP_TRACE_T0.get_or_init(std::time::Instant::now);
+    let before = t0.elapsed().as_secs_f64();
+    extern "C" {
+        fn dlsym(handle: *mut c_void, symbol: *const std::ffi::c_char) -> *mut c_void;
+    }
+    let f: extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void = unsafe {
+        std::mem::transmute(dlsym(std::ptr::null_mut(), c"eglSwapBuffers".as_ptr()))
+    };
+    let r = f(a, b);
+    let after = t0.elapsed().as_secs_f64();
+    eprintln!("[swap-trace] enter={before:.4}s return={after:.4}s blocked={:.4}s", after - before);
+    r
+}
+
 pub fn overrides() -> Vec<(&'static str, *mut c_void)> {
-    vec![
+    let mut v = vec![
         forward!(MAKE_CURRENT, "eglMakeCurrent", (a, b, c, d)),
-        forward!(SWAP_BUFFERS, "eglSwapBuffers", (a, b)),
         forward!(CLEAR, "glClear", (a)),
         forward!(DRAW_ELEMENTS, "glDrawElements", (a, b, c, d)),
         forward!(DRAW_ARRAYS, "glDrawArrays", (a, b, c)),
         forward!(COMPILE_SHADER, "glCompileShader", (a)),
         forward!(TEX_IMAGE_2D, "glTexImage2D", (a, b, c, d, e, f, g, h, i)),
-    ]
+    ];
+    if std::env::var_os("CORDIAL_SWAP_TIMES").is_some() {
+        v.push(("eglSwapBuffers", swap_buffers_timed as *const () as *mut c_void));
+    } else {
+        v.push(forward!(SWAP_BUFFERS, "eglSwapBuffers", (a, b)));
+    }
+    v
 }

@@ -1047,6 +1047,58 @@ extern "C" fn egl_create_window_surface(
     f(dpy, config, win, attribs)
 }
 
+/// `eglSwapInterval`, with the requested interval clamped to 0.
+///
+/// The engine asks for `eglSwapInterval(1)` — see the `[FLog::Graphics]` log
+/// line of that exact text right after `EGL_MIN_SWAP_INTERVAL: 0`. Honouring
+/// that request is what produces the ~1 fps GLES fallback: measured directly
+/// (wrapping `eglSwapBuffers` with a timer around the real call), every swap
+/// blocks for 0.97-1.00s, not the ~16ms a 60Hz vblank wait should take. That
+/// number is too round to be a real refresh interval and stayed exactly 1.00s
+/// whether or not the window had input focus (`_NET_ACTIVE_WINDOW` sent by
+/// hand made no difference — focus was already ruled out at the Android level
+/// separately). Setting the Mesa debug knob `vblank_mode=0` in the process
+/// environment makes the block disappear entirely (swaps return in under a
+/// millisecond), which isolates the cause to Mesa's DRI3/Present vblank wait,
+/// not to Cordial's window, the compositor, or the engine's own pacing.
+///
+/// The reachable explanation: this host's X server is Xwayland (rootless,
+/// under Mutter), which does not own a CRTC and cannot answer DRI3's
+/// `GetMSC`/`Present` vblank queries the way a real Xorg/DRM master would.
+/// When Mesa's `loader_dri3` can't get real MSC/vblank data it falls back to
+/// pacing swaps against a synthetic interval rather than failing outright —
+/// on this host that fallback lands on exactly 1 Hz. Vulkan's presentation
+/// engine does not go through this code path at all (its own WSI, not GLX/
+/// EGL's DRI3 loader), which is why the same host presents at a steady ~27
+/// fps over `vkQueuePresentKHR` while GLES stalls on `eglSwapBuffers`.
+///
+/// Rather than exporting the Mesa env var — which would blanket-disable vsync
+/// for every GL/EGL user in the process, including the diagnostic probes in
+/// `gl.rs` — the fix is scoped to exactly the call the engine makes: force
+/// the interval Mesa actually receives to 0. `eglSwapBuffers` then returns as
+/// soon as the frame is submitted instead of waiting on a vblank source this
+/// host cannot supply. The engine still paces itself (its own `RenderJob`
+/// timing, the same mechanism that limits the Vulkan path to ~27 fps rather
+/// than an unthrottled spin), so this does not hand the engine a runaway
+/// framerate — it removes an extra, broken 1-Hz throttle underneath that
+/// pacing, on top of it.
+extern "C" fn egl_swap_interval(dpy: *mut c_void, _interval: c_int) -> u32 {
+    extern "C" {
+        fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+    }
+    let name = CString::new("eglSwapInterval").unwrap_or_default();
+    // SAFETY: RTLD_DEFAULT; libEGL is in the global scope by the time the
+    // engine reaches this call.
+    let f = unsafe { dlsym(std::ptr::null_mut(), name.as_ptr()) };
+    if f.is_null() {
+        return 0;
+    }
+    type Fn_ = extern "C" fn(*mut c_void, c_int) -> u32;
+    // SAFETY: resolved from the host for exactly this name.
+    let f: Fn_ = unsafe { std::mem::transmute(f) };
+    f(dpy, 0)
+}
+
 pub fn overrides() -> Vec<(&'static str, *mut c_void)> {
     macro_rules! f {
         ($name:literal, $fn:expr) => {
@@ -1064,5 +1116,6 @@ pub fn overrides() -> Vec<(&'static str, *mut c_void)> {
         f!("ANativeWindow_lock", native_window_lock),
         f!("ANativeWindow_unlockAndPost", native_window_unlock_and_post),
         f!("eglCreateWindowSurface", egl_create_window_surface),
+        f!("eglSwapInterval", egl_swap_interval),
     ]
 }

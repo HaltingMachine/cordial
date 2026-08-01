@@ -69,6 +69,15 @@ env:
                                      CORDIAL_FULLSCREEN overrides it
   CORDIAL_DPI_SCALE=<f>              UI density Roblox lays out against.
                                      1.0 is a low-density phone; try 1.5-2
+  CORDIAL_NO_VULKAN=1                make the host look like it has no Vulkan
+                                     loader, forcing the GLES2/EGL fallback
+                                     path Roblox uses when dlopen(libvulkan)
+                                     fails
+  CORDIAL_COUNT_GL=1                 count eglCreateWindowSurface/MakeCurrent/
+                                     SwapBuffers/glClear/Draw*/CompileShader
+                                     calls and report them after --run
+  CORDIAL_SWAP_TIMES=1               with CORDIAL_COUNT_GL=1, also print how
+                                     long each real eglSwapBuffers call blocked
 ";
 
 fn parse() -> Result<Options, String> {
