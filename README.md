@@ -107,6 +107,7 @@ will be declined.
 | Networking / HTTPS | ✅ |
 | Mouse: navigation, buttons, field focus | ✅ |
 | Typing into text fields | ❌ the last step before sign-in |
+| Audio | ❌ OpenSL ES is stubbed to report failure; nothing translates it to PipeWire yet |
 | Clean shutdown | ✅ full pause/stop/destroy sequence |
 | Stable | ✅ 26 consecutive clean launches |
 | Frame rate | ✅ ~27 fps on Vulkan, ~33 fps on GLES |
