@@ -3,12 +3,13 @@ resolver = "2"
 members = [
     "crates/cordial-linker-sys",
     "crates/cordial-runtime",
+    "crates/cordial-plugins",
 ]
 
 [workspace.package]
 version = "0.0.1"
 edition = "2021"
-license = "MIT"
+license = "GPL-3.0-or-later"  # see LICENSE; third-party notices in THIRD-PARTY-NOTICES.md
 rust-version = "1.75"
 
 [profile.release]
