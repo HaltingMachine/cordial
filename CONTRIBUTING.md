@@ -98,14 +98,18 @@ could request one. Not disabled — *absent*, so there is no primitive in the
 binary to extract or re-enable in a fork. See
 [ADR-001](docs/adr/ADR-001-in-process-hooking.md).
 
-**No overriding Roblox's own assets.** Replacing textures and sounds is the
-direct mechanism behind wallhacks and ESP, and there is no clean line inside
-Roblox's asset namespace — its built-in textures are used inside experiences.
-Plugins theme *Cordial's* surface. See
-[ADR-004](docs/adr/ADR-004-plugin-asset-overrides.md).
+**We do not endorse exploiting.** Pull requests adding an executor, or anything
+of that shape, will be declined.
 
-**We do not endorse exploiting.** Pull requests adding an executor, an asset
-override for Roblox content, or anything of that shape will be declined.
+Asset overlays used to be on this list, on the reasoning that replacing a texture
+is the mechanism behind wallhacks. That reasoning did not survive checking — a
+Roblox part is geometry with a `BasePart` colour and material, so a transparent
+material texture gives a differently shaded surface rather than a see-through
+one, and both Sober and Bloxstrap ship exactly this feature in the open. They are
+now supported, non-destructively and off by default: see
+[ADR-010](docs/adr/ADR-010-plugin-asset-overlays.md), which supersedes
+[ADR-004](docs/adr/ADR-004-plugin-asset-overrides.md). What remains refused is
+in-process injection, which is a different primitive.
 
 Also out: client-side integrity flags or watermarks, and
 obfuscation-as-security.
