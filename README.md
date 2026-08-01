@@ -148,6 +148,21 @@ To load Roblox's engine, point it at the `lib/x86_64/` objects from an installed
 cargo run --release --bin cordial-load -- --lib-dir /path/to/lib/x86_64 --host-libc
 ```
 
+To bring the client up with a window and input, add `--apk` and `--game-activity`.
+On a multi-monitor setup `CORDIAL_MONITOR=<n>` centres the window on the nth
+monitor instead of the primary one, and `CORDIAL_WINDOW_POS=<x>,<y>` overrides
+with explicit coordinates:
+
+```bash
+CORDIAL_MONITOR=1 cargo run --release --bin cordial-load -- \
+  --lib-dir /path/to/lib/x86_64 --apk /path/to/base.apk \
+  --host-libc --game-activity --run 30
+```
+
+`CORDIAL_ANDROID_TRACE=1` logs the Android API calls, which is how to tell
+whether input is reaching the engine — look for `onTouchEventNative(...) -> true`.
+`cordial-load --help` lists the rest.
+
 ## Flatpak
 
 Flatpak is the primary distribution target (spec §11).
