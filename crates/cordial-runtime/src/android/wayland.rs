@@ -204,12 +204,25 @@ const XDG_SURFACE_ACK_CONFIGURE: u32 = 4;
 //
 // Bound implicitly at the same version as `xdg_wm_base` (a toplevel's version
 // is `wl_proxy_get_version` of the surface it comes from, which comes from
-// `xdg_wm_base`), which this file binds at 1 — see `open`. Events beyond
-// `configure`/`close` (`configure_bounds` needs v4, `wm_capabilities` v5) are
-// therefore never sent by a well-behaved compositor and are left out of this
-// table entirely rather than padded with unused entries: the listener array
-// in `TOPLEVEL_LISTENER` is exactly as long as this table's `event_count`, so
-// the two can never drift apart.
+// `xdg_wm_base`), which this file binds at 1 — see `open`.
+//
+// All four events GNOME Shell's `xdg_toplevel` can send are declared here,
+// not only `configure`/`close`. An earlier version of this table left out
+// `configure_bounds` (v4) and `wm_capabilities` (v5) on the theory that
+// binding at version 1 stops a well-behaved compositor sending them — wrong,
+// measured the hard way: the Wayland backend segfaulted on the *second*
+// `xdg_toplevel` event Mutter ever sent, in `wl_closure_invoke` jumping to
+// address `0xe0`. That is what reading past the end of a too-short listener
+// array looks like — `dispatch_event` indexes `TOPLEVEL_LISTENER` by the
+// wire opcode with no bounds check of its own, so the *n*-th declared event
+// is a contract with the compositor, not a hint, and Mutter does send
+// `wm_capabilities` to a version-1 toplevel the moment it has real content to
+// show it around (which nothing did before the Vulkan `currentExtent` fix
+// nearby in `vulkan.rs` — that is why this was never hit until now). The
+// listener array in `TOPLEVEL_LISTENER` is exactly as long as this table's
+// `event_count`, so the two can never drift apart; both new handlers are
+// no-ops for the same reason `close` already was — nothing here currently
+// reads window bounds or reacts to capability changes.
 
 static XDG_TOPLEVEL_METHODS: [WlMessage; 14] = [
     WlMessage { name: c"destroy".as_ptr(), signature: c"".as_ptr(), types: NO_TYPES.0.as_ptr() },
@@ -271,20 +284,30 @@ static XDG_TOPLEVEL_METHODS: [WlMessage; 14] = [
         types: NO_TYPES.0.as_ptr(),
     },
 ];
-static XDG_TOPLEVEL_EVENTS: [WlMessage; 2] = [
+static XDG_TOPLEVEL_EVENTS: [WlMessage; 4] = [
     WlMessage {
         name: c"configure".as_ptr(),
         signature: c"iia".as_ptr(),
         types: NO_TYPES.0.as_ptr(),
     },
     WlMessage { name: c"close".as_ptr(), signature: c"".as_ptr(), types: NO_TYPES.0.as_ptr() },
+    WlMessage {
+        name: c"configure_bounds".as_ptr(),
+        signature: c"ii".as_ptr(),
+        types: NO_TYPES.0.as_ptr(),
+    },
+    WlMessage {
+        name: c"wm_capabilities".as_ptr(),
+        signature: c"a".as_ptr(),
+        types: NO_TYPES.0.as_ptr(),
+    },
 ];
 static XDG_TOPLEVEL_INTERFACE: WlInterface = WlInterface {
     name: c"xdg_toplevel".as_ptr(),
     version: 1,
     method_count: 14,
     methods: XDG_TOPLEVEL_METHODS.as_ptr(),
-    event_count: 2,
+    event_count: 4,
     events: XDG_TOPLEVEL_EVENTS.as_ptr(),
 };
 
@@ -590,7 +613,24 @@ struct RegistryListener {
     global_remove: unsafe extern "C" fn(*mut c_void, *mut c_void, u32),
 }
 
-#[repr(C)]
+// `wl_pointer_interface`/`wl_keyboard_interface` (below) are `dlsym`'d from
+// the host's real `libwayland-client.so`, not hand-written like the
+// `xdg_shell`/`text-input` tables elsewhere in this file — so their
+// `event_count` is whatever the *host's* library version really declares,
+// not whatever this file happens to have a listener field for.
+// `dispatch_event` indexes the listener array `wl_proxy_add_listener` was
+// given by the wire opcode with no bounds check of its own, so every one of
+// wl_seat's core-protocol interfaces needs its *complete, current* event set
+// declared here regardless of which `wl_seat` version this file requests —
+// see `XDG_TOPLEVEL_EVENTS`'s own comment for the exact crash (`wl_closure_
+// invoke` jumping to a small garbage address) this same mistake produces, and
+// why "the compositor won't send events past the version I bound" turned out
+// not to hold on GNOME Shell. `PointerListener` was previously missing
+// `frame`/`axis_source`/`axis_stop`/`axis_discrete`/`axis_value120`/
+// `axis_relative_direction` (added in `wl_pointer` v5, v5, v5, v5, v8, v9);
+// `KeyboardListener` below was missing `repeat_info` (`wl_keyboard` v4). Every
+// new field here is a genuine no-op — none of scroll-wheel batching, event
+// framing, or key-repeat timing is implemented — but the slot has to exist.
 #[repr(C)]
 struct PointerListener {
     enter: unsafe extern "C" fn(*mut c_void, *mut c_void, u32, *mut c_void, i32, i32),
@@ -598,6 +638,12 @@ struct PointerListener {
     motion: unsafe extern "C" fn(*mut c_void, *mut c_void, u32, i32, i32),
     button: unsafe extern "C" fn(*mut c_void, *mut c_void, u32, u32, u32, u32),
     axis: unsafe extern "C" fn(*mut c_void, *mut c_void, u32, u32, i32),
+    frame: unsafe extern "C" fn(*mut c_void, *mut c_void),
+    axis_source: unsafe extern "C" fn(*mut c_void, *mut c_void, u32),
+    axis_stop: unsafe extern "C" fn(*mut c_void, *mut c_void, u32, u32),
+    axis_discrete: unsafe extern "C" fn(*mut c_void, *mut c_void, u32, i32),
+    axis_value120: unsafe extern "C" fn(*mut c_void, *mut c_void, u32, i32),
+    axis_relative_direction: unsafe extern "C" fn(*mut c_void, *mut c_void, u32, u32),
 }
 
 /// `struct wl_array` (`wayland-util.h`): `{ size_t size; size_t alloc; void
@@ -619,6 +665,7 @@ struct KeyboardListener {
     leave: unsafe extern "C" fn(*mut c_void, *mut c_void, u32, *mut c_void),
     key: unsafe extern "C" fn(*mut c_void, *mut c_void, u32, u32, u32, u32),
     modifiers: unsafe extern "C" fn(*mut c_void, *mut c_void, u32, u32, u32, u32, u32),
+    repeat_info: unsafe extern "C" fn(*mut c_void, *mut c_void, i32, i32),
 }
 
 #[repr(C)]
@@ -635,6 +682,13 @@ struct XdgSurfaceListener {
 struct ToplevelListener {
     configure: unsafe extern "C" fn(*mut c_void, *mut c_void, i32, i32, *const WlArray),
     close: unsafe extern "C" fn(*mut c_void, *mut c_void),
+    // Order matches `XDG_TOPLEVEL_EVENTS` exactly — `dispatch_event` indexes
+    // this struct by wire opcode, so a listener struct shorter than the
+    // interface's declared `event_count` is read out of bounds the moment the
+    // compositor sends the (n+1)-th event type. See that table's own comment
+    // for what happened when this struct only had the first two fields.
+    configure_bounds: unsafe extern "C" fn(*mut c_void, *mut c_void, i32, i32),
+    wm_capabilities: unsafe extern "C" fn(*mut c_void, *mut c_void, *const WlArray),
 }
 
 #[repr(C)]
@@ -833,19 +887,34 @@ unsafe extern "C" fn wm_base_ping(_data: *mut c_void, wm_base: *mut c_void, seri
 }
 static WM_BASE_LISTENER: WmBaseListener = WmBaseListener { ping: wm_base_ping };
 
-/// Fired only during the initial handshake in `open()`, before `WINDOW` is
-/// populated — `data` carries the pending state directly rather than going
-/// through `current()`, which would be `None` at this point.
-unsafe extern "C" fn initial_xdg_surface_configure(
-    data: *mut c_void,
-    _xdg_surface: *mut c_void,
-    serial: u32,
-) {
-    *(data as *mut Option<u32>) = Some(serial);
-}
+/// The very first `xdg_surface.configure`, received during `open()`'s initial
+/// handshake before `WINDOW` exists for `current()` to find. This one
+/// listener is registered exactly once and left alone for the life of the
+/// proxy — see this function's own branch below for why.
+static INITIAL_XDG_SURFACE_SERIAL: Mutex<Option<u32>> = Mutex::new(None);
 
 unsafe extern "C" fn xdg_surface_configure(data: *mut c_void, xdg_surface: *mut c_void, serial: u32) {
-    let Some(w) = current() else { return };
+    let Some(w) = current() else {
+        // Still inside `open()`'s initial handshake: there is no `WaylandWindow`
+        // yet to ack through or resize, only a serial for `open()` itself to
+        // read back out and ack once construction finishes. This one listener
+        // covers both phases *on purpose* — `wl_proxy_add_listener` was
+        // originally called a second time here, to swap in a steady-state
+        // listener once `WINDOW` existed, and that second call silently
+        // returns `-1` and changes nothing (confirmed: logged the return code
+        // directly, `-1` every time). The dangling stack listener from the
+        // first call — a local in `open()`, never actually replaced — stayed
+        // registered after `open()` returned and its stack frame was reused,
+        // so the *next* real `xdg_surface.configure` (any resize after the
+        // initial handshake) read whatever garbage now occupied that stack
+        // slot as a function pointer and jumped to it: `wl_closure_invoke`
+        // segfaulting at a small address (`0xe0`, i.e. some unrelated local's
+        // bytes misread as code). One listener, registered once, for the
+        // whole life of the proxy, is the fix — not a bigger one.
+        let _ = data;
+        *INITIAL_XDG_SURFACE_SERIAL.lock().unwrap_or_else(|e| e.into_inner()) = Some(serial);
+        return;
+    };
     let (width, height) = {
         let mut pending = w.pending_configure.lock().unwrap_or_else(|e| e.into_inner());
         match pending.take() {
@@ -899,8 +968,34 @@ unsafe extern "C" fn toplevel_close(_data: *mut c_void, _toplevel: *mut c_void) 
     // called out explicitly rather than left to be discovered as a silent gap.
     super::trace(format_args!("wayland: xdg_toplevel.close received; not handled, window stays open"));
 }
-static TOPLEVEL_LISTENER: ToplevelListener =
-    ToplevelListener { configure: toplevel_configure, close: toplevel_close };
+
+// `configure_bounds`/`wm_capabilities` (v4/v5 additions to `xdg_toplevel`) —
+// declared and dispatched to, per the table's own comment on why a listener
+// slot must exist for every event `XDG_TOPLEVEL_EVENTS` declares, but
+// genuine no-ops: nothing here currently constrains window size to the
+// compositor's suggested bounds or reacts to capability changes (fullscreen/
+// maximize/minimize support, which Cordial does not offer toggles for
+// regardless).
+unsafe extern "C" fn toplevel_configure_bounds(
+    _data: *mut c_void,
+    _toplevel: *mut c_void,
+    _width: i32,
+    _height: i32,
+) {
+}
+unsafe extern "C" fn toplevel_wm_capabilities(
+    _data: *mut c_void,
+    _toplevel: *mut c_void,
+    _capabilities: *const WlArray,
+) {
+}
+
+static TOPLEVEL_LISTENER: ToplevelListener = ToplevelListener {
+    configure: toplevel_configure,
+    close: toplevel_close,
+    configure_bounds: toplevel_configure_bounds,
+    wm_capabilities: toplevel_wm_capabilities,
+};
 
 /// `WM_CLASS`'s Wayland equivalent — must keep matching `StartupWMClass` in
 /// `packaging/org.cordial.Cordial.desktop`, same reasoning and the same test
@@ -1067,32 +1162,30 @@ pub fn open(width: u32, height: u32, title: &str) -> Result<&'static WaylandWind
     }
 
     // The initial null commit — no buffer attached — that triggers the first
-    // configure. Its listener writes into a stack-local `Option<u32>` because
-    // `WINDOW` does not exist yet for the steady-state listener to reach via
-    // `current()`.
-    let mut initial_serial: Option<u32> = None;
+    // configure. `XDG_SURFACE_LISTENER` is registered here once, for the
+    // proxy's whole lifetime — see `xdg_surface_configure`'s own comment for
+    // why a second `wl_proxy_add_listener` call to swap in a "steady-state"
+    // listener, once `WINDOW` existed, was a real crash (`wl_proxy_add_listener`
+    // returns `-1` and changes nothing on a proxy that already has one) and not
+    // just an unnecessary one. The initial serial is read back out of
+    // `INITIAL_XDG_SURFACE_SERIAL`, which that same unified listener writes to
+    // whenever `current()` is still `None`.
     unsafe {
-        let listener = XdgSurfaceListener { configure: initial_xdg_surface_configure };
-        (wl.add_listener)(
-            xdg_surface,
-            &listener as *const XdgSurfaceListener as *const c_void,
-            &mut initial_serial as *mut Option<u32> as *mut c_void,
-        );
-        (wl.marshal_flags)(surface, WL_SURFACE_COMMIT, std::ptr::null(), 1, 0);
-        if (wl.roundtrip)(display) < 0 {
-            return Err("wl_display_roundtrip failed waiting for the initial configure".into());
-        }
-        let Some(serial) = initial_serial else {
-            return Err("compositor never sent the initial xdg_surface.configure".into());
-        };
-        (wl.marshal_flags)(xdg_surface, XDG_SURFACE_ACK_CONFIGURE, std::ptr::null(), 1, 0, serial);
-        // Swap to the steady-state listener now that a real ack has gone out
-        // and `WINDOW` is about to be populated.
         (wl.add_listener)(
             xdg_surface,
             &XDG_SURFACE_LISTENER as *const XdgSurfaceListener as *const c_void,
             std::ptr::null_mut(),
         );
+        (wl.marshal_flags)(surface, WL_SURFACE_COMMIT, std::ptr::null(), 1, 0);
+        if (wl.roundtrip)(display) < 0 {
+            return Err("wl_display_roundtrip failed waiting for the initial configure".into());
+        }
+        let Some(serial) =
+            INITIAL_XDG_SURFACE_SERIAL.lock().unwrap_or_else(|e| e.into_inner()).take()
+        else {
+            return Err("compositor never sent the initial xdg_surface.configure".into());
+        };
+        (wl.marshal_flags)(xdg_surface, XDG_SURFACE_ACK_CONFIGURE, std::ptr::null(), 1, 0, serial);
         (wl.add_listener)(
             xdg_toplevel,
             &TOPLEVEL_LISTENER as *const ToplevelListener as *const c_void,
@@ -1400,6 +1493,21 @@ unsafe extern "C" fn pointer_button(
 /// button 4/5 — Android wants `ACTION_SCROLL` with an axis value, which
 /// nothing on either backend constructs yet.
 unsafe extern "C" fn pointer_axis(_data: *mut c_void, _pointer: *mut c_void, _time: u32, _axis: u32, _value: i32) {}
+// `frame`/`axis_source`/`axis_stop`/`axis_discrete`/`axis_value120`/
+// `axis_relative_direction` — see `PointerListener`'s own comment for why
+// these slots must exist even though scroll is not implemented at all yet.
+unsafe extern "C" fn pointer_frame(_data: *mut c_void, _pointer: *mut c_void) {}
+unsafe extern "C" fn pointer_axis_source(_data: *mut c_void, _pointer: *mut c_void, _axis_source: u32) {}
+unsafe extern "C" fn pointer_axis_stop(_data: *mut c_void, _pointer: *mut c_void, _time: u32, _axis: u32) {}
+unsafe extern "C" fn pointer_axis_discrete(_data: *mut c_void, _pointer: *mut c_void, _axis: u32, _discrete: i32) {}
+unsafe extern "C" fn pointer_axis_value120(_data: *mut c_void, _pointer: *mut c_void, _axis: u32, _value120: i32) {}
+unsafe extern "C" fn pointer_axis_relative_direction(
+    _data: *mut c_void,
+    _pointer: *mut c_void,
+    _axis: u32,
+    _direction: u32,
+) {
+}
 
 static POINTER_LISTENER: PointerListener = PointerListener {
     enter: pointer_enter,
@@ -1407,6 +1515,12 @@ static POINTER_LISTENER: PointerListener = PointerListener {
     motion: pointer_motion,
     button: pointer_button,
     axis: pointer_axis,
+    frame: pointer_frame,
+    axis_source: pointer_axis_source,
+    axis_stop: pointer_axis_stop,
+    axis_discrete: pointer_axis_discrete,
+    axis_value120: pointer_axis_value120,
+    axis_relative_direction: pointer_axis_relative_direction,
 };
 
 // ----------------------------------------------------------------- keyboard
@@ -1534,12 +1648,19 @@ unsafe extern "C" fn keyboard_modifiers(
     }
 }
 
+// `repeat_info` — see `KeyboardListener`'s own comment on `PointerListener`
+// for why this slot must exist; key-repeat cadence is not implemented, this
+// file relies on whatever repeat the host's own input layer already applies
+// before events reach `wl_keyboard.key`.
+unsafe extern "C" fn keyboard_repeat_info(_data: *mut c_void, _kb: *mut c_void, _rate: i32, _delay: i32) {}
+
 static KEYBOARD_LISTENER: KeyboardListener = KeyboardListener {
     keymap: keyboard_keymap,
     enter: keyboard_enter,
     leave: keyboard_leave,
     key: keyboard_key,
     modifiers: keyboard_modifiers,
+    repeat_info: keyboard_repeat_info,
 };
 
 impl WaylandWindow {

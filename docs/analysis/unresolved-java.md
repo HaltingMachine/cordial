@@ -186,14 +186,16 @@ appear to have blocked anything in this run, only logged noise. Flagging it so a
 waste time chasing it as a suspect; not claiming to understand the exact libjnivm mechanism that
 makes it work anyway.
 
-### 2f. AGDK / GameActivity window-inset and lifecycle extras — not yet exercised
+### 2f. AGDK / GameActivity window-inset and lifecycle extras — partially resolved since
 
-Pre-cached at `JNI_OnLoad`/`initializeNativeCode` time (registering native methods that reference
-these types), no "Call"/"Invoked" line for any of them in this run:
+**`setImeEditorInfoFields(III)V` and `setWindowFlags(II)V` are implemented** (as no-op
+`HookInstanceFunction`s on `GameActivity` in `native/game_activity.cpp`) and confirmed resolving
+cleanly in a later run — see `docs/NEXT.md` §1's "AGDK's `InputConnection`" subsection. The other
+three below were not touched and remain accurate as "not yet exercised":
 
 | Class | Members |
 |---|---|
-| `com/google/androidgamesdk/GameActivity` | `finish()V`, `setWindowFlags(II)V`, `getWindowInsets(I)Landroidx/core/graphics/Insets;`, `getWaterfallInsets()Landroidx/core/graphics/Insets;`, `setImeEditorInfoFields(III)V` |
+| `com/google/androidgamesdk/GameActivity` | `finish()V`, `getWindowInsets(I)Landroidx/core/graphics/Insets;`, `getWaterfallInsets()Landroidx/core/graphics/Insets;` |
 | `androidx/core/graphics/Insets` | fields `left`, `right`, `top`, `bottom` (all `I`) |
 | `androidx/core/view/WindowInsetsCompat$Type` | static `captionBar/displayCutout/ime/mandatorySystemGestures/navigationBars/statusBars/systemBars/systemGestures/tappableElement`, all `()I` |
 
@@ -232,15 +234,24 @@ documents as authoritative; this Java-side object is probably read once by AGDK'
 value it caches, and 0-valued defaults have not visibly broken anything downstream in this run.
 Not verified further — flagged as low-priority rather than cleared.
 
-### 2i. `com/google/androidgamesdk/gametextinput/{State,InputConnection}` — IME, not yet exercised
+### 2i. `com/google/androidgamesdk/gametextinput/{State,InputConnection}` — implemented since
+
+**Correction: this was found to matter, and is now implemented**, not merely something that would
+matter "once exercised" — a later run's jnivm log showed the engine reaching for these on `Constructed
+Unresolved symbol` during ordinary bring-up, not only inside a hypothetical on-screen-keyboard path.
+See `docs/NEXT.md` §1's "AGDK's `InputConnection`" subsection for the full account: `InputConnection`
+is now a real class in `native/game_activity.cpp`, constructed once and registered with the engine via
+`GameActivity.setInputConnectionNative`, with `setState`/`setSoftKeyboardActive`/`restartInput`
+implemented as real instance-method hooks rather than left unresolved. `State` was already implemented
+here as `TextInputState` (same file) before this was written.
 
 | Class | Member | Signature |
 |---|---|---|
 | `InputConnection` | `setState`, `setSoftKeyboardActive`, `restartInput` | `(Lcom/google/androidgamesdk/gametextinput/State;)V`, `(ZI)V`, `()V` |
 | `State` | `text, selectionStart, selectionEnd, composingRegionStart, composingRegionEnd` | `Ljava/lang/String;`, `I` x4 |
 
-Only matters once the on-screen keyboard / text box path is exercised — desktop input generally
-bypasses this per the design note already in `android_classes.cpp`.
+Resolving cleanly is confirmed; whether `setState` actually changes what appears in a typed field is
+not yet — see `docs/NEXT.md` §1 for exactly what is and is not verified.
 
 ## 3. Top 5 most likely to be blocking progress
 

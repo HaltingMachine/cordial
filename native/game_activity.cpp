@@ -18,6 +18,7 @@
 
 #include <jnivm.h>
 
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <memory>
@@ -119,10 +120,22 @@ public:
 /// `com.google.androidgamesdk.GameActivity`, as an object to pass as `thiz`.
 class GameActivity : public Object {
 public:
+    // Both genuine no-ops rather than missing hooks: the engine calls these
+    // as part of the same IME bring-up as `InputConnection` below
+    // (`setImeEditorInfoFields` right after constructing the editor info,
+    // `setWindowFlags` for soft-input-mode-style window flags), and an
+    // unresolved call here risks the same silent pending-exception hazard
+    // `NativeTextBoxInfo`'s doc comment describes — resolving is the point,
+    // not what either does with its arguments, which Cordial has no window
+    // manager flags or `EditorInfo` layout to apply.
+    void setImeEditorInfoFields(ENV*, jint, jint, jint) {}
+    void setWindowFlags(ENV*, jint, jint) {}
 
     static void Register(ENV* env) {
         env->GetClass<GameActivity>("com/google/androidgamesdk/GameActivity");
         auto c = env->GetClass("com/google/androidgamesdk/GameActivity");
+        c->HookInstanceFunction(env, "setImeEditorInfoFields", &GameActivity::setImeEditorInfoFields);
+        c->HookInstanceFunction(env, "setWindowFlags", &GameActivity::setWindowFlags);
     }
 };
 
@@ -290,6 +303,129 @@ public:
     }
 };
 
+// -------------------------------------------------------------- IME (outbound)
+//
+// `docs/NEXT.md` §1 traced text entry to AGDK's *inbound* path
+// (`onTextInputEventNative`, above) being accepted and ignored by Roblox's own
+// interface, and concluded AGDK was not otherwise involved. That conclusion
+// was half right: `onTextInputEventNative` genuinely does nothing useful, but
+// a live run's jnivm log shows the engine separately reaching for
+// `InputConnection.setState`/`setSoftKeyboardActive`/`restartInput` — the
+// *outbound* half, engine calling out — and getting `Constructed Unresolved
+// symbol` every time, because nothing here had ever constructed an
+// `InputConnection` for it to call. That is a different failure from a call
+// that runs and is ignored, and it is what `InputConnection` below answers.
+//
+// State is kept exactly like the existing `g_textbox_*` globals in
+// `android_classes.cpp` — written from the engine's thread inside `setState`,
+// read from the input thread — because `setState` and `showKeyboard` are
+// answering two different questions (what the field's own editing state is,
+// versus which field has focus) and conflating their storage would make a
+// future bug in one look like a bug in the other.
+namespace {
+std::mutex g_ime_mutex;
+std::string g_ime_text;
+int g_ime_selection_start = 0;
+int g_ime_selection_end = 0;
+int g_ime_composing_start = -1;
+int g_ime_composing_end = -1;
+/// Bumped on every `setState`/`restartInput`, the same reasoning as
+/// `g_textbox_generation`: lets a reader tell "the engine pushed new state"
+/// from "nothing changed" without comparing the state itself.
+std::atomic<unsigned> g_ime_state_generation{0};
+std::atomic<int> g_ime_soft_keyboard_active{0};
+} // namespace
+
+extern "C" void cordial_ime_set_state(const char* text, int sel_start, int sel_end,
+                                      int comp_start, int comp_end) {
+    if (getenv("CORDIAL_TRACE_TEXT")) {
+        fprintf(stderr,
+                "[cordial] InputConnection.setState text=%zu bytes sel=[%d,%d) composing=[%d,%d)\n",
+                text ? strlen(text) : 0, sel_start, sel_end, comp_start, comp_end);
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_ime_mutex);
+        g_ime_text = text ? text : "";
+        g_ime_selection_start = sel_start;
+        g_ime_selection_end = sel_end;
+        g_ime_composing_start = comp_start;
+        g_ime_composing_end = comp_end;
+    }
+    g_ime_state_generation.fetch_add(1, std::memory_order_acq_rel);
+}
+
+extern "C" void cordial_ime_set_soft_keyboard_active(int active, int flags) {
+    if (getenv("CORDIAL_TRACE_TEXT")) {
+        fprintf(stderr, "[cordial] InputConnection.setSoftKeyboardActive(%d, flags=%d)\n", active, flags);
+    }
+    g_ime_soft_keyboard_active.store(active, std::memory_order_release);
+}
+
+extern "C" void cordial_ime_restart_input() {
+    if (getenv("CORDIAL_TRACE_TEXT")) {
+        fprintf(stderr, "[cordial] InputConnection.restartInput\n");
+    }
+    // `restartInput` means "forget whatever editing session was in progress",
+    // which is exactly what bumping the generation without changing the
+    // stored text achieves: the next read reseeds against the *next*
+    // `setState`, not against state that is now stale.
+    g_ime_state_generation.fetch_add(1, std::memory_order_acq_rel);
+}
+
+/// Read-side, for `crates/cordial-linker-sys` to expose to `android::input`.
+extern "C" unsigned cordial_ime_state_generation() {
+    return g_ime_state_generation.load(std::memory_order_acquire);
+}
+extern "C" int cordial_ime_soft_keyboard_active() {
+    return g_ime_soft_keyboard_active.load(std::memory_order_acquire);
+}
+extern "C" int cordial_ime_state_text(char* buf, int n) {
+    if (!buf || n <= 0) return 0;
+    std::lock_guard<std::mutex> lock(g_ime_mutex);
+    int len = static_cast<int>(g_ime_text.size());
+    if (len > n - 1) len = n - 1;
+    memcpy(buf, g_ime_text.data(), static_cast<size_t>(len));
+    buf[len] = '\0';
+    return len;
+}
+extern "C" void cordial_ime_state_selection(int* start, int* end) {
+    std::lock_guard<std::mutex> lock(g_ime_mutex);
+    if (start) *start = g_ime_selection_start;
+    if (end) *end = g_ime_selection_end;
+}
+
+/// `com.google.androidgamesdk.gametextinput.InputConnection`
+///
+/// The object the engine calls `setState`/`setSoftKeyboardActive`/
+/// `restartInput` on. On real Android this is constructed by `GameActivity`'s
+/// Java side inside `onCreateInputConnection` and handed to native code via
+/// `setInputConnectionNative`; Cordial has no Android view system to trigger
+/// that callback, so `cordial_game_activity_set_input_connection` (below)
+/// constructs one directly and drives `setInputConnectionNative` itself,
+/// simulating what the platform would have done. One instance for the
+/// process's life, the same reasoning as `shared_activity`/`shared_surface`.
+class InputConnection : public Object {
+public:
+    void setState(ENV*, std::shared_ptr<TextInputState> state) {
+        if (!state) return;
+        std::string text = state->text ? static_cast<std::string>(*state->text) : std::string();
+        cordial_ime_set_state(text.c_str(), state->selectionStart, state->selectionEnd,
+                              state->composingRegionStart, state->composingRegionEnd);
+    }
+    void setSoftKeyboardActive(ENV*, jboolean active, jint flags) {
+        cordial_ime_set_soft_keyboard_active(active ? 1 : 0, flags);
+    }
+    void restartInput(ENV*) { cordial_ime_restart_input(); }
+
+    static void Register(ENV* env) {
+        env->GetClass<InputConnection>("com/google/androidgamesdk/gametextinput/InputConnection");
+        auto c = env->GetClass("com/google/androidgamesdk/gametextinput/InputConnection");
+        c->HookInstanceFunction(env, "setState", &InputConnection::setState);
+        c->HookInstanceFunction(env, "setSoftKeyboardActive", &InputConnection::setSoftKeyboardActive);
+        c->HookInstanceFunction(env, "restartInput", &InputConnection::restartInput);
+    }
+};
+
 class KeyEvent : public Object {
 public:
     jint deviceId = 1;
@@ -380,6 +516,20 @@ std::shared_ptr<jnivm::Object>& shared_surface(ENV* env, bool make_new) {
     }
     return surface;
 }
+
+/// The single `InputConnection` handed to `setInputConnectionNative`, for the
+/// same reason `shared_activity` is single: the engine holds a reference to
+/// whichever object it was given and calls back on it for the rest of the
+/// session, so a second, different instance later would mean any state the
+/// engine associates with the first is silently orphaned.
+std::shared_ptr<InputConnection>& shared_input_connection(ENV* env) {
+    static std::shared_ptr<InputConnection> ic;
+    if (!ic) {
+        ic = std::make_shared<InputConnection>();
+        to_jni(env, ic);
+    }
+    return ic;
+}
 } // namespace
 
 void register_game_activity_classes(ENV* env) {
@@ -390,6 +540,7 @@ void register_game_activity_classes(ENV* env) {
     MotionEvent::Register(env);
     KeyEvent::Register(env);
     TextInputState::Register(env);
+    InputConnection::Register(env);
 }
 
 } // namespace cordial
@@ -756,6 +907,54 @@ int cordial_game_activity_text_input(long handle, const char* text, int sel_star
         using Call = void (*)(JNIEnv*, jobject, jlong, jobject);
         reinterpret_cast<Call>(it->second)(jni, (jobject)cordial::to_jni(env, cordial::shared_activity(env)), (jlong)handle,
                                            (jobject)cordial::to_jni(env, state));
+        return 0;
+    } catch (const std::exception& e) {
+        snprintf(err, err_len, "%s", e.what());
+        return -1;
+    } catch (...) {
+        snprintf(err, err_len, "non-standard C++ exception");
+        return -1;
+    }
+}
+
+/// `GameActivity.setInputConnectionNative(J, InputConnection)`.
+///
+/// On real Android, Java calls this once — from inside `onCreateInputConnection`,
+/// with the `InputConnection` it just built — to hand native code a reference it
+/// then calls back through for the rest of the session. Cordial has no view
+/// system to trigger that callback, so this drives it directly: construct one
+/// `InputConnection` (see `cordial::shared_input_connection`'s doc for why it is
+/// one, kept alive for the process) and call the native the same way Java would
+/// have. Meant to run once, early — see the call site in `load.rs` — not per
+/// frame.
+///
+/// Returns 0 on success, -1 on error (`err` populated), or -2 if
+/// `setInputConnectionNative` has not been registered yet, the same
+/// not-yet-vs-failed distinction `touch`/`key` make.
+int cordial_game_activity_set_input_connection(long handle, char* err, size_t err_len) {
+    auto* env = cordial::process_env();
+    if (!env || handle == 0) {
+        snprintf(err, err_len, "no JavaVM, or no native handle");
+        return -1;
+    }
+    try {
+        JNIEnv* jni = env->GetJNIEnv();
+        auto cls = env->GetClass("com/google/androidgamesdk/GameActivity");
+        if (!cls) {
+            snprintf(err, err_len, "GameActivity class is not registered");
+            return -1;
+        }
+        auto it = cls->natives.find("setInputConnectionNative");
+        if (it == cls->natives.end()) {
+            snprintf(err, err_len, "setInputConnectionNative was never registered");
+            return -2;
+        }
+        auto ic = cordial::shared_input_connection(env);
+
+        using Call = void (*)(JNIEnv*, jobject, jlong, jobject);
+        reinterpret_cast<Call>(it->second)(
+            jni, (jobject)cordial::to_jni(env, cordial::shared_activity(env)), (jlong)handle,
+            (jobject)cordial::to_jni(env, ic));
         return 0;
     } catch (const std::exception& e) {
         snprintf(err, err_len, "%s", e.what());
