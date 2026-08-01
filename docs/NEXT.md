@@ -167,6 +167,55 @@ One correction that came out of it: the `The requested Ids are invalid`
 thumbnail failure is what the **real, logged-out Android client** also produces.
 It is not a Cordial defect and it is not evidence of anything.
 
+## 2b. Audio never initialises before sign-in, and AAudio is not why
+
+The OpenSL ES backend over PipeWire works in a standalone harness and has never
+been seen carrying a single sample through the real client. The reason is not a
+bug in it.
+
+**Roblox makes exactly one `dlopen` in a 75-second run to the Landing screen:**
+
+```text
+[cordial] dlopen(libroblox.so) -> ok in 21896us
+```
+
+That is Cordial's own load. `CORDIAL_TRACE_DLOPEN=1` reports every request and
+how long it took. Nothing else is asked for — no audio backend, and no
+`libvulkan.so` either, which is the control: with no `flags.json` the engine
+picks GLES, so the absence of a Vulkan request confirms the trace catches real
+calls rather than missing them.
+
+**The AAudio-preference theory does not survive the linkage.** `strings` shows
+`FmodFallbackAaudioToOpensl`, and FMOD does prefer AAudio. But:
+
+| | |
+|---|---|
+| `libOpenSLES.so` | in `DT_NEEDED` — *linked*, so `slCreateEngine` is directly callable and needs no `dlopen` at all |
+| `libaaudio.so` | not in `DT_NEEDED`, and **zero** `AAudio*` undefined symbols |
+
+So AAudio is reachable only through `dlopen`, and that `dlopen` never happens.
+FMOD's backend selection has not run. Cordial providing a `libaaudio.so`, or not
+providing one, cannot currently make any difference — there is nothing to fall
+back *from*.
+
+**Therefore audio initialisation is lazy, not eager**, and reaching the
+logged-out Landing screen is not enough to observe it. Verifying the PipeWire
+path through the real client needs something that actually plays a sound, which
+means getting past sign-in. It is blocked on §1, not on itself.
+
+**Do not re-run:** adding a virtual `libaaudio.so` to make FMOD fall back. There
+is no evidence FMOD has initialised, and the fallback string is not evidence that
+it has.
+
+**Voice chat is a different path and is not covered by any of this.** The
+real-Android capture has `MainScreenController: Initializing RTC audio manager`
+during startup — that is WebRTC, separate from FMOD, and it is the only audio
+line in the whole capture. FMOD does not log to logcat at all, which is why the
+capture cannot answer the eager-versus-lazy question and the `dlopen` trace had
+to. Note also that `SL_IID_RECORD` is among the referenced symbols and
+`native/opensles.cpp` deliberately refuses recorder creation: correct for now,
+and exactly what voice chat will need implemented later.
+
 ## 3. Plugins: running, but with three methods
 
 `crates/cordial-plugins` has capabilities, a broker, manifests, user grants and a

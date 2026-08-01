@@ -6,7 +6,10 @@
 
 #include <mcpelauncher/linker.h>
 
+#include <chrono>
 #include <cstddef>
+#include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <unordered_map>
 
@@ -32,7 +35,26 @@ void cordial_linker_update_ld_library_path(const char* path) {
 }
 
 void* cordial_linker_dlopen(const char* filename, int flags) {
-    return linker::dlopen(filename, flags);
+    // `CORDIAL_TRACE_DLOPEN=1` reports every request and how long it took.
+    //
+    // Roblox reaches several subsystems this way rather than through DT_NEEDED
+    // — Vulkan is the known one — so this is the only place that shows which
+    // optional backends it actually looks for, and whether a miss fails
+    // promptly. FMOD's Android output prefers AAudio and falls back to OpenSL
+    // ES; if that fallback depends on `dlopen("libaaudio.so")` failing fast,
+    // a slow or hanging miss would be a real bug rather than a cosmetic one.
+    static const bool trace = getenv("CORDIAL_TRACE_DLOPEN") != nullptr;
+    if (!trace) {
+        return linker::dlopen(filename, flags);
+    }
+    auto start = std::chrono::steady_clock::now();
+    void* h = linker::dlopen(filename, flags);
+    auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+                  std::chrono::steady_clock::now() - start)
+                  .count();
+    fprintf(stderr, "[cordial] dlopen(%s) -> %s in %lldus\n", filename ? filename : "(null)",
+            h ? "ok" : "NULL", (long long)us);
+    return h;
 }
 
 void* cordial_linker_dlsym(void* handle, const char* symbol) {
