@@ -37,7 +37,7 @@ It has still only existed for two days.
 > **If your account matters to you, do not use it here.** If you use Cordial and
 > get banned, that is on you, and the maintainers cannot get it reversed.
 
-## Status: early. It runs, it draws, it is not yet usable.
+## Status: early. It runs and draws; you cannot sign in yet.
 
 | | |
 |---|---|
@@ -47,13 +47,17 @@ It has still only existed for two days.
 | Networking / HTTPS | ✅ |
 | Mouse and keyboard reach the engine | ✅ |
 | Stable | ✅ 26 consecutive clean launches |
-| Playable frame rate | ❌ about 1 fps |
+| Frame rate | ✅ ~27 fps steady on Vulkan (GLES fallback is much slower) |
 | Signed in | ❌ not implemented |
 | Plugins | ❌ designed, not built |
 
-The remaining blocker is a render loop that ticks about once a second. It is
-characterised in [`docs/NEXT.md`](docs/NEXT.md) along with the explanations that
-were tested and ruled out.
+Measured with `vkQueuePresentKHR`: 656, 656 and 655 presents over 24 s across
+three runs, unchanged by injected input — so it renders continuously rather than
+on demand. The GLES fallback path is far slower (about 1 fps) and is a separate
+open problem for hosts without Vulkan; see [`docs/NEXT.md`](docs/NEXT.md).
+
+The blocker now is sign-in. Without a session the client sits on the logged-out
+landing page, so there is nothing much to do with it.
 
 **Do not install this expecting to play Roblox.** Install it if you want to work
 on it.

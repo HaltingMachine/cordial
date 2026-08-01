@@ -200,7 +200,28 @@ Note this invalidates any earlier claim in the history that the client "stays up
 for twelve seconds" — that was measured on a run of successes and the failure
 rate was not sampled.
 
-## Blocker 2: about 1 fps
+## Corrected: the frame rate was a measurement error on Vulkan, and a real
+## problem on GLES
+
+Vulkan renders at **about 27 fps, steady** — 656, 656 and 655 presents over 24 s,
+unchanged by injected input, so it is a continuous loop and not render-on-demand.
+
+The "1 fps" that this file previously called the blocker was measured with
+`eglSwapBuffers`. Two things were wrong with that:
+
+- Once Vulkan landed it became the default renderer, and a Vulkan session leaves
+  every GLES counter at zero. Reading zero as "nothing is drawing" is exactly the
+  mistake the counter was added to prevent, and it was made anyway.
+- The `vkQueuePresentKHR` counter added to replace it *also* read zero, because
+  device-level entry points are resolved through `vkGetDeviceProcAddr`, not
+  `vkGetInstanceProcAddr`. The shim only intercepted the instance getter. Fixed.
+
+**What survives as a real problem:** the GLES path genuinely was about 1 fps
+(20 swaps in 20 s, repeatedly). That matters for any host without Vulkan, since
+GLES is the fallback. The investigation below was not wasted — it was aimed at
+the right symptom on the wrong renderer.
+
+## The GLES fallback is about 1 fps
 
 Every engine thread sits in `futex_do_wait` and wakes once a second; 13% CPU
 over thirty seconds; exactly 20 swaps in 20s and 30 in 30s. It is waiting, not
