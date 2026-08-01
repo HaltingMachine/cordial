@@ -163,8 +163,30 @@ public:
 /// descriptor to match.
 class NativeTextBoxInfo : public Object {
 public:
+    // The engine constructs one of these and hands it to `showKeyboard`. With no
+    // constructor registered, libjnivm logged
+    //
+    //     Call Unknown Static Function ... Method=`<init>`
+    //
+    // and produced nothing, so the engine passed a null down its own call. An
+    // unresolved JNI call is not free: it can leave a pending exception that
+    // every later JNI call on the thread then trips over, which is a plausible
+    // way for text entry to be wedged well after the call that caused it.
+    //
+    // The descriptor is (FFFFFZIIIIIIZZ) — five floats for the box's rectangle
+    // and font metrics, then flags and counts. The fields are not interpreted
+    // here: Cordial has no on-screen keyboard to lay out, so what matters is
+    // that a real object exists and the call resolves.
+    static std::shared_ptr<NativeTextBoxInfo> init(
+        ENV*, Class*, jfloat, jfloat, jfloat, jfloat, jfloat, jboolean, jint, jint,
+        jint, jint, jint, jint, jboolean, jboolean) {
+        return std::make_shared<NativeTextBoxInfo>();
+    }
+
     static void Register(ENV* env) {
         env->GetClass<NativeTextBoxInfo>("com/roblox/engine/jni/model/NativeTextBoxInfo");
+        auto c = env->GetClass("com/roblox/engine/jni/model/NativeTextBoxInfo");
+        c->Hook(env, "<init>", &NativeTextBoxInfo::init);
     }
 };
 
@@ -235,6 +257,19 @@ public:
         fprintf(stderr, "[roblox] gameDidLeave\n");
     }
     static void onAppShellReloadNeeded(ENV*, Class*) {}
+
+    // The engine notifies Java when the focused Lua text box changes, and when
+    // one of its properties does. Observed as unresolved during sign-in:
+    //
+    //     Constructed Unresolved symbol ... `onLuaTextBoxChangedCallback`, `(Ljava/lang/String;)V`
+    //     Constructed Unresolved symbol ... `onLuaTextBoxPropertyChangedCallback`, `()V`
+    //
+    // Nothing on a desktop needs to react to either — there is no IME view to
+    // reposition — so these are no-ops. They exist because *resolving* is the
+    // point: an unresolved call is a different thing from a call that did
+    // nothing, and only the second one is safe.
+    static void onLuaTextBoxChangedCallback(ENV*, Class*, std::shared_ptr<String>) {}
+    static void onLuaTextBoxPropertyChangedCallback(ENV*, Class*) {}
     static void listenToMotionEvents(ENV*, Class*, std::shared_ptr<String>) {}
     static void screenOrientationChanged(ENV*, Class*, jint) {}
     static void openNativeOverlay(ENV*, Class*, std::shared_ptr<String>,
@@ -252,6 +287,10 @@ public:
         c->Hook(env, "exitGameWithError", &NativeGLJavaInterface::exitGameWithError);
         c->Hook(env, "gameDidLeave", &NativeGLJavaInterface::gameDidLeave);
         c->Hook(env, "onAppShellReloadNeeded", &NativeGLJavaInterface::onAppShellReloadNeeded);
+        c->Hook(env, "onLuaTextBoxChangedCallback",
+                &NativeGLJavaInterface::onLuaTextBoxChangedCallback);
+        c->Hook(env, "onLuaTextBoxPropertyChangedCallback",
+                &NativeGLJavaInterface::onLuaTextBoxPropertyChangedCallback);
         c->Hook(env, "listenToMotionEvents", &NativeGLJavaInterface::listenToMotionEvents);
         c->Hook(env, "screenOrientationChanged",
                 &NativeGLJavaInterface::screenOrientationChanged);

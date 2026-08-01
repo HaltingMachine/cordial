@@ -1071,13 +1071,13 @@ pub mod game_activity {
     ///
     /// `which` is the handle from `showKeyboard`, which is how the engine knows
     /// which box the text belongs to.
-    pub fn pass_text(native: *mut c_void, which: i64, text: &str, cursor: i32) -> Result<(), String> {
+    pub fn pass_text(native: *mut c_void, which: i64, text: &str, flag: bool, cursor: i32) -> Result<(), String> {
         let t = CString::new(text).map_err(|e| e.to_string())?;
         let mut err = vec![0u8; 512];
         // SAFETY: `t` and `err` outlive the call.
         let rc = unsafe {
             cordial_input_pass_text(
-                native, which, t.as_ptr(), 0, cursor,
+                native, which, t.as_ptr(), flag as c_int, cursor,
                 err.as_mut_ptr() as *mut c_char, err.len(),
             )
         };

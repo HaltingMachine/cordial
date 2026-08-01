@@ -833,7 +833,28 @@ struct PollFd {
 }
 const POLLIN: i16 = 0x001;
 
+/// AGDK's `onTouchEventNative`, unless the duplicate-delivery control is on.
+#[allow(clippy::too_many_arguments)]
 fn deliver_touch(
+    handle: i64,
+    action: i32,
+    x: f32,
+    y: f32,
+    button_state: i32,
+    action_button: i32,
+    event_time_ms: i64,
+    down_time_ms: i64,
+) {
+    if no_agdk_touch() {
+        return;
+    }
+    deliver_touch_inner(
+        handle, action, x, y, button_state, action_button, event_time_ms, down_time_ms,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn deliver_touch_inner(
     handle: i64,
     action: i32,
     x: f32,
@@ -1411,6 +1432,14 @@ pub fn set_input_natives(
 /// synchronously from within the request — and calling back into the engine
 /// from inside its own call is a re-entry this has no reason to risk.
 fn report_keyboard_state() {
+    // `CORDIAL_NO_KEYBOARD_REPORT=1` — do not acknowledge the keyboard at all.
+    // A control, because focus was observed bouncing in the order
+    // focused, updateKeyboardSize(true), blurred, which is the shape of a
+    // feedback loop rather than a coincidence: reporting a keyboard makes the
+    // engine re-lay-out, and a re-layout may be what drops the capture.
+    if std::env::var_os("CORDIAL_NO_KEYBOARD_REPORT").is_some() {
+        return;
+    }
     let f = UPDATE_KEYBOARD_SIZE.load(std::sync::atomic::Ordering::Relaxed);
     if f.is_null() {
         return;
@@ -1431,6 +1460,19 @@ fn report_keyboard_state() {
     if trace_text() {
         eprintln!("[cordial] updateKeyboardSize(visible={visible}, w={w}, h=0) -> {r:?}");
     }
+}
+
+/// `CORDIAL_NO_AGDK_TOUCH=1` — deliver pointer input only through Roblox's own
+/// `NativeInputInterface`, not also through AGDK's `onTouchEventNative`.
+///
+/// Both paths are real and the engine consumes both, which means one physical
+/// click arrives twice. That is harmless for a button and not harmless for a
+/// text box: the observed symptom is focus bouncing, focused then blurred then
+/// focused again, so a field never stays captured long enough to show a caret
+/// or accept text.
+fn no_agdk_touch() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("CORDIAL_NO_AGDK_TOUCH").is_some())
 }
 
 fn pass_key_event(down: bool, key_code: i32, modifiers: i32) {
@@ -1455,7 +1497,11 @@ fn pass_text(which: i64, text: &str, cursor: i32) {
     }
     let f = PASS_TEXT.load(std::sync::atomic::Ordering::Relaxed);
     if !f.is_null() {
-        if let Err(e) = cordial_linker_sys::game_activity::pass_text(f, which, text, cursor) {
+        // `nativePassText(long, String, boolean, int)`. The boolean's meaning is
+        // not declared anywhere Cordial can read, so it is a knob until a run
+        // says otherwise: `CORDIAL_PASSTEXT_FLAG=1` sends true.
+        let flag = std::env::var_os("CORDIAL_PASSTEXT_FLAG").is_some();
+        if let Err(e) = cordial_linker_sys::game_activity::pass_text(f, which, text, flag, cursor) {
             if trace_text() {
                 eprintln!("[cordial] passText failed: {e}");
             }

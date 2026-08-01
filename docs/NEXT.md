@@ -70,6 +70,64 @@ source attached. Implementing that reverse contract is the job.
 `onTextInputEventNative` with a populated `gametextinput/State` (accepted,
 ignored), and re-sending window focus after the Lua app is up (no effect).
 
+### What has since been established
+
+Most of the reverse contract above is now wired, and the picture is much
+narrower than "nothing answers".
+
+**`showKeyboard`'s first argument is the handle of the box being edited.** It was
+being discarded and text was then sent with handle 0, which the engine drops in
+silence. Captured now, along with the box's current contents. `nativePassText`,
+`syncTextboxTextAndCursorPosition2` and `updateKeyboardSize` are all driven and
+all return without error, and `CORDIAL_TRACE_TEXT=1` shows focus detected and
+text accumulating correctly. **It still does not appear in the field.**
+
+**`updateKeyboardSize(visible=true)` destroys focus. This is the important one.**
+The trace order is not ambiguous:
+
+```text
+textbox focused handle=139759059370112
+updateKeyboardSize(visible=true)
+textbox blurred
+updateKeyboardSize(visible=false)
+textbox focused handle=139759059370112
+```
+
+Focus bounces continuously while that call is driven. With
+`CORDIAL_NO_KEYBOARD_REPORT=1` it is stable — one `focused`, no blur, confirmed
+by control in the same session.
+
+That also explains the field appearing to clear on every keystroke:
+`edit_text_buffer` reseeds from the engine whenever the focus generation changes,
+so a bouncing focus resets the buffer to empty between characters. The clearing
+was self-inflicted, not the engine rejecting anything.
+
+**Do not conclude `updateKeyboardSize` is useless and delete it.** The engine
+asks for a keyboard, so something is expected to acknowledge one. What is wrong
+is a bare `visible=true` with a zero-height rectangle at the window's bottom edge
+— plausibly the engine re-lays-out around the reported keyboard and drops the
+capture in the process. The call needs different arguments, or a different
+moment, not removal.
+
+**Ruled out as the cause of the bounce:** duplicate pointer delivery. Both AGDK's
+`onTouchEventNative` and `NativeInputInterface` receive every click, so one press
+does arrive twice — but disabling AGDK's copy (`CORDIAL_NO_AGDK_TOUCH=1`) leaves
+the bounce exactly as it was.
+
+### Where this is going
+
+Synthesising an input method by hand is the wrong shape and is being abandoned.
+Cordial becomes a **bridge**: the platform's own input method on one side,
+Android's contract on the other. On Wayland that is `zwp_text_input_v3`, which
+the compositor routes to whatever the user actually runs — ibus, fcitx,
+squeekboard on a phone — so composition, dead keys and CJK candidate windows stop
+being Cordial's to reimplement badly.
+
+The Android half does not go away: the engine only speaks `showKeyboard` and
+friends, because it is the Android build. What goes away is Cordial inventing the
+editing state in the middle. See
+[ADR-011](adr/ADR-011-wayland-and-libadwaita.md).
+
 ## 2. Sign-in itself
 
 Without a session the client sits on the landing page. Avatar thumbnails fail
