@@ -368,15 +368,20 @@ pub fn liblog_overrides() -> Vec<(&'static str, *mut c_void)> {
 
 // -------------------------------------------------------------------- OpenSL
 
-/// OpenSL ES, implemented in `native/opensles.cpp`.
+/// OpenSL ES, implemented in `native/opensles.cpp` and backed by PipeWire via
+/// `native/pipewire_backend.cpp`.
 ///
 /// Seven of these eight are *data* symbols (`SLInterfaceID` is a pointer to a
 /// UUID struct), and a missing data symbol fails the `DT_NEEDED` walk outright
 /// rather than at first use. Current Roblox builds reference them directly,
 /// which is why `libOpenSLES.so` can no longer be an empty library.
 ///
-/// This links; it does not implement audio. See the file for why
-/// `slCreateEngine` reports failure rather than pretending.
+/// The object model (engine, output mix, buffer-queue-sourced audio players)
+/// is implemented and plays through PipeWire when it is reachable. When it is
+/// not — no library, no session, or built without `pipewire-devel` — the same
+/// `slCreateEngine` reports failure rather than pretending, only for a more
+/// specific reason than "nothing is implemented yet". See `opensles.cpp` and
+/// `pipewire_backend.cpp` for the split.
 pub fn opensles_overrides() -> Vec<(&'static str, *mut c_void)> {
     #[repr(C)]
     struct Symbol {

@@ -134,6 +134,13 @@ on it.
 - x86-64 Linux
 - **Clang** — AOSP bionic uses C11 `_Atomic` inside C++ headers and GCC rejects it
 - An X11 session (Wayland works through XWayland)
+- **PipeWire's development headers** (`pipewire-devel` / `libpipewire-0.3-dev`),
+  optional — for OpenSL ES audio. `native/CMakeLists.txt` detects them via
+  `pkg-config` and compiles the real audio backend if found, or the previous
+  link-only stub (no sound, but everything else works) if not. Either way
+  `libpipewire-0.3.so` itself is `dlopen`'d at run time, never linked, so a
+  build made with the headers still runs — audio-less — on a machine that
+  only has the runtime library, or neither.
 - Roblox's official Android client, which **you supply** — Cordial ships no
   Roblox code, APK or assets and never will
 
