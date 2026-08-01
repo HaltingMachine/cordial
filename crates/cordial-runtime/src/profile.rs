@@ -17,6 +17,7 @@
 
 use std::ffi::c_int;
 use std::fs::File;
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 
@@ -93,6 +94,7 @@ impl Lock {
 pub fn acquire(name: &str) -> Result<Lock, String> {
     let path = dir(name)?;
     std::fs::create_dir_all(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    restrict_to_owner(&path);
 
     let lock_path = path.join(".lock");
     let file = File::create(&lock_path).map_err(|e| format!("{}: {e}", lock_path.display()))?;
@@ -105,6 +107,34 @@ pub fn acquire(name: &str) -> Result<Lock, String> {
         ));
     }
     Ok(Lock { _file: file, path })
+}
+
+/// Make a profile directory readable only by its owner.
+///
+/// Roblox keeps its session cookie inside the profile, so the directory holds a
+/// live credential even though Cordial itself never reads or handles one.
+/// `create_dir_all` applies the process umask, which on a normal desktop yields
+/// `0755` — world-readable, so any other account on the machine can take the
+/// session.
+///
+/// This is deliberately the whole of Cordial's credential handling. Putting the
+/// cookie in a keyring was considered and rejected: the engine reads it from a
+/// file at startup, so it would have to be written back to disk before every
+/// launch and would be plaintext there for the entire session anyway, and doing
+/// so would make Cordial the custodian of a token it currently never touches.
+/// Correct permissions defend against the case that is actually reachable.
+///
+/// Best-effort: a filesystem without Unix permissions is not a reason to refuse
+/// to launch, and the failure is reported by the launch continuing rather than
+/// by a panic.
+fn restrict_to_owner(path: &Path) {
+    if let Ok(meta) = std::fs::metadata(path) {
+        let mut perms = meta.permissions();
+        if perms.mode() & 0o077 != 0 {
+            perms.set_mode(0o700);
+            let _ = std::fs::set_permissions(path, perms);
+        }
+    }
 }
 
 /// Move a pre-ADR-012 layout into place, once.
@@ -131,6 +161,9 @@ pub fn migrate_legacy_layout() -> Option<PathBuf> {
     }
     match std::fs::rename(&legacy, &target) {
         Ok(()) => {
+            // The legacy directory was created with the old umask, so tighten it
+            // on the way in rather than inheriting a world-readable cookie.
+            restrict_to_owner(&target);
             println!(
                 "  profiles: moved {} to {} (ADR-012)",
                 legacy.display(),
@@ -222,6 +255,21 @@ mod tests {
         let first = acquire("default").unwrap();
         drop(first);
         assert!(acquire("default").is_ok(), "the profile must be reusable");
+    }
+
+    #[test]
+    fn a_profile_is_not_readable_by_other_users() {
+        // Roblox keeps its session cookie in here. create_dir_all applies the
+        // umask, which on a normal desktop gives 0755 — another account on the
+        // machine could take the session. This is the whole of Cordial's
+        // credential protection, so it is worth a test.
+        let (_root, _g) = scratch("perms");
+        let lock = acquire("default").unwrap();
+        let mode = std::fs::metadata(lock.profile_dir())
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o077, 0, "profile must not be group- or world-accessible");
     }
 
     #[test]

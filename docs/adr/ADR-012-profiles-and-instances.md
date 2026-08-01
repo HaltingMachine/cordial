@@ -62,6 +62,35 @@ therefore not an authentication feature at all: each profile logs in normally an
 keeps its own session in its own directory. Nothing about this design needs
 Roblox to grant anything, which is also why it cannot be withdrawn.
 
+## On credentials, and why they do not go in a keyring
+
+Roblox keeps its session cookie inside the profile. The obvious suggestion is to
+put it in the desktop keyring instead, and it is a reasonable instinct, but it is
+rejected for three reasons.
+
+**It would make Cordial the custodian of a token it currently never touches.**
+The engine writes and reads its own session; Cordial only decides which directory
+that happens in. Reading the cookie out, holding it, and writing it back is a
+large increase in responsibility for this project, and "Cordial never handles
+your credentials" is a property worth more than the encryption would be.
+
+**The protection would be mostly illusory.** The engine reads its cookie from a
+file at startup, so a keyring copy would have to be written back to disk before
+every launch and would sit there in plaintext for the whole session. Encryption
+at rest would apply only while Cordial is not running. Meanwhile the keyring is
+unlocked at login, so any process running as the user reads it as easily as it
+reads the file.
+
+**The reachable threat is file permissions, and that is fixed instead.**
+`create_dir_all` applies the umask, which on a normal desktop yields `0755` — on
+a multi-user machine another account could read the session. Profile directories
+are therefore forced to `0700`, on creation and on migration, with a test
+asserting it. That defends against the case that actually occurs.
+
+Users wanting encryption at rest should use full-disk encryption or
+`systemd-homed`, which solve it properly and for everything rather than for one
+application's cookie.
+
 ## Consequences
 
 **Accepted:** the storage path changes, and existing users have a session under
