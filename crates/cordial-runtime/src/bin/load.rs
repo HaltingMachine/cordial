@@ -1138,6 +1138,18 @@ fn main() -> ExitCode {
                                                 // delivers it through this
                                                 // handle's onTouchEventNative /
                                                 // onKeyDownNative/UpNative.
+                                                // Plugins run alongside the
+                                                // client, in their own
+                                                // processes. Started here
+                                                // rather than earlier so they
+                                                // observe a client that is
+                                                // already up, and so a plugin
+                                                // that misbehaves cannot
+                                                // interfere with bring-up.
+                                                let n = cordial_runtime::plugin_host::start_all();
+                                                if n > 0 {
+                                                    println!("  {n} plugin(s) running");
+                                                }
                                                 cordial_runtime::android::looper::pump(
                                                     std::time::Duration::from_secs(secs),
                                                     Some(handle),

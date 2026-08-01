@@ -80,6 +80,7 @@ name = "cordial-runtime"
 version = "0.0.1"
 dependencies = [
  "cordial-linker-sys",
+ "cordial-plugins",
  "serde_json",
  "ureq",
  "zip",

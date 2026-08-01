@@ -11,6 +11,7 @@ path = "src/bin/load.rs"
 
 [dependencies]
 cordial-linker-sys = { path = "../cordial-linker-sys" }
+cordial-plugins = { path = "../cordial-plugins" }
 ureq = "3.3.0"
 # The client-settings document is JSON and user flag overrides have to be merged
 # into it correctly. A textual splice on a 1.2 MB document is not correctness.

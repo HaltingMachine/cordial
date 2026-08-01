@@ -58,6 +58,19 @@ impl Plugin {
     }
 }
 
+/// Where plugins are installed.
+pub fn plugin_root() -> PathBuf {
+    std::env::var_os("CORDIAL_PLUGIN_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::var_os("XDG_DATA_HOME")
+                .map(PathBuf::from)
+                .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+                .unwrap_or_else(std::env::temp_dir)
+                .join("cordial/plugins")
+        })
+}
+
 pub fn parse(text: &str, dir: &Path) -> Result<Plugin, String> {
     let manifest: Manifest = serde_json::from_str(text).map_err(|e| e.to_string())?;
     if manifest.id.is_empty() {
