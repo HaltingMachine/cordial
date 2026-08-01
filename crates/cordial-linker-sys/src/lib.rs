@@ -852,4 +852,88 @@ pub mod game_activity {
             _ => Err(take_err(err)),
         }
     }
+
+    extern "C" {
+        fn cordial_game_activity_lifecycle(
+            handle: i64,
+            native_name: *const c_char,
+            err: *mut c_char,
+            err_len: usize,
+        ) -> c_int;
+        fn cordial_game_activity_window_focus(
+            handle: i64,
+            focused: c_int,
+            err: *mut c_char,
+            err_len: usize,
+        ) -> c_int;
+        fn cordial_game_activity_surface_redraw_needed(
+            handle: i64,
+            err: *mut c_char,
+            err_len: usize,
+        ) -> c_int;
+    }
+
+    /// One `GameActivity` native shaped `(J)V` — `onPauseNative`,
+    /// `onStopNative`, `onSurfaceDestroyedNative`, and `terminateNativeCode`
+    /// at teardown. `Ok(None)` when `native_name` was never registered —
+    /// treated as "did not happen" rather than an error, matching
+    /// `touch`/`key`'s convention.
+    pub fn lifecycle(handle: i64, native_name: &str) -> Result<Option<()>, String> {
+        let name = CString::new(native_name).map_err(|e| e.to_string())?;
+        let mut err = vec![0u8; 512];
+        // SAFETY: `handle` came from `initialize`; `name`/`err` outlive the call.
+        let rc = unsafe {
+            cordial_game_activity_lifecycle(
+                handle,
+                name.as_ptr(),
+                err.as_mut_ptr() as *mut c_char,
+                err.len(),
+            )
+        };
+        match rc {
+            0 => Ok(Some(())),
+            -2 => Ok(None),
+            _ => Err(take_err(err)),
+        }
+    }
+
+    /// `onWindowFocusChangedNative(hasFocus)`. `start` already drives the
+    /// `true` case inline at bring-up; this is for the `false` case Android
+    /// sends immediately before `onPauseNative` when a run ends.
+    pub fn window_focus(handle: i64, focused: bool) -> Result<Option<()>, String> {
+        let mut err = vec![0u8; 512];
+        // SAFETY: `handle` came from `initialize`; `err` is a live buffer.
+        let rc = unsafe {
+            cordial_game_activity_window_focus(
+                handle,
+                if focused { 1 } else { 0 },
+                err.as_mut_ptr() as *mut c_char,
+                err.len(),
+            )
+        };
+        match rc {
+            0 => Ok(Some(())),
+            -2 => Ok(None),
+            _ => Err(take_err(err)),
+        }
+    }
+
+    /// `onSurfaceRedrawNeededNative` — the "repaint now" nudge, driven from
+    /// X11 `Expose`.
+    pub fn surface_redraw_needed(handle: i64) -> Result<Option<()>, String> {
+        let mut err = vec![0u8; 512];
+        // SAFETY: as above.
+        let rc = unsafe {
+            cordial_game_activity_surface_redraw_needed(
+                handle,
+                err.as_mut_ptr() as *mut c_char,
+                err.len(),
+            )
+        };
+        match rc {
+            0 => Ok(Some(())),
+            -2 => Ok(None),
+            _ => Err(take_err(err)),
+        }
+    }
 }

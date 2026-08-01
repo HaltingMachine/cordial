@@ -195,6 +195,71 @@ pub fn pump(duration: std::time::Duration, game_activity_handle: Option<i64>) {
             std::ptr::null_mut(),
         );
     }
+
+    // Clean teardown, once the run ends. Cordial previously just fell through
+    // to `main`'s `_exit(0)` here, which is indistinguishable from the
+    // process being killed mid-frame as far as the engine is concerned — it
+    // never got a chance to flush the flag cache and telemetry it writes to
+    // disk on the way through this chain.
+    if let Some(handle) = game_activity_handle {
+        teardown(handle);
+    }
+}
+
+/// The ordered names driving `teardown`, pulled out as a constant so the
+/// sequence itself — not just that *something* runs — is checkable by a test
+/// without a live `GameActivity` handle. `onWindowFocusChangedNative` is not
+/// in this list: it takes a `bool` the other four don't, so it is driven by
+/// its own dedicated call (`game_activity::window_focus`) rather than
+/// `game_activity::lifecycle`'s by-name lookup.
+const TEARDOWN_LIFECYCLE_SEQUENCE: [&str; 4] =
+    ["onPauseNative", "onSurfaceDestroyedNative", "onStopNative", "terminateNativeCode"];
+
+/// Android's own shutdown order: `onWindowFocusChangedNative(false)` ->
+/// `onPauseNative` -> `onSurfaceDestroyedNative` -> `onStopNative` ->
+/// `terminateNativeCode`. Driven synchronously and back-to-back, the same way
+/// `cordial_game_activity_start` drives the mirror-image bring-up sequence
+/// with no pumping in between.
+///
+/// `terminateNativeCode` is not exported like `initializeNativeCode` — it is
+/// one of the 24 natives AGDK registers dynamically during
+/// `initializeNativeCode`, looked up by name exactly like
+/// `onPauseNative`/`onStopNative`/`onSurfaceDestroyedNative` (see
+/// `game_activity.cpp`'s own doc comment on `cordial_game_activity_lifecycle`
+/// for how that was established — `nm -D` on the shipping `libroblox.so`
+/// exports only `initializeNativeCode` by that naming scheme).
+fn teardown(handle: i64) {
+    use cordial_linker_sys::game_activity;
+
+    fn step(name: &str, result: Result<Option<()>, String>) {
+        match result {
+            Ok(Some(())) => super::trace(format_args!("{name}")),
+            // Not registered — a native that never resolved is worth a
+            // trace line during teardown even with tracing off elsewhere,
+            // since it is the difference between "the engine did not flush"
+            // and "Cordial never asked it to".
+            Ok(None) => eprintln!("[android] {name}: not registered"),
+            Err(e) => eprintln!("[android] {name} failed: {e}"),
+        }
+    }
+
+    step("onWindowFocusChangedNative(false)", game_activity::window_focus(handle, false));
+    for name in TEARDOWN_LIFECYCLE_SEQUENCE {
+        step(name, game_activity::lifecycle(handle, name));
+    }
+
+    // A brief grace period. The engine's flag-cache/telemetry writes this
+    // chain triggers are not guaranteed to be finished by the time
+    // `terminateNativeCode` returns to this thread — at least some of that
+    // work is plausibly posted to another thread — and pumping a little
+    // longer here is what separates a clean write from a log that just stops
+    // mid-sentence when the process exits immediately after making these
+    // calls. Bounded, not indefinite: teardown must not hang the process it
+    // is trying to end cleanly.
+    let grace = std::time::Instant::now() + std::time::Duration::from_millis(500);
+    while std::time::Instant::now() < grace {
+        looper_poll_once(50, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut());
+    }
 }
 
 /// Add a descriptor to the calling thread's looper so `pollOnce` returns as soon
@@ -409,6 +474,36 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn teardown_lifecycle_sequence_matches_androids_shutdown_order() {
+        // Regression guard on the ordering itself, not just that `teardown`
+        // calls something: onPause before onSurfaceDestroyed before onStop
+        // before terminateNativeCode is the order the report specifies
+        // Android actually uses, and a reorder here would be a real (if
+        // subtle) behaviour change even though every step still ran.
+        assert_eq!(
+            TEARDOWN_LIFECYCLE_SEQUENCE,
+            ["onPauseNative", "onSurfaceDestroyedNative", "onStopNative", "terminateNativeCode"]
+        );
+    }
+
+    #[test]
+    fn teardown_returns_within_its_grace_period_with_no_native_handle() {
+        // A test process links no libroblox.so and starts no JavaVM, so every
+        // `game_activity::*` call `teardown` makes fails immediately (see
+        // `process_env`'s null-VM check) and this exercises only the bounded
+        // grace-period loop. Regression guard: that loop must be bounded
+        // rather than spin forever if the engine's natives never resolve.
+        let looper = looper_prepare(0);
+        assert!(!looper.is_null());
+        let start = std::time::Instant::now();
+        teardown(0);
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(2),
+            "teardown took too long; its grace period must be bounded"
+        );
+    }
 
     #[test]
     fn poll_times_out_rather_than_spinning() {

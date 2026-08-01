@@ -78,7 +78,8 @@ will be declined.
 | App shell reaches `APP_READY (Landing)` | ✅ |
 | Renders — Vulkan, with GLES2 fallback | ✅ |
 | Networking / HTTPS | ✅ |
-| Mouse and keyboard reach the engine | ✅ |
+| Mouse and keyboard reach the engine | ✅ (no scroll wheel yet) |
+| Clean shutdown | ✅ full pause/stop/destroy sequence |
 | Stable | ✅ 26 consecutive clean launches |
 | Frame rate | ✅ ~27 fps on Vulkan, ~33 fps on GLES |
 | Signed in | ❌ not implemented |

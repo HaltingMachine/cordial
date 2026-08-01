@@ -21,6 +21,20 @@ use std::sync::{Mutex, OnceLock};
 /// Android pixel formats, from `android/native_window.h`.
 pub const WINDOW_FORMAT_RGBA_8888: i32 = 1;
 
+/// KeyPressMask | KeyReleaseMask | ButtonPressMask | ButtonReleaseMask |
+/// PointerMotionMask | ExposureMask, from X.h. Not StructureNotifyMask or
+/// FocusChangeMask — this window's size is fixed for its lifetime and AGDK's
+/// own focus call already runs once, unconditionally, in `game_activity.cpp`.
+/// ExposureMask is what makes a damaged window (uncovered, restored,
+/// redirected through a compositor) generate `Expose`, which
+/// `pump_input_events` turns into `onSurfaceRedrawNeededNative` — without it
+/// the window never asked to be told, and a damaged window just stayed
+/// damaged until the engine's own next frame.
+///
+/// Module-level rather than local to `open()` so the redraw wiring can be
+/// checked (`EXPOSURE_MASK` bit present) without a live X server.
+const INPUT_EVENT_MASK: c_long = 0x1 | 0x2 | 0x4 | 0x8 | 0x40 | 0x8000;
+
 type Display = *mut c_void;
 type Window = c_ulong;
 
@@ -329,12 +343,6 @@ pub fn open(width: u32, height: u32, title: &str) -> Result<&'static HostWindow,
         return Err("no X display (is DISPLAY set?)".into());
     }
 
-    // KeyPressMask | KeyReleaseMask | ButtonPressMask | ButtonReleaseMask |
-    // PointerMotionMask, from X.h. Not StructureNotifyMask or FocusChangeMask —
-    // this window's size is fixed for its lifetime and AGDK's own focus call
-    // already runs once, unconditionally, in `game_activity.cpp`.
-    const INPUT_EVENT_MASK: c_long = 0x1 | 0x2 | 0x4 | 0x8 | 0x40;
-
     // SAFETY: `display` is open; the geometry and border/background pixels are
     // plain values.
     CURRENT_DISPLAY.store(display as usize, std::sync::atomic::Ordering::Relaxed);
@@ -577,9 +585,35 @@ struct XInputEvent {
 // X11 event `type` values, from X.h.
 const KEY_PRESS: c_int = 2;
 const KEY_RELEASE: c_int = 3;
+const MOTION_NOTIFY: c_int = 6;
 const BUTTON_PRESS: c_int = 4;
 const BUTTON_RELEASE: c_int = 5;
-const MOTION_NOTIFY: c_int = 6;
+const EXPOSE: c_int = 12;
+
+/// `XExposeEvent`. A different layout from `XInputEvent` above — Expose
+/// carries a damaged rectangle and a batching `count`, not a pointer/keycode
+/// `detail` — so it gets its own struct rather than being folded into the
+/// shared one.
+#[repr(C)]
+struct XExposeEvent {
+    type_: c_int,
+    serial: c_ulong,
+    send_event: c_int,
+    display: *mut c_void,
+    window: c_ulong,
+    x: c_int,
+    y: c_int,
+    width: c_int,
+    height: c_int,
+    /// How many more `Expose` events follow for the same repaint, so a
+    /// window manager can deliver several damaged rectangles as a batch. 0 on
+    /// the last (or only) one — exactly the point at which the whole window
+    /// has finished telling us what it needs repainted, and the one point at
+    /// which `onSurfaceRedrawNeededNative` should actually fire. Firing on
+    /// every event in the batch would mean N redraw requests for one
+    /// exposure.
+    count: c_int,
+}
 
 // X11 modifier bits (X.h) actually consulted below.
 const SHIFT_MASK: c_uint = 1 << 0;
@@ -727,6 +761,25 @@ fn deliver_touch(
         // early in startup.
         Ok(None) => {}
         Err(e) => super::trace(format_args!("onTouchEventNative(action={action}) failed: {e}")),
+    }
+}
+
+/// Whether an `Expose` event is the last one in its batch — `count` is how
+/// many more follow for the same repaint, so 0 is the point at which the
+/// window has finished describing what it needs redrawn. Pulled out as its
+/// own function so the batching decision is unit-testable without a live X11
+/// connection.
+fn is_final_expose(count: c_int) -> bool {
+    count == 0
+}
+
+fn deliver_surface_redraw(handle: i64) {
+    match cordial_linker_sys::game_activity::surface_redraw_needed(handle) {
+        Ok(Some(())) => super::trace(format_args!("onSurfaceRedrawNeededNative")),
+        // Not registered yet — a normal race against initializeNativeCode
+        // early in startup, same convention as touch/key.
+        Ok(None) => {}
+        Err(e) => super::trace(format_args!("onSurfaceRedrawNeededNative failed: {e}")),
     }
 }
 
@@ -888,6 +941,18 @@ impl HostWindow {
                 }
                 KEY_PRESS | KEY_RELEASE => {
                     self.dispatch_key(handle, &mut buf, event_type == KEY_PRESS);
+                }
+                EXPOSE => {
+                    // SAFETY: `event_type == EXPOSE` means `XNextEvent` just
+                    // filled `buf` as the `XExposeEvent` member of Xlib's
+                    // `XEvent` union — a different layout from
+                    // `XInputEvent` above (see `XExposeEvent`'s own doc
+                    // comment), but the one this specific event type is
+                    // documented to have.
+                    let ev = unsafe { &*(buf.as_ptr() as *const XExposeEvent) };
+                    if is_final_expose(ev.count) {
+                        deliver_surface_redraw(handle);
+                    }
                 }
                 _ => {}
             }
@@ -1114,4 +1179,39 @@ pub fn overrides() -> Vec<(&'static str, *mut c_void)> {
         f!("eglCreateWindowSurface", egl_create_window_surface),
         f!("eglSwapInterval", egl_swap_interval),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_last_expose_in_a_batch_triggers_a_redraw() {
+        // A window manager delivering several damaged rectangles as one
+        // repaint sets `count` to how many more follow; firing on every one
+        // of them would mean N redraw requests for a single exposure.
+        assert!(!is_final_expose(3));
+        assert!(!is_final_expose(1));
+        assert!(is_final_expose(0));
+    }
+
+    #[test]
+    fn input_event_mask_watches_for_expose() {
+        // ExposureMask (0x8000, X.h) is what makes a damaged window generate
+        // `Expose` at all — without it in the mask `open()` passes to
+        // `XSelectInput`, `onSurfaceRedrawNeededNative` would never have
+        // anything to react to. Checked against the real constant, not a
+        // re-derived copy, so a future edit that drops the bit fails this
+        // test rather than only failing silently against a live window
+        // manager.
+        const EXPOSURE_MASK: c_long = 0x8000;
+        assert_eq!(INPUT_EVENT_MASK & EXPOSURE_MASK, EXPOSURE_MASK);
+        // The previously-driven input classes stay watched too — this is an
+        // addition, not a replacement.
+        const KEY_BUTTON_MOTION_MASK: c_long = 0x1 | 0x2 | 0x4 | 0x8 | 0x40;
+        assert_eq!(
+            INPUT_EVENT_MASK & KEY_BUTTON_MOTION_MASK,
+            KEY_BUTTON_MOTION_MASK
+        );
+    }
 }
