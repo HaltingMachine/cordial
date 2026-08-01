@@ -159,19 +159,21 @@ pub fn prepare_for_current_thread() -> bool {
 ///
 /// `game_activity_handle`, when set, is also where host input joins this same
 /// loop: every ~50ms iteration — the bounded timeout below — is a chance to
-/// drain whatever X11 mouse/keyboard events queued up and deliver them through
+/// drain whatever mouse/keyboard events queued up on the active display
+/// backend and deliver them through
 /// `onTouchEventNative`/`onKeyDownNative`/`onKeyUpNative`, via
-/// `android::window::pump_input_events`. That function is non-blocking by
-/// construction (see its own doc comment), so folding it into this loop does
-/// not change this function's own timing behaviour — it is still bounded by
-/// the same 50ms `epoll_wait` timeout either way. `None` (no handle) is the
-/// case for callers that never bring AGDK up at all, e.g. the app-bridge-only
-/// path driven by `CORDIAL_SKIP_AGDK`.
+/// `android::pump_input_events`, which dispatches to whichever of `window`
+/// (X11) or `wayland` is live — see `android::backend`. That function is
+/// non-blocking by construction (see its own doc comment), so folding it into
+/// this loop does not change this function's own timing behaviour — it is
+/// still bounded by the same 50ms `epoll_wait` timeout either way. `None` (no
+/// handle) is the case for callers that never bring AGDK up at all, e.g. the
+/// app-bridge-only path driven by `CORDIAL_SKIP_AGDK`.
 pub fn pump(duration: std::time::Duration, game_activity_handle: Option<i64>) {
     let deadline = std::time::Instant::now() + duration;
 
-    // Watch the X connection alongside the engine's own descriptors, so a
-    // keypress or a click ends the wait immediately.
+    // Watch the display connection alongside the engine's own descriptors, so
+    // a keypress or a click ends the wait immediately.
     //
     // Without this the loop drained input, then slept in `epoll_wait` for up to
     // 50 ms regardless of what the user did — so an event arriving just after a
@@ -182,11 +184,11 @@ pub fn pump(duration: std::time::Duration, game_activity_handle: Option<i64>) {
     // The 50 ms timeout stays, because it is what makes the loop notice
     // `deadline`; it is now the idle period rather than the input period.
     let watching = game_activity_handle.is_some()
-        && super::window::current().is_some_and(|w| watch_input_fd(w.connection_fd()));
+        && super::connection_fd().is_some_and(watch_input_fd);
 
     while std::time::Instant::now() < deadline {
         if let Some(handle) = game_activity_handle {
-            super::window::pump_input_events(handle);
+            super::pump_input_events(handle);
         }
         looper_poll_once(
             if watching { 50 } else { 8 },

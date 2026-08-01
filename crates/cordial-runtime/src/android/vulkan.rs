@@ -30,20 +30,25 @@
 //! What it does recognise, and why:
 //!
 //! * `vkCreateAndroidSurfaceKHR` — the engine calls this and only this to get a
-//!   surface. Desktop Mesa has never heard of it; it has `vkCreateXlibSurfaceKHR`
-//!   instead. [`vk_create_android_surface_khr`] builds the Xlib call from
-//!   Cordial's own window (`android::window::current()`), the same X11
-//!   `Display*`/`Window` pair `egl_create_window_surface` substitutes for EGL —
-//!   see the comment there for why that translation lives with the window and
-//!   not in a call-counting module; the same reasoning put this file with the
-//!   window's consumers rather than with `glcount`.
+//!   surface. Desktop Mesa has never heard of it; on X11 it has
+//!   `vkCreateXlibSurfaceKHR` instead, and on Wayland `vkCreateWaylandSurfaceKHR`.
+//!   [`vk_create_android_surface_khr`] builds whichever real call from Cordial's
+//!   own window — `android::window::current()` on X11,
+//!   `android::wayland::current()` on Wayland, decided once by
+//!   `android::backend()` — the same handles `egl_create_window_surface`
+//!   substitutes for EGL in each backend's own module; see the comment there
+//!   for why that translation lives with the window and not in a call-counting
+//!   module. This file follows the same reasoning for Vulkan.
 //! * `VK_KHR_android_surface` — the extension string that has to exist for the
 //!   engine to ask for the function above at all. Mesa reports
-//!   `VK_KHR_xlib_surface` under its own name; [`vk_enumerate_instance_extension_properties`]
-//!   adds `VK_KHR_android_surface` to the host's real list whenever
-//!   `VK_KHR_xlib_surface` is present, and [`vk_create_instance`] rewrites it back
-//!   before the real `vkCreateInstance` ever sees it — the host loader must never
-//!   be told to enable an extension it does not implement.
+//!   `VK_KHR_xlib_surface` or `VK_KHR_wayland_surface` under their own names,
+//!   according to which platform is live;
+//!   [`vk_enumerate_instance_extension_properties`] adds
+//!   `VK_KHR_android_surface` to the host's real list whenever the real
+//!   extension for the active backend is present, and [`vk_create_instance`]
+//!   rewrites it back before the real `vkCreateInstance` ever sees it — the
+//!   host loader must never be told to enable an extension it does not
+//!   implement.
 //!
 //! Everything else — `vkCreateDevice`, every `vkCmd*`, the whole per-frame
 //! surface. — is untouched: once a real `VkInstance` exists, forwarding
@@ -129,6 +134,19 @@ struct VkXlibSurfaceCreateInfoKHR {
 /// unguarded (the `sType` enum is platform-independent even though the struct it
 /// tags is declared behind `VK_USE_PLATFORM_XLIB_KHR`).
 const VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR: i32 = 1000004000;
+
+#[repr(C)]
+struct VkWaylandSurfaceCreateInfoKHR {
+    s_type: i32,
+    p_next: *const c_void,
+    flags: u32,
+    display: *mut c_void,
+    surface: *mut c_void,
+}
+
+/// `VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR`, same unguarded-`sType`
+/// situation as the Xlib one above.
+const VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR: i32 = 1000006000;
 
 /// `VK_KHR_android_surface`'s spec version, per the Khronos extension registry.
 /// Fixed at 6 since it was introduced; there is nothing to detect it against.
