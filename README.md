@@ -36,11 +36,12 @@ Roblox over HTTPS, writes its flag cache to disk, and reports no flag failures.
 
 What is still wrong:
 
+- **It crashes on roughly a third of launches** — always the same signature, an `HttpClient` thread indexing a table off a null base. Newly reached rather than newly introduced.
 - **It runs at about 1 fps.** Not compute-bound — 13% CPU over thirty seconds,
   with every engine thread parked in a futex and waking once a second. The app
-  shell registers a *rendering frequency* and renders on demand; the working
-  theory is that Cordial delivers no frame or input signal to drive it, so it
-  falls back to a one-second heartbeat. Not yet proven.
+  shell registers a *rendering frequency* and renders on demand; that is still
+  the best theory and it is unproven. Window focus and frame-callback starvation
+  have both been tested and ruled out.
 - **Not signed in.** Without a session the landing page has nothing to show, and
   avatar thumbnails fail against user id 0.
 

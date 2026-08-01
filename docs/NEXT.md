@@ -149,7 +149,46 @@ drops to zero** — the static-flag problem below resolved itself once HTTPS
 worked, so it was a symptom, not a cause. Left recorded because the measurement
 technique is the reusable part.
 
-## The blocker now: about 1 fps
+## Blocker 1: it crashes on roughly a third of runs
+
+Deterministic signature, same every time:
+
+```text
+thread 'HttpClient', SIGSEGV at libroblox+0x1cb7cc6, fault address 0xe000
+    movq (%rax,%rcx), %rdi      rax = 0   rcx = 0xe000
+```
+
+A table indexed 0xe000 bytes off a **null base**. It only started appearing once
+HTTPS began working, so it is newly *reached* rather than newly introduced —
+verified by A/B against the previous commit, which fails at the same rate.
+
+`rax` being null on an `HttpClient` thread, for a large fixed-offset table,
+smells like per-thread state that was never set up on a thread the engine
+created through Cordial's `pthread_create` override. Check the TLS block before
+anything else. Do **not** assume it is the HTTP code just because the thread is
+named HttpClient.
+
+Note this invalidates any earlier claim in the history that the client "stays up
+for twelve seconds" — that was measured on a run of successes and the failure
+rate was not sampled.
+
+## Blocker 2: about 1 fps
+
+Every engine thread sits in `futex_do_wait` and wakes once a second; 13% CPU
+over thirty seconds; exactly 20 swaps in 20s and 30 in 30s. It is waiting, not
+working.
+
+**Disconfirmed:** that the engine was throttling for lack of window focus.
+`onWindowFocusChangedNative(true)` and `onContentRectChangedNative` are now sent
+after the surface handover — both are part of the AGDK contract and Android does
+send them, so they are kept — and the frame rate did not move at all.
+
+**Also disconfirmed:** frame-callback starvation. `AChoreographer_*` is not
+imported by `libroblox`.
+
+The app shell logs `Register rendering frequency during startup` and later
+`Restoring rendering frequency to normal`, and renders on demand. Still the best
+theory, still unproven.
 
 Every engine thread sits in `futex_do_wait` and wakes once a second; 13% CPU
 over thirty seconds; exactly 30 swaps in 30s. It is waiting, not working.

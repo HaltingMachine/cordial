@@ -264,6 +264,24 @@ int cordial_game_activity_start(long handle, int width, int height, int format,
             reinterpret_cast<SurfaceChangedFn>(f)(jni, jactivity, (jlong)handle, jsurface,
                                                   (jint)format, (jint)width, (jint)height);
         }
+
+        // The content rectangle, which on Android arrives from the view layout
+        // pass. Nothing here performs one, so the engine would never be told
+        // where inside the window it is allowed to draw.
+        using RectFn = void (*)(JNIEnv*, jobject, jlong, jint, jint, jint, jint);
+        if (auto f = native("onContentRectChangedNative")) {
+            reinterpret_cast<RectFn>(f)(jni, jactivity, (jlong)handle, 0, 0, (jint)width,
+                                        (jint)height);
+        }
+
+        // Focus, last, and it matters more than it looks. An Android game that
+        // has never been told it has the window renders as if it were in the
+        // background — which is what about one frame per second is. Cordial
+        // drove the lifecycle up to onResume and then never sent this.
+        using FocusFn = void (*)(JNIEnv*, jobject, jlong, jboolean);
+        if (auto f = native("onWindowFocusChangedNative")) {
+            reinterpret_cast<FocusFn>(f)(jni, jactivity, (jlong)handle, JNI_TRUE);
+        }
         return 0;
     } catch (const std::exception& e) {
         snprintf(err, err_len, "%s", e.what());
