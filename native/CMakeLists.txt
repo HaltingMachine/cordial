@@ -18,10 +18,50 @@ endif()
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../third_party/mcpelauncher-linker
                  ${CMAKE_CURRENT_BINARY_DIR}/mcpelauncher-linker)
 
+# PipeWire, for opensles.cpp's audio backend. Headers only, and only if
+# present: libpipewire-0.3.so is never linked (dlopen'd at run time instead,
+# see pipewire_backend.cpp), so this only decides whether that file compiles
+# its real implementation or the honest "no audio" fallback it falls back to
+# when pipewire-devel is absent. A tree with neither still builds.
+find_package(PkgConfig QUIET)
+if(PkgConfig_FOUND)
+  pkg_check_modules(PIPEWIRE QUIET libpipewire-0.3)
+endif()
+if(PIPEWIRE_FOUND)
+  message(STATUS "OpenSL ES audio: pipewire-devel ${PIPEWIRE_VERSION} found; "
+                  "libpipewire-0.3 will be dlopen'd at run time, not linked.")
+else()
+  message(STATUS "OpenSL ES audio: pipewire-devel not found at configure time "
+                  "(pkg-config could not find libpipewire-0.3); slCreateEngine "
+                  "will report SL_RESULT_FEATURE_UNSUPPORTED and Roblox will run "
+                  "without audio. Install pipewire-devel and reconfigure to "
+                  "enable it.")
+endif()
+
 # Thin extern "C" surface over the linker's C++ API, so Rust can drive it.
 # Android liblog. Roblox narrates its own startup through it, so this is the
 # runtime layer's most valuable diagnostic — and the source of onLogLine/onJoin.
-add_library(cordial_liblog STATIC liblog.cpp system_paths.cpp netdb_compat.cpp opensles.cpp)
+add_library(cordial_liblog STATIC
+  liblog.cpp system_paths.cpp netdb_compat.cpp opensles.cpp pipewire_backend.cpp)
+if(PIPEWIRE_FOUND)
+  target_include_directories(cordial_liblog PRIVATE ${PIPEWIRE_INCLUDE_DIRS})
+  target_compile_definitions(cordial_liblog PRIVATE CORDIAL_HAVE_PIPEWIRE=1)
+
+  # Checks pipewire_backend.cpp's buffer-queue fill logic (the underrun ->
+  # silence rule in particular) without a live PipeWire session, a daemon, or
+  # any way to produce sound — see pipewire_backend_test.cpp for why that
+  # property matters here specifically. Run as part of the ordinary build
+  # rather than left for someone to remember to invoke separately: a check
+  # that only runs when asked for is a check that silently stops running.
+  add_executable(cordial_pipewire_backend_test EXCLUDE_FROM_ALL
+    pipewire_backend.cpp pipewire_backend_test.cpp)
+  target_include_directories(cordial_pipewire_backend_test PRIVATE ${PIPEWIRE_INCLUDE_DIRS})
+  target_compile_definitions(cordial_pipewire_backend_test PRIVATE CORDIAL_HAVE_PIPEWIRE=1)
+  add_custom_command(TARGET cordial_pipewire_backend_test POST_BUILD
+    COMMAND cordial_pipewire_backend_test
+    COMMENT "Running pipewire_backend fill_pcm checks (no PipeWire session needed)")
+  add_dependencies(cordial_liblog cordial_pipewire_backend_test)
+endif()
 
 add_library(cordial_linker_shim STATIC shim.cpp)
 target_link_libraries(cordial_linker_shim PUBLIC linker)

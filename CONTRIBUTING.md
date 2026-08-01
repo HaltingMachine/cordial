@@ -169,6 +169,12 @@ cargo build --release      # Clang required; AOSP bionic does not build with GCC
 cargo test --release
 ```
 
+Install `pipewire-devel` (`libpipewire-0.3-dev` on Debian/Ubuntu) before
+building if you want to work on OpenSL ES audio — `native/CMakeLists.txt`
+detects it with `pkg-config` at configure time and prints which way it went.
+Without it the build still succeeds; `slCreateEngine` just reports failure, as
+it did before audio existed here.
+
 Before opening a pull request:
 
 - `cargo test --release` passes
