@@ -211,6 +211,16 @@ The app shell logs `Register rendering frequency during startup` and later
 `Restoring rendering frequency to normal`, and renders on demand. Still the best
 theory, still unproven.
 
+**The discriminator now exists but needs a display.** Input landed, so a click
+should produce a burst of frames if the render loop is healthy and the idle is
+the app's own choice. Measure `vkQueuePresentKHR` (Vulkan) or `eglSwapBuffers`
+(GLES) with and without input — note that a Vulkan session leaves every GLES
+counter at zero, so use the right one.
+
+Do **not** measure this with `XTestFake*` on a desktop someone is using: it
+injects into the real session and takes over their cursor. Use a nested server
+(`Xephyr`, `Xvfb`) or a dedicated seat.
+
 Every engine thread sits in `futex_do_wait` and wakes once a second; 13% CPU
 over thirty seconds; exactly 30 swaps in 30s. It is waiting, not working.
 

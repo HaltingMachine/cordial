@@ -37,6 +37,9 @@ FastLog to `<files>/appData/logs/`.
 The app shell comes up: the engine reaches `APP_READY (Landing)`, talks to
 Roblox over HTTPS, writes its flag cache to disk, and reports no flag failures.
 
+Mouse and keyboard reach the engine through the real AGDK `GameActivity`
+natives, and the engine reports consuming them.
+
 What is still wrong:
 
 - **It crashes on roughly a third of launches** — always the same signature, an `HttpClient` thread indexing a table off a null base. Newly reached rather than newly introduced.
@@ -48,7 +51,8 @@ What is still wrong:
 - **Not signed in.** Without a session the landing page has nothing to show, and
   avatar thumbnails fail against user id 0.
 
-Input is still unimplemented. See [`docs/NEXT.md`](docs/NEXT.md).
+Scroll wheel and text input/IME are not implemented. See
+[`docs/NEXT.md`](docs/NEXT.md).
 
 ## What is here
 
