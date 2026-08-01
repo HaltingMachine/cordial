@@ -121,6 +121,28 @@ established — call order, load order, argument shapes, syscalls, timing.
 Transcribing a decompilation of how it implements something is not. The line is
 not the tool, it is what you take away.
 
+## Do not test with your main account
+
+Use a throwaway account, and put it on a different IP from the one your real
+account uses — a VPN is the easy way.
+
+This is not because Cordial does anything bannable. It runs the official build,
+does not touch the engine's process, and asset overlays are the same thing
+Bloxstrap and Sober already do in the open. The risk is collateral, not causal:
+enforcement at this scale is automated, it runs in waves, and accounts that share
+an address get associated with each other. If a test account is ever caught in a
+wave — for any reason, including one that has nothing to do with Cordial — you do
+not want the account you actually care about sitting next to it.
+
+Cordial cannot make that decision for you and does not try to hide anything from
+anyone. Testing pre-release software that loads a game client is simply not
+something to do on an account you would be upset to lose.
+
+The same goes for reporting: if you hit an account problem while testing, say so
+in the issue. A ban that turns out to be Cordial's fault is the single most
+important bug this project could have, and it is only findable if people mention
+it.
+
 ## Practical
 
 ```bash
