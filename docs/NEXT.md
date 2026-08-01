@@ -186,6 +186,27 @@ send them, so they are kept — and the frame rate did not move at all.
 **Also disconfirmed:** frame-callback starvation. `AChoreographer_*` is not
 imported by `libroblox`.
 
+**Also disconfirmed:** `FIntReactSchedulerMinFrameRate`. The client-settings
+document carries `FIntReactSchedulerMinFrameRate_IXP = 1`, and the app shell UI
+runs on a React-style deferred scheduler, so a minimum frame rate of 1 looked
+like an exact match for the symptom. Setting the plain
+`FIntReactSchedulerMinFrameRate` to 60 changed nothing — still exactly 20 swaps
+in 20 s. Either the engine only honours the IXP-delivered form (and we get no
+experiment assignment without a session) or it is the wrong knob.
+
+**Also ruled out:** that the render job never binds a DataModel.
+`RenderJob::stepDataModelJob: No DM yet` and `scheduleRender: No data model`
+appear exactly twice, at ~2.0 s, and are transient — by ~3.1 s the log shows
+`onGameLoaded`, then `APP_READY` for `PlatformAccountRouter`, `Startup` and
+`Landing` in sequence. The DataModel binds fine.
+
+**Live possibility, and it needs a session to test:** the client is sitting on
+the logged-out landing screen, and Roblox's app shell may legitimately idle
+there. Nothing yet distinguishes "Cordial fails to drive the render loop" from
+"the landing screen has nothing to animate". The cheapest discriminator is
+input: if a click produces a burst of swaps, the loop is fine and the idle is
+the app's own choice.
+
 The app shell logs `Register rendering frequency during startup` and later
 `Restoring rendering frequency to normal`, and renders on demand. Still the best
 theory, still unproven.
