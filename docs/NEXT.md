@@ -128,7 +128,49 @@ DataModelPatchConfigurer ... deserializeAndVerifyPatch with blake3
 
 **Lua executes.** That is a long way past where this was stuck.
 
-## The blocker now
+## The blocker now: the static flag path resolves nothing
+
+Measured against the capture, same 139 names, same call:
+
+| | resolved | not found |
+|---|---|---|
+| Real client | **74** | 67 |
+| Cordial | **0** | 68 |
+
+The *not found* sets agree — those flags are genuinely absent from the engine's
+registry on both. The 74 that should resolve return nothing here. That is what
+`onFlagsFailed` is reporting, and the real client never calls it once.
+
+It is **not** that client settings are ignored. That was tested with a control:
+setting `DFFlagRbxTransportUseRtcioRna=False` removes
+`Initialized RtcIoRna with 1 event loop threads` from the engine's log, and the
+control run with the document unmodified has it. Dynamic flags apply. So the
+defect is specific to the **static** (`FFlag`) path that
+`nativeInitializeNativeFlags` looks up — 64 of the 139 names are present in the
+client-settings document as `FFlag<name>` and still report not found.
+
+Do not use `FLog` channels to test whether flags apply. Setting `FLogAndroidGLView=7`
+through client settings *or* `nativePreloadFlagOverrides` produces no output even
+though flags demonstrably work, so it is a broken instrument — it produced a
+confident wrong conclusion ("no FastFlag reaches the engine") that survived
+several experiments. Use a flag with an observable behavioural effect, and run
+the control.
+
+This most likely gates rendering: the surface handler returns early with
+`nativeActivity_onSurfaceChanged: ... Flags-Not-Received. Return.`, and the
+client draws at about 1 fps at 8% CPU — waiting, not working.
+
+## Second: the engine cannot resolve a hostname
+
+Every request fails with `Could not resolve host: apis.roblox.com`, so no remote
+content arrives and `glTexImage2D` stays at zero. This is Cordial's, not the
+environment's: `getent hosts apis.roblox.com` and `curl` both succeed from a
+shell on this machine, and `getaddrinfo`/`gethostbyname` resolve to the host's
+libc (confirmed with `--verbose`). Suspect the resolver thread rather than the
+lookup — curl's default backend spawns a thread per lookup, and thread creation
+goes through Cordial's pthread overrides.
+
+## The previous blocker, for reference
 
 ```text
 [LOGCHANNELS + 1] RBXCRASH: UnhandledException (St13runtime_error Path does not exist: "")

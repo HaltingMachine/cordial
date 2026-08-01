@@ -34,9 +34,12 @@ Cordial's `liblog` and writes its own FastLog to `<files>/appData/logs/`.
 Two things are badly wrong and both are known:
 
 - **It runs at about 1 fps.** Not compute-bound — 8% CPU over thirty seconds —
-  so it is waiting, not working. No FastFlag currently reaches the engine, and
-  the surface path says so (`onSurfaceChanged: ... Flags-Not-Received. Return.`).
-  Repairing the flag pipeline is the next job.
+  so it is waiting, not working. The surface handler bails with
+  `onSurfaceChanged: ... Flags-Not-Received. Return.`, and the static flag path
+  is measurably broken: of the 139 names the client registers, the real client
+  resolves 74 and reports 67 not found; Cordial reports 68 not found and
+  resolves **zero**. Dynamic flags from client settings *do* apply, so the
+  defect is specific to the static path. Repairing it is the next job.
 - **No network.** The engine's own HTTP cannot resolve any host, so no remote
   content ever arrives and no texture is ever uploaded.
 
