@@ -36,10 +36,10 @@ usage: cordial-load --lib-dir <dir> [options]
   --read-asset <p>  read one asset through the AAsset API and report its size
   --client-settings <f>  newline-free list of flag names to pre-cache.
                     NOT the ClientSettings document — the engine loads values itself
-  --flag-overrides <f>  JSON of FastFlag overrides, passed to
-                    nativePreloadFlagOverrides. Setting FLog* channels here turns
-                    on the engine's own logging, which is the only view into what
-                    it thinks is wrong
+  --flag-overrides <f>  JSON passed to nativePreloadFlagOverrides. DIAGNOSTIC
+                    ONLY: that native does nothing observable despite its name,
+                    tested with several document shapes. To actually set a flag,
+                    use ~/.config/cordial/flags.json (see CONTRIBUTING.md)
   --gl-probe        bring up GLES2 through the symbol table and read a pixel back
   --window <secs>   GL PROBE ONLY: open a window and draw a gradient for <secs>.
                     This is Cordial's own test pattern, not Roblox rendering.
