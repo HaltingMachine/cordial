@@ -1,0 +1,172 @@
+//! What a plugin declares about itself.
+//!
+//! `plugin.json`, beside the plugin's entry module:
+//!
+//! ```json
+//! {
+//!   "id": "fps-tweaks",
+//!   "name": "FPS Tweaks",
+//!   "entry": "main.ts",
+//!   "capabilities": ["flags.read", "flags.write"]
+//! }
+//! ```
+//!
+//! Capabilities are **requested**, not granted. A manifest asking for something
+//! is the start of a conversation with the user, not the end of one — nothing
+//! here decides what a plugin gets, and a manifest that asks for everything is
+//! not thereby entitled to anything.
+//!
+//! An unrecognised capability name is an error rather than something to skip
+//! quietly. Skipping would mean a plugin built against a newer Cordial appears
+//! to install correctly and then behaves strangely, which is a much worse
+//! failure than refusing to load it.
+
+use crate::capability::Capability;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Manifest {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    pub entry: String,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Plugin {
+    pub manifest: Manifest,
+    pub dir: PathBuf,
+    pub requested: BTreeSet<Capability>,
+}
+
+impl Plugin {
+    /// The entry module, resolved inside the plugin's own directory.
+    ///
+    /// Rejects anything that escapes it. A manifest is attacker-controlled input
+    /// as far as this is concerned — it arrives with the plugin — and `"entry":
+    /// "../../../etc/shadow"` must not resolve.
+    pub fn entry_path(&self) -> Result<PathBuf, String> {
+        let entry = Path::new(&self.manifest.entry);
+        if entry.is_absolute() || entry.components().any(|c| c.as_os_str() == "..") {
+            return Err(format!("entry {:?} must be a path inside the plugin directory", self.manifest.entry));
+        }
+        Ok(self.dir.join(entry))
+    }
+}
+
+pub fn parse(text: &str, dir: &Path) -> Result<Plugin, String> {
+    let manifest: Manifest = serde_json::from_str(text).map_err(|e| e.to_string())?;
+    if manifest.id.is_empty() {
+        return Err("id must not be empty".into());
+    }
+    // The id names a directory and appears in log lines; keep it boring.
+    if !manifest.id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        return Err(format!(
+            "id {:?} may only contain letters, digits, dashes and underscores",
+            manifest.id
+        ));
+    }
+    let mut requested = BTreeSet::new();
+    for name in &manifest.capabilities {
+        match Capability::parse(name) {
+            Some(c) => {
+                requested.insert(c);
+            }
+            None => return Err(format!("unknown capability {name:?}")),
+        }
+    }
+    Ok(Plugin { manifest, dir: dir.to_path_buf(), requested })
+}
+
+/// Every plugin under `root`, one subdirectory each.
+///
+/// A plugin that fails to parse is reported and skipped rather than aborting
+/// discovery: one bad manifest should not stop every other plugin from loading.
+pub fn discover(root: &Path) -> Vec<Plugin> {
+    let mut found = Vec::new();
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return found;
+    };
+    let mut dirs: Vec<PathBuf> = entries.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
+    dirs.sort();
+
+    for dir in dirs {
+        let path = dir.join("plugin.json");
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        match parse(&text, &dir) {
+            Ok(p) => found.push(p),
+            Err(e) => println!("  plugin: {} is not loadable ({e})", path.display()),
+        }
+    }
+    found
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dir() -> PathBuf {
+        PathBuf::from("/plugins/example")
+    }
+
+    #[test]
+    fn a_manifest_parses_and_requests_capabilities() {
+        let p = parse(
+            r#"{"id":"fps","name":"FPS","entry":"main.ts","capabilities":["flags.read","log"]}"#,
+            &dir(),
+        )
+        .unwrap();
+        assert_eq!(p.manifest.id, "fps");
+        assert!(p.requested.contains(&Capability::FlagsRead));
+        assert!(p.requested.contains(&Capability::Log));
+    }
+
+    #[test]
+    fn an_unknown_capability_is_refused_rather_than_skipped() {
+        // Skipping would let a plugin built for a newer Cordial appear to
+        // install and then misbehave.
+        let e = parse(
+            r#"{"id":"x","entry":"m.ts","capabilities":["flags.read","process.spawn"]}"#,
+            &dir(),
+        )
+        .unwrap_err();
+        assert!(e.contains("process.spawn"), "{e}");
+    }
+
+    #[test]
+    fn an_entry_cannot_escape_the_plugin_directory() {
+        for bad in ["../../../etc/shadow", "/etc/shadow", "sub/../../out.ts"] {
+            let p = parse(
+                &format!(r#"{{"id":"x","entry":{},"capabilities":[]}}"#, serde_json::to_string(bad).unwrap()),
+                &dir(),
+            )
+            .unwrap();
+            assert!(p.entry_path().is_err(), "{bad} should have been refused");
+        }
+    }
+
+    #[test]
+    fn a_normal_entry_resolves_inside_the_directory() {
+        let p = parse(r#"{"id":"x","entry":"src/main.ts","capabilities":[]}"#, &dir()).unwrap();
+        assert_eq!(p.entry_path().unwrap(), dir().join("src/main.ts"));
+    }
+
+    #[test]
+    fn ids_are_restricted_to_boring_characters() {
+        assert!(parse(r#"{"id":"../evil","entry":"m.ts"}"#, &dir()).is_err());
+        assert!(parse(r#"{"id":"","entry":"m.ts"}"#, &dir()).is_err());
+        assert!(parse(r#"{"id":"ok-name_1","entry":"m.ts"}"#, &dir()).is_ok());
+    }
+
+    #[test]
+    fn capabilities_may_be_omitted_entirely() {
+        let p = parse(r#"{"id":"quiet","entry":"m.ts"}"#, &dir()).unwrap();
+        assert!(p.requested.is_empty());
+    }
+}

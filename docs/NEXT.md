@@ -44,12 +44,20 @@ Without a session the client sits on the landing page. Avatar thumbnails fail
 against user id 0 and there is nothing to do. `NativeUserJavaInterface` is
 stubbed with an empty user.
 
-`NativeSettingsInterface` exports `nativeGetCookiesForDomain`,
-`nativeGetCookiesInNetscapeFormat` and `nativeSetMultipleCookies`, which is where
-a session would be presented. Earlier analysis in this repository says the login
-path involves a captcha and a WebView-hosted Activity — if that is right, an
-embedded browser is a very large dependency and it changes the plan entirely.
-Confirm before building anything.
+**[`docs/design/sign-in.md`](design/sign-in.md) is the investigation.** Read it
+before starting; it is careful about what is verified and what is inferred.
+
+The short version: the blocker is **obtaining a session cookie**, not the stub
+code. The engine's own HTTP client takes 401/403 from authenticated endpoints
+regardless of what the Java-side user stubs return, so filling those in changes
+nothing on its own. Captcha needs a WebView (confirmed), but a
+`nativeIsLuaLoginEnabled` native hints that plain credential entry may be
+Lua-rendered instead — confirming that is the highest-value next step, because it
+decides whether an embedded browser is required at all.
+
+One correction that came out of it: the `The requested Ids are invalid`
+thumbnail failure is what the **real, logged-out Android client** also produces.
+It is not a Cordial defect and it is not evidence of anything.
 
 ## 2. The GLES fallback runs at about 1 fps
 

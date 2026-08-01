@@ -10,4 +10,5 @@
 pub mod broker;
 pub mod capability;
 pub mod host;
+pub mod manifest;
 pub mod protocol;
