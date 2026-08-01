@@ -69,6 +69,7 @@ env:
                                      CORDIAL_FULLSCREEN overrides it
   CORDIAL_DPI_SCALE=<f>              UI density Roblox lays out against.
                                      1.0 is a low-density phone; try 1.5-2
+  CORDIAL_SIGNIN_PROBE=1             ask the engine whether login is Lua-rendered
   CORDIAL_NO_VULKAN=1                make the host look like it has no Vulkan
                                      loader, forcing the GLES2/EGL fallback
                                      path Roblox uses when dlopen(libvulkan)
@@ -1012,6 +1013,39 @@ fn main() -> ExitCode {
                                             match linker::game_activity::call_bare(f) {
                                                 Ok(()) => println!("  retryInit ok"),
                                                 Err(e) => println!("  retryInit failed: {e}"),
+                                            }
+                                        }
+
+                                        // A read-only probe of the engine's own
+                                        // verdict on whether login is rendered
+                                        // by the Lua app shell rather than a
+                                        // WebView — the question that decides
+                                        // whether an embedded browser is needed
+                                        // at all. See docs/design/sign-in.md.
+                                        //
+                                        // Behind a switch because it is a tool
+                                        // for whoever is working on sign-in, not
+                                        // something every launch should print.
+                                        // It calls an exported boolean native
+                                        // and prints the answer; it drives no UI
+                                        // and enters no credentials.
+                                        if std::env::var_os("CORDIAL_SIGNIN_PROBE").is_some() {
+                                            match lib.symbol(
+                                                "Java_com_roblox_engine_jni_NativeSettingsInterface_nativeIsLuaLoginEnabled",
+                                            ) {
+                                                None => println!(
+                                                    "  [sign-in] nativeIsLuaLoginEnabled not exported"
+                                                ),
+                                                Some(f) => match linker::game_activity::call_static_bare_bool(
+                                                    f, SETTINGS,
+                                                ) {
+                                                    Ok(v) => println!(
+                                                        "  [sign-in] nativeIsLuaLoginEnabled() -> {v}"
+                                                    ),
+                                                    Err(e) => println!(
+                                                        "  [sign-in] nativeIsLuaLoginEnabled() failed: {e}"
+                                                    ),
+                                                },
                                             }
                                         }
 

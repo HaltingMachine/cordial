@@ -406,6 +406,13 @@ pub mod game_activity {
             err: *mut c_char,
             n: usize,
         ) -> c_int;
+        fn cordial_call_static_bare_bool(
+            f: *mut c_void,
+            class_name: *const c_char,
+            out_result: *mut c_int,
+            err: *mut c_char,
+            n: usize,
+        ) -> c_int;
     }
 
     fn take_err(err: Vec<u8>) -> String {
@@ -471,6 +478,27 @@ pub mod game_activity {
             )
         };
         if rc == 0 { Ok(()) } else { Err(take_err(err)) }
+    }
+
+    /// A static, zero-argument native returning `boolean`. Added purely to
+    /// observe `NativeSettingsInterface.nativeIsLuaLoginEnabled()`'s own
+    /// verdict for `docs/design/sign-in.md` — diagnostic-only, does not drive
+    /// any UI or enter any credentials.
+    pub fn call_static_bare_bool(native: *mut c_void, class_name: &str) -> Result<bool, String> {
+        let cls = CString::new(class_name).map_err(|e| e.to_string())?;
+        let mut out: c_int = -1;
+        let mut err = vec![0u8; 512];
+        // SAFETY: `native` is the exported JNI native; every buffer outlives the call.
+        let rc = unsafe {
+            cordial_call_static_bare_bool(
+                native,
+                cls.as_ptr(),
+                &mut out as *mut c_int,
+                err.as_mut_ptr() as *mut c_char,
+                err.len(),
+            )
+        };
+        if rc == 0 { Ok(out != 0) } else { Err(take_err(err)) }
     }
 
     /// A static native taking `(boolean, String)` — `setTaskSchedulerBackgroundMode`.

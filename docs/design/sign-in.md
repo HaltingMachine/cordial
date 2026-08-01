@@ -470,7 +470,7 @@ put in it** — which is the actual blocker, per §4.
 |---|---|---|
 | What does the engine expect differently when logged in? | Two identity mirrors (`NativeUserJavaInterface`, `StartAppParams`) plus, more importantly, a real cookie flowing through the engine's own HTTP client — the mirrors alone don't unblock `authenticated/*` calls. | Verified (log) for the HTTP-layer part; the mirrors' role is inferred but low-risk to fill in regardless. |
 | Where does the session live? | Three-way cookie sync between the engine's HTTP client and Android's WebView `CookieManager`, via `NativeSettingsInterface`'s three cookie natives plus `JNICookieProtocol`'s callback. | Verified (dex, readelf, log) for the contract shape; `nativeSetMultipleCookies` itself was not observed firing. |
-| Is a WebView required? | For captcha: yes, and expect it to fire in practice. For plain username/password: possibly not (`nativeIsLuaLoginEnabled`) — unresolved, worth confirming first. | Captcha: verified-adjacent. Password path: inferred, unconfirmed. |
+| Is a WebView required? | For captcha: yes, and expect it to fire in practice — even a native (`CaptchaNative`) captcha screen was found, so this stays unsettled but the WebView path still needs building regardless (§7.5). For plain username/password: **no** — `FIntLuaAppLoginMethod` (default `"1"`) makes this Lua-rendered by default, confirmed by calling the engine's own native directly and by a `LoginNative` screen with real username/password copy shipped in the app's own content (§7). | Captcha: verified-adjacent, refined but not overturned. Password path: **verified**, resolved from §3.3's "possibly not, unconfirmed." |
 | Is there a path that avoids it? | No confirmed one. Local-device "magic login" is the most promising unverified lead; a join-ticket path already assumed by another design doc remains unresolved. | Inferred, both. |
 | What's the minimum viable step? | Five mechanical calls into existing/adjacent JNI plumbing, entirely gated on obtaining a real cookie by some means outside Cordial. | Verified for the mechanics; the precondition (§4) is the real blocker. |
 
@@ -481,3 +481,303 @@ either a WebView, a second device, or an unresolved ticket flow." The stub
 code in `NativeUserJavaInterface` is not the blocker — it is honestly
 reporting a true fact (nobody is signed in) and would need real data fed to
 it regardless of which acquisition path gets built.
+
+---
+
+## 7. Resolving §3.3: does `nativeIsLuaLoginEnabled` mean login can skip a WebView?
+
+§3.3 above flagged `NativeSettingsInterface.nativeIsLuaLoginEnabled()` as the
+single most valuable open question, unresolved because the logged-out capture
+never reaches a login screen. This section answers it by tracing the dex
+bytecode that consumes the native's return value, isolating the exact
+FastFlag that controls it, and running Cordial with and against that flag —
+a real control, not a guess.
+
+No account was created, no credentials were entered, and nothing here typed
+into or submitted a login form.
+
+### 7.1 What `nativeIsLuaLoginEnabled` actually gates **[verified: dex bytecode]**
+
+The dex declares the native (as §2.1 already established), but nothing in
+this project had previously traced who calls it or what branches on the
+result. Disassembling the dex directly (via `androguard`, reading actual
+instructions rather than inferring from names) settles both:
+
+```
+Luk/c; a ()Z
+  invoke-static Luk/c;->b()Z        ; b() just calls the native and returns it
+  move-result v0
+  if-nez v0, +0bh                   ; if native said true -> return true
+  invoke-static Lel/s;->i()Z        ; else check a second condition...
+  move-result v0
+  if-eqz v0, +003h
+  goto +3h
+  const/4 v0, 0
+  return v0
+  const/4 v0, 1
+  return v0
+
+Lel/s; i ()Z
+  const/4 v0, 0
+  return v0                         ; ...which is hard-coded to `false` in this build
+```
+
+So `uk.c.a()` — the actual gate everything else calls — reduces to exactly
+`nativeIsLuaLoginEnabled()` in this shipping build; the second disjunct is
+dead weight (a debug/staging override compiled out here).
+
+`uk.c.a()` has exactly two callers in the whole APK, both `handleNotification()`-style
+methods on Activity subclasses sharing a common base (`com/roblox/client/a`),
+both handling the **logout event** (`code == 101`):
+
+- `com.roblox.client.ActivityNativeMain.V(int, Bundle)`
+- `com.roblox.client.RobloxWebActivity.V(int, Bundle)`
+
+In both, when `uk.c.a()` is true, the handler additionally:
+
+1. Sets a one-shot static flag (`tj.b.p()` → `Ltj/b;->e = true`), and
+2. Spins up an `AsyncTask` (`ActivityNativeMain$l`) that checks whether the
+   engine's rendering `Surface` is still alive and, if so, **reuses it**
+   (`Vi/e.w`/`Vi/e.x`) instead of tearing it down.
+
+That one-shot flag is consumed later, in `ActivityNativeMain.e0()` — the
+handler for the engine's own `onAppStarted` callback — via `tj.b.e()` (a
+read-and-clear getter), which re-triggers the same surface-reuse task once
+the Lua app shell reports it has restarted.
+
+**What this means:** `nativeIsLuaLoginEnabled` does not gate "render form A
+vs form B" directly. It gates a **logout → re-entry rendering-continuity
+optimization**: when true, the app keeps its OpenGL rendering surface warm
+across a logout and hands it straight back to the restarting Lua app shell,
+instead of tearing the surface down and rebuilding it. That behaviour only
+makes sense if whatever the user lands on next — the post-logout
+landing/login screen — is rendered inside that same Lua/GL surface rather
+than by launching a separate WebView-hosting Activity. It is corroborating
+evidence for the Lua-login reading, not the direct proof §3.3 was hoping for;
+§7.4 below supplies the direct proof.
+
+### 7.2 Which FastFlag controls it, isolated by bisection **[verified: cordial, live run]**
+
+Searching the client-settings document (`clientsettings.orig.json`, a
+previously-captured copy) for anything matching `*Login*` and `*Lua*Login*`
+turns up ten plausible-looking candidates, none named exactly
+`IsLuaLoginEnabled`:
+
+```
+FFlagEnableLuaLoginRevamp6 = True
+FFlagEnableLuaLoginRevamp8 = True
+FFlagLuaAppUsingSecurityQuestionsForLuaLogin2 = True
+FFlagDisableAndroidLogInReleaseBuilds_IXP = "1;...;flagbank"   (an IXP bucket string, not a plain bool)
+FIntLuaAppLoginMethod = "1"
+FIntLuaAppLoginRollout = "100"
+FIntLuaLoginGenderSelector = "1"
+```
+
+`strings` on `libroblox.so` finds only the exported symbol name itself
+(`Java_com_roblox_engine_jni_NativeSettingsInterface_nativeIsLuaLoginEnabled`)
+— no flag-name string literal near it, so which flag the native actually
+reads could not be settled by inspection. It had to be settled by running it.
+
+**Instrumentation added** (uncommitted, in this worktree only): a new
+zero-argument `boolean`-returning JNI call helper —
+`cordial_call_static_bare_bool` in `native/init_params.cpp`, wired through
+`crates/cordial-linker-sys/src/lib.rs` as `call_static_bare_bool`, invoked
+once in `crates/cordial-runtime/src/bin/load.rs` right after flags and
+client settings have both been delivered to the engine. It calls
+`NativeSettingsInterface.nativeIsLuaLoginEnabled()` directly and prints the
+result — `[sign-in probe] nativeIsLuaLoginEnabled() -> <bool>` — nothing
+else. This does not drive any UI and does not run any dex/Java bytecode
+(Cordial doesn't execute the APK's dex at all — see the caveat in §7.3); it
+only reads the engine's own boolean answer.
+
+**A methodology note, for anyone re-running this:** the worktree this was
+run from predated `crates/cordial-runtime/src/flags.rs` (the flags-to-client-settings
+merge pipeline described in that file's own doc comment as "the mechanism
+that demonstrably works," with its own independently-verified control using
+`DFFlagRbxTransportUseRtcioRna`). That file, plus the four-line change to
+`client_settings.rs` that calls it, existed already on `main` but not on this
+branch, so a first attempt at "set a flag in `flags.json` and see if anything
+changes" produced two identical `true` results — not because the flag has no
+effect, but because the file was being silently ignored by a binary that had
+no merge step at all. Once `flags.rs` and the matching `client_settings.rs`
+hunk were carried over (uncommitted; both already exist verbatim on `main`,
+this only makes this branch's binary match it) and `serde_json` added to
+`cordial-runtime`'s `Cargo.toml`, the pipeline worked and gave the results
+below. This is exactly the kind of gap the task's own warning about
+disassembly-derived conclusions is trying to prevent — the fix was to notice
+the run wasn't testing what it claimed to, not to trust the first "no
+effect" result.
+
+**Control, then bisection**, each a full `cordial-load --run 25` under
+`CORDIAL_MONITOR=1`, reading `[sign-in probe]` from stdout:
+
+| `~/.config/cordial/flags.json` | `nativeIsLuaLoginEnabled()` |
+|---|---|
+| absent (control) | **true** |
+| all 10 candidates forced off/0 | **false** |
+| the 5 real `FFlag*`/IXP candidates only | true (no change) |
+| the other 5 (3 guessed-name flags + 2 `FInt*`) | **false** |
+| just the 3 guessed-name flags (`FFlagIsLuaLoginEnabled`, `FFlagLuaLoginEnabled`, `DFFlagIsLuaLoginEnabled` — none of which exist in the real client-settings document, so these are pure no-ops that happen to get merged in as new, unread keys) | true (no change) |
+| just `FIntLuaAppLoginMethod=0` + `FIntLuaAppLoginRollout=0` | **false** |
+| just `FIntLuaAppLoginMethod=0` alone | **false** |
+| just `FIntLuaAppLoginRollout=0` alone (Method left at its default `1`) | true (no change) |
+
+**Isolated result: `FIntLuaAppLoginMethod` is the controlling flag.** Its
+shipped default is `"1"`, which is why the honest, un-overridden control run
+already returns `true` — **Lua login is the default in this build**, not
+something that needs turning on. Setting it to `0` reproducibly flips
+`nativeIsLuaLoginEnabled()` to `false`. `FIntLuaAppLoginRollout` (a
+percentage-shaped name, default `"100"`) does not independently affect it —
+consistent with it being a server-side experiment-allocation knob rather
+than something the client itself branches on directly. None of
+`FFlagEnableLuaLoginRevamp6`/`8`, `FFlagLuaAppUsingSecurityQuestionsForLuaLogin2`,
+or `FFlagDisableAndroidLogInReleaseBuilds_IXP` — despite all sounding
+relevant by name — moved this particular native at all; they likely gate
+sub-features of the Lua login *experience* (a UI "revamp," a security-questions
+step) rather than the native/WebView choice itself. Ruling those out by
+running them, rather than assuming from the name, is itself a finding.
+
+### 7.3 The honest limit of what "observe" could mean here **[verified: cordial]**
+
+The task asked to turn the flag and *observe*, meaning: see whether the
+rendered UI changes. It doesn't, not yet, and here is exactly why: **Cordial
+does not execute the APK's dex bytecode.** Everything this section traced in
+§7.1 — `uk.c.a()`, `ActivityNativeMain.V`, `RobloxWebActivity.V`, `tj.b` —
+is Java code that runs on Android's ART VM. Cordial only loads
+`libroblox.so` natively and drives its exported entry points directly from
+Rust/C++, standing in for the Java caller by hand (exactly the pattern
+`cordial_call_static_strings` and friends already use, and the one this
+section's new `cordial_call_static_bare_bool` also uses). There is no ART,
+so there is no code path that would ever call `uk.c.a()`, branch on it, or
+show a login screen as a consequence — regardless of what the native
+answers.
+
+So what was actually verified is narrower than "the UI changes": it is that
+**the engine's own native call, invoked directly and read directly, answers
+`true` by default and can be flipped to `false` by a specific, isolated,
+real FastFlag** — a fully mechanical fact about the shipped binary,
+independent of any UI. Whether flipping it would visibly change a rendered
+screen is not something Cordial can currently observe, because Cordial has
+no login-launching UI of its own yet and no dex execution to drive the real
+one. That gap is orthogonal to this question and unchanged by this
+investigation.
+
+### 7.4 Is there a Lua-rendered login UI in the shipped content? Yes — directly, not just inferred **[verified: rbxm strings]**
+
+`assets/ExtraContent/models/UniversalApp/UniversalApp.rbxm` — part of the
+Lua app shell's own content, extracted from the APK — is a Roblox binary
+file (`<roblox!` header, zstd-compressed chunks). Decompressing its chunks
+(a from-scratch reader was needed; no existing tool in the environment
+handles this format, and `androguard`/binary-format libraries don't apply to
+it) and running `strings` over the ~46 MB decompressed property chunk finds
+a **complete, multi-language localization table for a full authentication
+UI**, including, among many others:
+
+```
+Authentication.Login.Heading.Login
+Authentication.Login.Label.Username
+Authentication.Login.Label.Password
+Authentication.Login.Label.Email
+Authentication.Login.Label.UsernameEmailOrPhoneNumber
+Authentication.Login.Label.UsernameEmailPhone
+Authentication.Login.Action.Next
+Authentication.Login.Action.LogInEmailOneTimeCode
+Authentication.Login.Action.SendVerificationEmail
+Authentication.Login.Description.PasskeyDescription
+Authentication.Login.LinkIllegalChildAccountLinking   (mentions a QR code)
+Authentication.CrossDevice.Label.LoginInstructions
+Authentication.CrossDevice.Label.ConfirmAndLoginAs
+Authentication.CrossDevice.Response.LoginSuccess
+```
+
+translated into at least French, Turkish, Italian, Polish, Spanish, and a
+China-specific "Luobu"-branded variant. `Authentication.CrossDevice.*`
+independently corroborates §4.2's "magic login" lead (an already-signed-in
+device confirming a login for a new one) with real shipped copy, not just
+suggestively-named dex classes.
+
+More directly still, the same file contains what reads as the app shell's
+own registry of named, navigable screens — a flat array of Pascal-style
+strings, one screen name each:
+
+```
+...SinglePageSignUp MultiPageSignup LuobuSignUpPage Landing Birthday
+LoginNative CaptchaNative ViewFriends SearchUsers ShareSheet SdkShare
+ReportAbuse ReportScreen AddFriendsPage ConnectionsHub CoHubMyConnections
+CoHubAddConnections ScanQrCode GenericOpaqueWebPage ChallengeHybridOverlayPage
+ChallengeHybridWebView PhoneVerification EditUsername PassesPage ...
+```
+
+`LoginNative` is a real, first-class screen name the app shell's own
+navigation system recognises — and it is the *only* login-shaped screen name
+anywhere in this file; `LoginWeb`, `LoginWebView`, and `WebViewLogin` all
+return zero matches. Screens that genuinely are WebView-hosted are named
+accordingly right alongside it in the same list —
+`GenericWebPage`/`GenericOpaqueWebPage`, `AddFriendsWebView`,
+`ChallengeHybridWebView` — which is good corroboration that this naming
+convention is real and consistently applied, not incidental.
+
+This directly confirms the premise §3.3 could only infer: **the shipped Lua
+app shell has its own native login screen, `LoginNative`, with full
+username/password copy, and it is a named peer of screens that really are
+WebView-hosted, distinguished by the same naming convention.** Combined with
+§7.2 (Lua login is the shipped default) and §7.1 (the logout path's own
+surface-continuity behaviour assumes the next screen is Lua-rendered), the
+three independent lines of evidence now agree.
+
+**Caveat:** finding the string `LoginNative` in a screen-name enum proves the
+screen is defined and named, not that it is reachable, wired up, or free of
+its own dependency on WebView-hosted sub-flows once inside it (e.g. a "log
+in with Google" button on that screen could still open a WebView without
+that changing the screen's own name or its username/password fields). No
+navigation into any screen was attempted — that would require pressing UI
+elements this task's constraints put out of scope for anything past
+observation.
+
+### 7.5 Does captcha still block it? Narrowed, not settled — and one part cuts against the convenient answer **[verified: rbxm strings]**
+
+The same screen-name list contains `CaptchaNative` immediately next to
+`LoginNative` — a native-rendered captcha screen, distinct from the
+WebView-shaped `ChallengeHybridWebView`/`ChallengeHybridOverlayPage` entries
+in the same list (which read as the natural landing spot for
+`ActivityFunCaptcha`'s URL-based `LoginCaptchaConfig`/`SignUpCaptchaConfig`,
+per §3.2). Both `LoginNative` and `CaptchaNative` occur exactly once in the
+file — as enum entries only; no second reference to either was found, so
+there is no evidence here of which triggers when, or that `CaptchaNative` is
+actually wired to anything live.
+
+**The part that cuts against the convenient reading:** the same file also
+contains `Turnstile`/`turnstile` (Cloudflare's captcha widget) and
+`CaptchaV2`/`captchav2` strings. Turnstile is, in every other context it
+ships in, a web/JS widget — its presence alongside `CaptchaNative` reads
+more like "this build supports more than one captcha backend, selected
+server-side by risk assessment" than "captcha has moved off WebView." This
+document already said (§3.4) that captcha is risk-based and server-decided,
+not something the client predicts — that stands. `CaptchaNative`'s existence
+is real and new, and worth someone confirming by actually reaching a captcha
+challenge on a real account, but it does not license "a WebView is no longer
+needed for captcha." **A WebView implementation should still be budgeted
+for.**
+
+### 7.6 What this changes
+
+- **§3.3's open question is now answered, not just narrowed:** plain
+  username/password login is Lua-rendered by default in this shipped build
+  (`FIntLuaAppLoginMethod = "1"`), the engine's own native agrees when called
+  directly, and the shipped Lua content itself independently confirms a
+  `LoginNative` screen exists with full username/password copy. §3.3's
+  "possibly not" becomes "verified: no, not for the base form."
+- **What is still true and unchanged:** §3.2's WebView-based captcha finding
+  stands; §7.5 adds a native captcha screen to the picture without replacing
+  it. §4's verdict (no confirmed WebView-free *path to a session*, i.e. §2's
+  actual blocker) is untouched — this section is about what renders the
+  form, not about how Cordial would obtain a real cookie, which remains the
+  real blocker per §4 and §6.
+- **What is newly true and worth carrying forward:** if a login-driving UI
+  is ever built in Cordial, the rendering-technology question that used to
+  gate the whole plan (embed a browser, yes or no) has a real, verified
+  answer for the base form: **no, not for username/password entry itself.**
+  A WebView is still very likely needed somewhere in the full flow (captcha
+  most likely, federated/passkey login certainly), so it is not removed as a
+  dependency of the project — but it is no longer required to render the
+  first, most common screen a user would see.

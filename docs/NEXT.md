@@ -50,10 +50,28 @@ before starting; it is careful about what is verified and what is inferred.
 The short version: the blocker is **obtaining a session cookie**, not the stub
 code. The engine's own HTTP client takes 401/403 from authenticated endpoints
 regardless of what the Java-side user stubs return, so filling those in changes
-nothing on its own. Captcha needs a WebView (confirmed), but a
-`nativeIsLuaLoginEnabled` native hints that plain credential entry may be
-Lua-rendered instead — confirming that is the highest-value next step, because it
-decides whether an embedded browser is required at all.
+nothing on its own.
+
+**Good news, and it changes the plan: plain login does not need a WebView.**
+Lua-rendered login is the *shipped default* in this build, established three
+ways — the dex bytecode for what the native gates, the flag that controls it, and
+the shipped content itself, which carries a full `Authentication.Login.*` string
+table and a `LoginNative` screen name while `LoginWeb`/`LoginWebView` return zero
+matches.
+
+Reproduced here with a control:
+
+```text
+default                          nativeIsLuaLoginEnabled() -> true
+FIntLuaAppLoginMethod=0          nativeIsLuaLoginEnabled() -> false
+```
+
+`CORDIAL_SIGNIN_PROBE=1` asks the engine directly.
+
+**Captcha is still narrowed rather than settled** — there is a `CaptchaNative`
+screen name, but also `Turnstile` and `CaptchaV2` strings suggesting
+server-selected backends, so budget for a WebView on that path even though the
+login form itself does not need one.
 
 One correction that came out of it: the `The requested Ids are invalid`
 thumbnail failure is what the **real, logged-out Android client** also produces.

@@ -1052,6 +1052,37 @@ int cordial_call_bare(void* fn, char* err, size_t err_len) {
     }
 }
 
+/// A static, zero-argument native returning `boolean` — specifically added to
+/// observe `NativeSettingsInterface.nativeIsLuaLoginEnabled()`'s own verdict,
+/// diagnostic-only instrumentation for `docs/design/sign-in.md`. This does not
+/// drive any UI or enter any credentials; it only reads the engine's boolean
+/// answer. Mirrors `cordial_call_static_strings`'s convention: a static
+/// native's receiver is the `Class` object itself, per JNI.
+int cordial_call_static_bare_bool(void* fn, const char* class_name, int* out_result,
+                                   char* err, size_t err_len) {
+    using Call = jboolean (*)(JNIEnv*, jobject);
+    auto* env = cordial::process_env();
+    if (!fn || !env || !class_name) {
+        snprintf(err, err_len, "no JavaVM, or the native is not exported");
+        return -1;
+    }
+    try {
+        auto cls = env->GetClass(class_name);
+        jboolean r = reinterpret_cast<Call>(fn)(env->GetJNIEnv(),
+                                                 (jobject)cordial::to_jni(env, cls));
+        if (out_result) {
+            *out_result = r ? 1 : 0;
+        }
+        return 0;
+    } catch (const std::exception& e) {
+        snprintf(err, err_len, "%s", e.what());
+        return -1;
+    } catch (...) {
+        snprintf(err, err_len, "non-standard C++ exception");
+        return -1;
+    }
+}
+
 } // extern "C"
 
 extern "C" {
