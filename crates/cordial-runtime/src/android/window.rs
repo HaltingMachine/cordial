@@ -31,6 +31,10 @@ struct Xlib {
         Display, Window, c_int, c_int, u32, u32, u32, c_ulong, c_ulong,
     ) -> Window,
     map_window: unsafe extern "C" fn(Display, Window) -> c_int,
+    set_wm_normal_hints: unsafe extern "C" fn(Display, Window, *mut XSizeHints),
+    set_class_hint: unsafe extern "C" fn(Display, Window, *mut XClassHint) -> c_int,
+    set_wm_hints: unsafe extern "C" fn(Display, Window, *mut XWMHints) -> c_int,
+    move_window: unsafe extern "C" fn(Display, Window, c_int, c_int) -> c_int,
     store_name: unsafe extern "C" fn(Display, Window, *const c_char) -> c_int,
     flush: unsafe extern "C" fn(Display) -> c_int,
     destroy_window: unsafe extern "C" fn(Display, Window) -> c_int,
@@ -81,6 +85,10 @@ impl Xlib {
             flush: sym!("XFlush"),
             destroy_window: sym!("XDestroyWindow"),
             select_input: sym!("XSelectInput"),
+            set_wm_normal_hints: sym!("XSetWMNormalHints"),
+            set_class_hint: sym!("XSetClassHint"),
+            set_wm_hints: sym!("XSetWMHints"),
+            move_window: sym!("XMoveWindow"),
             connection_number: sym!("XConnectionNumber"),
             pending: sym!("XPending"),
             next_event: sym!("XNextEvent"),
@@ -133,6 +141,135 @@ unsafe impl Sync for HostWindow {}
 
 static WINDOW: OnceLock<HostWindow> = OnceLock::new();
 
+
+/// `XSizeHints`. Only the leading fields matter here, but the struct has to be
+/// the full size Xlib expects or `XSetWMNormalHints` reads past the end.
+#[repr(C)]
+struct XSizeHints {
+    flags: c_long,
+    x: c_int,
+    y: c_int,
+    width: c_int,
+    height: c_int,
+    min_width: c_int,
+    min_height: c_int,
+    max_width: c_int,
+    max_height: c_int,
+    width_inc: c_int,
+    height_inc: c_int,
+    min_aspect_x: c_int,
+    min_aspect_y: c_int,
+    max_aspect_x: c_int,
+    max_aspect_y: c_int,
+    base_width: c_int,
+    base_height: c_int,
+    win_gravity: c_int,
+}
+
+#[repr(C)]
+struct XClassHint {
+    res_name: *mut c_char,
+    res_class: *mut c_char,
+}
+
+#[repr(C)]
+struct XWMHints {
+    flags: c_long,
+    input: c_int,
+    initial_state: c_int,
+    icon_pixmap: c_ulong,
+    icon_window: Window,
+    icon_x: c_int,
+    icon_y: c_int,
+    icon_mask: c_ulong,
+    window_group: c_ulong,
+}
+
+/// Where to put the window, in root coordinates.
+///
+/// A window created at 0,0 lands on the primary monitor, which is not where
+/// anyone wants a game window if they kept a second screen for exactly this.
+/// `CORDIAL_MONITOR=<n>` selects the nth monitor reported by Xinerama (0 is the
+/// first); `CORDIAL_WINDOW_POS=<x>,<y>` overrides with explicit coordinates and
+/// wins if both are set.
+///
+/// Xinerama rather than RandR because the query is one call with no resource
+/// management, and every multi-head X server that supports RandR also answers
+/// Xinerama. Returns (0, 0) when nothing is configured or the query fails, which
+/// is exactly the previous behaviour.
+fn window_origin() -> (c_int, c_int) {
+    if let Ok(pos) = std::env::var("CORDIAL_WINDOW_POS") {
+        let mut parts = pos.split(',').map(str::trim);
+        if let (Some(Ok(x)), Some(Ok(y))) = (
+            parts.next().map(str::parse::<c_int>),
+            parts.next().map(str::parse::<c_int>),
+        ) {
+            return (x, y);
+        }
+        eprintln!("[android] CORDIAL_WINDOW_POS={pos:?} is not <x>,<y>; ignoring");
+    }
+
+    let Ok(want) = std::env::var("CORDIAL_MONITOR") else {
+        return (0, 0);
+    };
+    let Ok(want) = want.trim().parse::<usize>() else {
+        eprintln!("[android] CORDIAL_MONITOR must be a number; ignoring");
+        return (0, 0);
+    };
+
+    #[repr(C)]
+    struct XineramaScreenInfo {
+        screen_number: c_int,
+        x_org: i16,
+        y_org: i16,
+        width: i16,
+        height: i16,
+    }
+
+    const RTLD_NOW: c_int = 2;
+    // SAFETY: dlopen/dlsym with literal names; every result is null-checked.
+    unsafe {
+        let lib = dlopen(c"libXinerama.so.1".as_ptr(), RTLD_NOW);
+        if lib.is_null() {
+            eprintln!("[android] CORDIAL_MONITOR needs libXinerama; ignoring");
+            return (0, 0);
+        }
+        let query = dlsym(lib, c"XineramaQueryScreens".as_ptr());
+        if query.is_null() {
+            return (0, 0);
+        }
+        let query: unsafe extern "C" fn(Display, *mut c_int) -> *mut XineramaScreenInfo =
+            std::mem::transmute(query);
+        // The caller already has a display open; re-opening here would be a
+        // second connection for one query, so this runs against the same one.
+        let d = CURRENT_DISPLAY.load(std::sync::atomic::Ordering::Relaxed);
+        if d == 0 {
+            return (0, 0);
+        }
+        let mut n: c_int = 0;
+        let screens = query(d as Display, &mut n);
+        if screens.is_null() || n <= 0 {
+            return (0, 0);
+        }
+        let list = std::slice::from_raw_parts(screens, n as usize);
+        let origin = match list.get(want) {
+            Some(s) => (s.x_org as c_int, s.y_org as c_int),
+            None => {
+                eprintln!(
+                    "[android] CORDIAL_MONITOR={want} but only {n} monitor(s); using the first"
+                );
+                (list[0].x_org as c_int, list[0].y_org as c_int)
+            }
+        };
+        origin
+    }
+}
+
+/// The open display, so `window_origin` can query monitors on the same
+/// connection rather than opening a second one for a single call.
+static CURRENT_DISPLAY: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 /// Open a window. Fails cleanly when there is no display, which is a normal
 /// condition rather than an error — the loader and asset paths do not need one.
 pub fn open(width: u32, height: u32, title: &str) -> Result<&'static HostWindow, String> {
@@ -155,9 +292,12 @@ pub fn open(width: u32, height: u32, title: &str) -> Result<&'static HostWindow,
 
     // SAFETY: `display` is open; the geometry and border/background pixels are
     // plain values.
+    CURRENT_DISPLAY.store(display as usize, std::sync::atomic::Ordering::Relaxed);
+    let (ox, oy) = window_origin();
+
     let (window, conn_fd) = unsafe {
         let root = (xlib.default_root_window)(display);
-        let w = (xlib.create_simple_window)(display, root, 0, 0, width, height, 0, 0, 0);
+        let w = (xlib.create_simple_window)(display, root, ox, oy, width, height, 0, 0, 0);
         // XStoreName sets WM_NAME, which is XA_STRING — Latin-1, not UTF-8.
         // An em dash here renders as mojibake, so the title is kept ASCII
         // rather than encoded twice for a window caption.
@@ -167,8 +307,57 @@ pub fn open(width: u32, height: u32, title: &str) -> Result<&'static HostWindow,
             .collect();
         let name = CString::new(ascii).unwrap_or_default();
         (xlib.store_name)(display, w, name.as_ptr());
+
+        // Without WM hints a window manager is free to place this wherever it
+        // likes and to decide it does not take keyboard focus. Both were
+        // happening: the window landed on the primary monitor whatever
+        // `CORDIAL_MONITOR` said, and key events went elsewhere while mouse
+        // events still arrived, because ButtonPress is delivered by pointer
+        // position but KeyPress follows the focus.
+        //
+        // USPosition rather than PPosition: it means "the user asked for this
+        // position", which window managers honour where they routinely override
+        // a mere program preference.
+        let mut hints = XSizeHints {
+            flags: 1 << 0, // USPosition
+            x: ox,
+            y: oy,
+            width: width as c_int,
+            height: height as c_int,
+            min_width: 0, min_height: 0, max_width: 0, max_height: 0,
+            width_inc: 0, height_inc: 0,
+            min_aspect_x: 0, min_aspect_y: 0, max_aspect_x: 0, max_aspect_y: 0,
+            base_width: 0, base_height: 0, win_gravity: 0,
+        };
+        (xlib.set_wm_normal_hints)(display, w, &mut hints);
+
+        // InputHint | StateHint, asking to be given the keyboard.
+        let mut wm = XWMHints {
+            flags: (1 << 0) | (1 << 1),
+            input: 1,
+            initial_state: 1, // NormalState
+            icon_pixmap: 0, icon_window: 0, icon_x: 0, icon_y: 0,
+            icon_mask: 0, window_group: 0,
+        };
+        (xlib.set_wm_hints)(display, w, &mut wm);
+
+        // WM_CLASS, so the window is addressable by rule in a tiling or
+        // scripted setup rather than only by title.
+        let res_name = CString::new("cordial").unwrap_or_default();
+        let res_class = CString::new("Cordial").unwrap_or_default();
+        let mut class = XClassHint {
+            res_name: res_name.as_ptr() as *mut c_char,
+            res_class: res_class.as_ptr() as *mut c_char,
+        };
+        (xlib.set_class_hint)(display, w, &mut class);
+
         (xlib.select_input)(display, w, INPUT_EVENT_MASK);
         (xlib.map_window)(display, w);
+        // Again after mapping: some window managers apply their own placement
+        // on map and ignore the pre-map position entirely.
+        if (ox, oy) != (0, 0) {
+            (xlib.move_window)(display, w, ox, oy);
+        }
         (xlib.flush)(display);
         (w, (xlib.connection_number)(display))
     };

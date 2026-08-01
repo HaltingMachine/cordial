@@ -59,6 +59,10 @@ env:
                                      functions with fixed-arity ones, which is
                                      not ABI-safe — it changes behaviour)
   CORDIAL_ANDROID_TRACE=1            log Android API calls (safe; no variadics)
+  CORDIAL_MONITOR=<n>                open the window on the nth monitor (0 is
+                                     the first), instead of the primary one
+  CORDIAL_WINDOW_POS=<x>,<y>         explicit window position; wins over
+                                     CORDIAL_MONITOR
 ";
 
 fn parse() -> Result<Options, String> {
