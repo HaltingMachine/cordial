@@ -72,7 +72,6 @@ macro_rules! replace {
 
 pub fn overrides() -> Vec<(&'static str, *mut c_void)> {
     vec![
-        forward!(CREATE_WINDOW_SURFACE, "eglCreateWindowSurface", (a, b, c, d)),
         forward!(MAKE_CURRENT, "eglMakeCurrent", (a, b, c, d)),
         forward!(SWAP_BUFFERS, "eglSwapBuffers", (a, b)),
         forward!(CLEAR, "glClear", (a)),

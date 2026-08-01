@@ -17,6 +17,7 @@ pub mod config;
 pub mod gl;
 pub mod glcount;
 pub mod looper;
+pub mod system;
 pub mod window;
 
 use std::ffi::c_void;

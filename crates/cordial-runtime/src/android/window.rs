@@ -268,6 +268,50 @@ extern "C" fn native_window_unlock_and_post(_window: *mut c_void) -> i32 {
     -38 // -ENOSYS
 }
 
+/// `eglCreateWindowSurface`, with the native window translated.
+///
+/// Android's EGL takes an `ANativeWindow*`. The host's EGL, on X11, takes a
+/// `Window` — an XID. Roblox naturally passes the `ANativeWindow*` Cordial
+/// handed it through `ANativeWindow_fromSurface`, and Mesa read that pointer as
+/// an XID and answered:
+///
+/// ```text
+/// [FLog::SurfaceController] Mode 4 failed: Error creating context: eglCreateWindowSurface 3003
+/// [FLog::SurfaceController] RenderView is NULL
+/// ```
+///
+/// 3003 is `EGL_BAD_ALLOC`. Substituting the real window is the whole fix, and
+/// it belongs here rather than in `glcount` because the translation is not
+/// diagnostic — without it there is no surface at all, whether or not anyone
+/// asked for call counts.
+///
+/// There is exactly one window in this runtime, so any pointer arriving here is
+/// that window; the argument is replaced unconditionally rather than compared
+/// against a handle that could only ever have one value.
+extern "C" fn egl_create_window_surface(
+    dpy: *mut c_void,
+    config: *mut c_void,
+    _native_window: *mut c_void,
+    attribs: *mut c_void,
+) -> *mut c_void {
+    crate::android::glcount::CREATE_WINDOW_SURFACE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    extern "C" {
+        fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+    }
+    let name = CString::new("eglCreateWindowSurface").unwrap_or_default();
+    // SAFETY: RTLD_DEFAULT; libEGL is in the global scope by the time the engine
+    // reaches this call.
+    let f = unsafe { dlsym(std::ptr::null_mut(), name.as_ptr()) };
+    if f.is_null() {
+        return std::ptr::null_mut();
+    }
+    type Fn_ = extern "C" fn(*mut c_void, *mut c_void, c_ulong, *mut c_void) -> *mut c_void;
+    // SAFETY: resolved from the host for exactly this name.
+    let f: Fn_ = unsafe { std::mem::transmute(f) };
+    let win = current().map(|w| w.egl_native_window()).unwrap_or(0);
+    f(dpy, config, win, attribs)
+}
+
 pub fn overrides() -> Vec<(&'static str, *mut c_void)> {
     macro_rules! f {
         ($name:literal, $fn:expr) => {
@@ -284,5 +328,6 @@ pub fn overrides() -> Vec<(&'static str, *mut c_void)> {
         f!("ANativeWindow_setBuffersGeometry", native_window_set_buffers_geometry),
         f!("ANativeWindow_lock", native_window_lock),
         f!("ANativeWindow_unlockAndPost", native_window_unlock_and_post),
+        f!("eglCreateWindowSurface", egl_create_window_surface),
     ]
 }

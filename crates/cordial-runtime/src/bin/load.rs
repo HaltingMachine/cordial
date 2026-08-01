@@ -188,6 +188,12 @@ fn main() -> ExitCode {
         }
     };
 
+    // Before anything can resolve a path: Android's `/system`, served from a
+    // directory Cordial builds out of the host's fonts. Roblox asks for
+    // `/system/fonts/NotoSansCJK-Regular.ttc` during app startup and turns the
+    // miss into an empty path and an unhandled exception.
+    cordial_runtime::android::system::install();
+
     if let Some(apk) = &opt.apk {
         match cordial_runtime::android::asset::set_apk(std::path::Path::new(apk)) {
             Ok(()) => println!("assets: {apk}"),
@@ -436,7 +442,17 @@ fn main() -> ExitCode {
                     None if !skip_agdk => eprintln!("  initializeNativeCode is not exported"),
                     None => {}
                     Some(f) => {
-                        let files = std::env::var("CORDIAL_FILES_DIR").unwrap_or_else(|_| {
+                        // `initStorageManagerNativeV3` takes *two different*
+                        // directories. The Waydroid capture shows the real
+                        // client using `<app>/files` and `<app>/cache`, with the
+                        // engine putting `cache/flag_cache.dat` and
+                        // `cache/tombstone.dat` under the second one. Cordial was
+                        // passing a single path twice — and one that had never
+                        // been created, since nothing here calls `mkdir`. An
+                        // Android app's `files` and `cache` dirs always exist by
+                        // the time any app code runs, so the engine is entitled
+                        // to assume it.
+                        let root = std::env::var("CORDIAL_FILES_DIR").unwrap_or_else(|_| {
                             format!(
                                 "{}/cordial/instances/default/data",
                                 std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| format!(
@@ -445,6 +461,13 @@ fn main() -> ExitCode {
                                 ))
                             )
                         });
+                        let files = format!("{root}/files");
+                        let cache = format!("{root}/cache");
+                        for d in [&files, &cache] {
+                            if let Err(e) = std::fs::create_dir_all(d) {
+                                println!("  could not create {d}: {e}");
+                            }
+                        }
                         // Android's framework prepares the UI thread's looper
                         // before any app code runs, and AGDK's
                         // initializeNativeCode bails out with a zero handle if
@@ -504,7 +527,107 @@ fn main() -> ExitCode {
                                         // cannot read its own content, which is
                                         // why nothing downstream ever starts —
                                         // no app shell, no network, no frame.
+                                        // `NativeSettingsInterface` — where the
+                                        // app tells the engine which directories
+                                        // it owns. Nothing here called these, so
+                                        // the engine resolved every path it built
+                                        // from them against the working
+                                        // directory: `./appData`, `cache`,
+                                        // `http`, `sounds`. The capture shows the
+                                        // real client using absolute paths under
+                                        // its own storage for all of them.
+                                        // Signatures read out of the shipping
+                                        // APK's dex.
+                                        const SETTINGS: &str =
+                                            "com/roblox/engine/jni/NativeSettingsInterface";
+                                        let external = format!("{root}/external");
+                                        let _ = std::fs::create_dir_all(&external);
+                                        let dirs: &[(&str, Vec<&str>)] = &[
+                                            (
+                                                "Java_com_roblox_engine_jni_NativeSettingsInterface_nativeSetFilesDirectory",
+                                                vec![files.as_str()],
+                                            ),
+                                            (
+                                                "Java_com_roblox_engine_jni_NativeSettingsInterface_nativeSetCacheDirectory",
+                                                vec![cache.as_str()],
+                                            ),
+                                            (
+                                                "Java_com_roblox_engine_jni_NativeSettingsInterface_nativeSetExternalDirectory",
+                                                vec![external.as_str()],
+                                            ),
+                                            (
+                                                "Java_com_roblox_engine_jni_NativeSettingsInterface_nativeSetBaseDataDirectories",
+                                                vec![files.as_str(), cache.as_str()],
+                                            ),
+                                        ];
+                                        let assets_now = asset_folder(&opt.apk);
+                                        let dirs2: &[(&str, &str, Vec<&str>)] = &[
+                                            (
+                                                "Java_com_roblox_client_startup_MainGameActivity_nativeSetAssetPath",
+                                                "com/roblox/client/startup/MainGameActivity",
+                                                vec![assets_now.as_str()],
+                                            ),
+                                            (
+                                                "Java_com_roblox_engine_jni_NativeSettingsInterface_nativeSetRobloxVersion",
+                                                SETTINGS,
+                                                // The version the engine stamps on
+                                                // its own log file names, so it is
+                                                // the engine's own answer rather
+                                                // than a guess.
+                                                vec!["2.732.0.1043"],
+                                            ),
+                                            (
+                                                "Java_com_roblox_engine_jni_NativeSettingsInterface_nativeSetRobloxChannel",
+                                                SETTINGS,
+                                                // The capture reports
+                                                // `Build = googleProdRelease`; the
+                                                // live channel is the empty one.
+                                                vec![""],
+                                            ),
+                                        ];
+                                        if let Some(f) = lib.symbol(
+                                            "Java_com_roblox_engine_jni_NativeSettingsInterface_nativeSetDeviceInfo",
+                                        ) {
+                                            match linker::game_activity::set_device_info(
+                                                f, width, height,
+                                            ) {
+                                                Ok(()) => println!("  device info set"),
+                                                Err(e) => println!("  nativeSetDeviceInfo failed: {e}"),
+                                            }
+                                        }
+
+                                        for (name, cls, args) in dirs2 {
+                                            match lib.symbol(name) {
+                                                None => println!("  {name} not exported"),
+                                                Some(f) => match linker::game_activity::call_static_strings(
+                                                    f, cls, args,
+                                                ) {
+                                                    Ok(()) => println!(
+                                                        "  {} ok",
+                                                        name.rsplit('_').next().unwrap_or(name)
+                                                    ),
+                                                    Err(e) => println!("  {name} failed: {e}"),
+                                                },
+                                            }
+                                        }
+
+                                        for (name, args) in dirs {
+                                            match lib.symbol(name) {
+                                                None => println!("  {name} not exported"),
+                                                Some(f) => match linker::game_activity::call_static_strings(
+                                                    f, SETTINGS, args,
+                                                ) {
+                                                    Ok(()) => println!(
+                                                        "  {} ok",
+                                                        name.rsplit('_').next().unwrap_or(name)
+                                                    ),
+                                                    Err(e) => println!("  {name} failed: {e}"),
+                                                },
+                                            }
+                                        }
+
                                         let files = files.clone();
+                                        let cache = cache.clone();
                                         let steps: Vec<(&str, Box<dyn Fn(*mut std::ffi::c_void) -> Result<(), String>>)> = vec![
                                             (
                                                 "Java_com_roblox_client_JNIAAssetManagerSetup_initNative",
@@ -513,7 +636,7 @@ fn main() -> ExitCode {
                                             (
                                                 "Java_com_roblox_client_LocalStorageManager_initStorageManagerNativeV3",
                                                 Box::new(move |f| {
-                                                    linker::game_activity::storage_init(f, &files, &files)
+                                                    linker::game_activity::storage_init(f, &files, &cache)
                                                 }),
                                             ),
                                         ];
@@ -853,6 +976,29 @@ fn main() -> ExitCode {
                                                 Err(e) => println!("  StartLuaAppDM failed: {e}"),
                                             }
                                         }
+                                        }
+
+                                        // The capture puts this immediately
+                                        // before nativeAppBridgeV2StartApp:
+                                        //   setTaskSchedulerBackgroundMode()
+                                        //     enable:false context:ASMA.start
+                                        // A task scheduler still in background
+                                        // mode is one that has been told not to
+                                        // render.
+                                        if let Some(f) = lib.symbol(
+                                            "Java_com_roblox_engine_jni_NativeGLInterface_setTaskSchedulerBackgroundMode",
+                                        ) {
+                                            match linker::game_activity::call_static_bool_string(
+                                                f,
+                                                "com/roblox/engine/jni/NativeGLInterface",
+                                                false,
+                                                "ASMA.start",
+                                            ) {
+                                                Ok(()) => println!("  task scheduler foregrounded"),
+                                                Err(e) => {
+                                                    println!("  setTaskSchedulerBackgroundMode failed: {e}")
+                                                }
+                                            }
                                         }
 
                                         // And the call that delivers the surface.

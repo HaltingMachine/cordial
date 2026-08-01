@@ -47,6 +47,9 @@ pub fn function_overrides() -> Vec<(&'static str, *mut c_void)> {
         // it is on a phone. Framework-layer policy, implemented here because the
         // native side reads it through libc.
         f!("__system_property_get", system_property_get),
+        // Stubbed until now, and a stub here answers 0 — which reads as an
+        // impossibly old Android rather than an unknown one.
+        f!("android_get_device_api_level", android_get_device_api_level),
         // Selector numbering differs wholesale between the two libcs.
         f!("sysconf", bionic_sysconf),
     ];
@@ -58,6 +61,16 @@ pub fn function_overrides() -> Vec<(&'static str, *mut c_void)> {
     v.extend(pthread::overrides());
     // Android's liblog — Roblox's own account of what it is doing.
     v.extend(liblog_overrides());
+    // Android's `/system` tree. These are path-taking libc calls, redirected
+    // only for paths under `/system`; everything else forwards untouched.
+    v.extend(system_path_overrides());
+    if std::env::var_os("CORDIAL_TRACE_PATHS").is_some() {
+        extern "C" {
+            fn cordial_set_path_trace(on: c_int);
+        }
+        // SAFETY: sets one bool in system_paths.cpp.
+        unsafe { cordial_set_path_trace(1) };
+    }
     // A silent abort costs more debugging time than these wrappers cost anything.
     v.extend(trace::always_on());
     if std::env::var_os("CORDIAL_TRACE").is_some() {
@@ -224,8 +237,13 @@ extern "C" fn fread_chk(
 /// is that the call succeeds and returns something desktop-shaped rather than an
 /// empty string.
 const PROPERTIES: &[(&str, &str)] = &[
-    ("ro.build.version.sdk", "35"),
-    ("ro.build.version.release", "15"),
+    // API 33 / Android 13, which is what the Waydroid capture reports the real
+    // client running as: `OS Ver. = 13, Lvl = 33`. Those are two different
+    // numbers and the engine wants both — the release string and the API level.
+    // Reporting a level the engine considers old costs real capability; at 15 it
+    // refused Vulkan outright ("Android version is too old to activate Vulkan").
+    ("ro.build.version.sdk", "33"),
+    ("ro.build.version.release", "13"),
     ("ro.product.model", "Cordial"),
     ("ro.product.manufacturer", "Cordial"),
     ("ro.product.brand", "cordial"),
@@ -236,6 +254,14 @@ const PROPERTIES: &[(&str, &str)] = &[
     ("ro.debuggable", "0"),
     ("ro.secure", "1"),
 ];
+
+/// bionic's `android_get_device_api_level()`.
+///
+/// Must agree with `ro.build.version.sdk`: code that reads both and finds them
+/// inconsistent is code that will believe the smaller one.
+extern "C" fn android_get_device_api_level() -> c_int {
+    33
+}
 
 /// bionic's `__system_property_get(name, value)`. `value` is a caller buffer of
 /// `PROP_VALUE_MAX` (92) bytes; the return is the length written.
@@ -327,6 +353,42 @@ pub fn liblog_overrides() -> Vec<(&'static str, *mut c_void)> {
         .iter()
         .map(|e| {
             // SAFETY: each `name` is a string literal in liblog.cpp.
+            let name = unsafe { CStr::from_ptr(e.name) }.to_str().unwrap_or("");
+            (name, e.addr)
+        })
+        .collect()
+}
+
+// ------------------------------------------------------------------ /system
+
+/// The path-taking libc calls, redirected for `/system` — `native/system_paths.cpp`.
+///
+/// Roblox asks for `/system/fonts/NotoSansCJK-Regular.ttc`, and on a host with
+/// no `/system` the failed lookup becomes an empty path and an unhandled
+/// `Path does not exist: ""` during app startup. `open` is variadic, which is
+/// why this lives in C++ alongside liblog rather than in `trace.rs`.
+pub fn system_path_overrides() -> Vec<(&'static str, *mut c_void)> {
+    #[repr(C)]
+    struct Symbol {
+        name: *const c_char,
+        addr: *mut c_void,
+    }
+    extern "C" {
+        fn cordial_system_symbols(count: *mut usize) -> *const Symbol;
+    }
+
+    let mut count = 0usize;
+    // SAFETY: the table is a static in system_paths.cpp and outlives the process.
+    let table = unsafe { cordial_system_symbols(&mut count) };
+    if table.is_null() {
+        return Vec::new();
+    }
+    // SAFETY: `table` points at `count` initialised entries with static names.
+    let entries = unsafe { std::slice::from_raw_parts(table, count) };
+    entries
+        .iter()
+        .map(|e| {
+            // SAFETY: each `name` is a string literal in system_paths.cpp.
             let name = unsafe { CStr::from_ptr(e.name) }.to_str().unwrap_or("");
             (name, e.addr)
         })

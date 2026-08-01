@@ -524,7 +524,16 @@ public:
         p->deviceSku = S("cordial");
         p->manufacturer = S("Cordial");
         p->socModel = S("cordial");
-        p->osVersion = S("15");
+        // The API *level*, not the release name. The engine echoes this field
+        // straight into `[FLog::Graphics] Android API <n>` and gates on it: at
+        // 15 it refused Vulkan with "Android version is too old". 33 is what the
+        // Waydroid capture reports the real client running at (`Lvl = 33`).
+        //
+        // Established by experiment, not inference: setting
+        // `ro.build.version.sdk` and implementing
+        // `android_get_device_api_level()` both left the log saying 15, and only
+        // this field moved it.
+        p->osVersion = S("33");
         p->testDeviceName = S("");
         // Reported as "not on a metered mobile connection". The engine uses this
         // to decide how aggressively to stream assets.
@@ -867,6 +876,131 @@ int cordial_storage_init(void* fn, const char* a, const char* b, char* err, size
                                    cordial::to_jni(env, assets),
                                    cordial::to_jni(env, s1),
                                    cordial::to_jni(env, s2));
+        return 0;
+    } catch (const std::exception& e) {
+        snprintf(err, err_len, "%s", e.what());
+        return -1;
+    } catch (...) {
+        snprintf(err, err_len, "non-standard C++ exception");
+        return -1;
+    }
+}
+
+/// A static native on a named class taking one to three `String` arguments.
+///
+/// `NativeSettingsInterface` is where the app tells the engine which directories
+/// it owns — `nativeSetFilesDirectory`, `nativeSetCacheDirectory`,
+/// `nativeSetExternalDirectory`, `nativeSetBaseDataDirectories`. Cordial called
+/// none of them, so the engine ran with those roots unset and resolved every
+/// path it built from them against the working directory: `./appData`, `cache`,
+/// `http`, `sounds`, `ContentProvider_<pid>`. The Waydroid capture shows the
+/// real client using absolute paths under the app's own storage for all of them.
+///
+/// The signatures come from the shipping APK's own declarations, read out of the
+/// dex — the host app's side of a contract Cordial is reimplementing.
+int cordial_call_static_strings(void* fn, const char* class_name, const char* const* args,
+                                size_t n, char* err, size_t err_len) {
+    auto* env = cordial::process_env();
+    if (!fn || !env || !class_name) {
+        snprintf(err, err_len, "no JavaVM, or the native is not exported");
+        return -1;
+    }
+    if (n > 3) {
+        snprintf(err, err_len, "at most three string arguments are supported");
+        return -1;
+    }
+    try {
+        auto cls = env->GetClass(class_name);
+        auto* jenv = env->GetJNIEnv();
+        auto self = (jobject)cordial::to_jni(env, cls);
+        jstring a[3] = {nullptr, nullptr, nullptr};
+        std::shared_ptr<cordial::String> keep[3];
+        for (size_t i = 0; i < n; ++i) {
+            keep[i] = cordial::S_pub(args[i] ? args[i] : "");
+            a[i] = (jstring)cordial::to_jni(env, keep[i]);
+        }
+        switch (n) {
+            case 0:
+                reinterpret_cast<void (*)(JNIEnv*, jobject)>(fn)(jenv, self);
+                break;
+            case 1:
+                reinterpret_cast<void (*)(JNIEnv*, jobject, jstring)>(fn)(jenv, self, a[0]);
+                break;
+            case 2:
+                reinterpret_cast<void (*)(JNIEnv*, jobject, jstring, jstring)>(fn)(
+                    jenv, self, a[0], a[1]);
+                break;
+            default:
+                reinterpret_cast<void (*)(JNIEnv*, jobject, jstring, jstring, jstring)>(fn)(
+                    jenv, self, a[0], a[1], a[2]);
+                break;
+        }
+        return 0;
+    } catch (const std::exception& e) {
+        snprintf(err, err_len, "%s", e.what());
+        return -1;
+    } catch (...) {
+        snprintf(err, err_len, "non-standard C++ exception");
+        return -1;
+    }
+}
+
+/// A static native taking `(boolean, String)`.
+///
+/// `NativeGLInterface.setTaskSchedulerBackgroundMode(Z, Ljava/lang/String;)`. The
+/// capture shows the real client calling it immediately before
+/// `nativeAppBridgeV2StartApp`:
+///
+/// ```text
+/// [FLog::AndroidGLView] rbx.datamodel: setTaskSchedulerBackgroundMode() enable:false context:ASMA.start
+/// [FLog::JNIAppBridge] nativeAppBridgeV2StartApp:
+/// ```
+///
+/// A task scheduler left in background mode is a scheduler that has been told
+/// not to render.
+int cordial_call_static_bool_string(void* fn, const char* class_name, int flag, const char* text,
+                                    char* err, size_t err_len) {
+    using Call = void (*)(JNIEnv*, jobject, jboolean, jstring);
+    auto* env = cordial::process_env();
+    if (!fn || !env || !class_name) {
+        snprintf(err, err_len, "no JavaVM, or the native is not exported");
+        return -1;
+    }
+    try {
+        auto cls = env->GetClass(class_name);
+        auto s = cordial::S_pub(text ? text : "");
+        reinterpret_cast<Call>(fn)(env->GetJNIEnv(),
+                                   (jobject)cordial::to_jni(env, cls),
+                                   flag ? JNI_TRUE : JNI_FALSE,
+                                   (jstring)cordial::to_jni(env, s));
+        return 0;
+    } catch (const std::exception& e) {
+        snprintf(err, err_len, "%s", e.what());
+        return -1;
+    } catch (...) {
+        snprintf(err, err_len, "non-standard C++ exception");
+        return -1;
+    }
+}
+
+/// `NativeSettingsInterface.nativeSetDeviceInfo(DeviceParams)`.
+///
+/// The dedicated path for telling the engine what it is running on. Cordial only
+/// ever delivered `DeviceParams` nested inside `InitParams`, and never called
+/// this at all.
+int cordial_set_device_info(void* fn, int width, int height, char* err, size_t err_len) {
+    using Call = void (*)(JNIEnv*, jobject, jobject);
+    auto* env = cordial::process_env();
+    if (!fn || !env) {
+        snprintf(err, err_len, "no JavaVM, or nativeSetDeviceInfo is not exported");
+        return -1;
+    }
+    try {
+        auto cls = env->GetClass("com/roblox/engine/jni/NativeSettingsInterface");
+        auto dev = cordial::DeviceParams::Create(env, width, height);
+        reinterpret_cast<Call>(fn)(env->GetJNIEnv(),
+                                   (jobject)cordial::to_jni(env, cls),
+                                   (jobject)cordial::to_jni(env, dev));
         return 0;
     } catch (const std::exception& e) {
         snprintf(err, err_len, "%s", e.what());

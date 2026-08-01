@@ -31,8 +31,17 @@ pub fn enable() {
 fn log(args: std::fmt::Arguments<'_>) {
     if ENABLED.load(Ordering::Relaxed) {
         let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        eprintln!("[{n:>6}] {args}");
+        // The thread id is not decoration. Roblox runs this work on twenty-odd
+        // threads, and a single interleaved sequence invites reading two
+        // unrelated calls as cause and effect.
+        let tid = unsafe { libc_gettid() };
+        eprintln!("[{n:>6}] tid={tid} {args}");
     }
+}
+
+extern "C" {
+    #[link_name = "gettid"]
+    fn libc_gettid() -> c_int;
 }
 
 /// SAFETY: `p` is either null or a NUL-terminated C string.

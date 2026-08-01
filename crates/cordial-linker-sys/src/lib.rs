@@ -369,6 +369,29 @@ pub mod game_activity {
             err: *mut c_char,
             n: usize,
         ) -> c_int;
+        fn cordial_call_static_strings(
+            f: *mut c_void,
+            class_name: *const c_char,
+            args: *const *const c_char,
+            n: usize,
+            err: *mut c_char,
+            n_err: usize,
+        ) -> c_int;
+        fn cordial_call_static_bool_string(
+            f: *mut c_void,
+            class_name: *const c_char,
+            flag: c_int,
+            text: *const c_char,
+            err: *mut c_char,
+            n: usize,
+        ) -> c_int;
+        fn cordial_set_device_info(
+            f: *mut c_void,
+            width: c_int,
+            height: c_int,
+            err: *mut c_char,
+            n: usize,
+        ) -> c_int;
         fn cordial_activity_lifecycle(
             f: *mut c_void,
             activity: *const c_char,
@@ -411,6 +434,78 @@ pub mod game_activity {
                 native,
                 ca.as_ptr(),
                 cb.as_ptr(),
+                err.as_mut_ptr() as *mut c_char,
+                err.len(),
+            )
+        };
+        if rc == 0 { Ok(()) } else { Err(take_err(err)) }
+    }
+
+    /// A static native on a named class taking up to three `String` arguments.
+    ///
+    /// `NativeSettingsInterface.nativeSetFilesDirectory` and friends are how the
+    /// app tells the engine which directories it owns. Nothing here called them,
+    /// so the engine resolved `appData`, `cache`, `http` and `sounds` against the
+    /// working directory instead of absolute storage.
+    pub fn call_static_strings(
+        native: *mut c_void,
+        class_name: &str,
+        args: &[&str],
+    ) -> Result<(), String> {
+        let cls = CString::new(class_name).map_err(|e| e.to_string())?;
+        let owned: Vec<CString> = args
+            .iter()
+            .map(|a| CString::new(*a).map_err(|e| e.to_string()))
+            .collect::<Result<_, _>>()?;
+        let ptrs: Vec<*const c_char> = owned.iter().map(|c| c.as_ptr()).collect();
+        let mut err = vec![0u8; 512];
+        // SAFETY: `native` is the exported JNI native; every buffer outlives the call.
+        let rc = unsafe {
+            cordial_call_static_strings(
+                native,
+                cls.as_ptr(),
+                ptrs.as_ptr(),
+                ptrs.len(),
+                err.as_mut_ptr() as *mut c_char,
+                err.len(),
+            )
+        };
+        if rc == 0 { Ok(()) } else { Err(take_err(err)) }
+    }
+
+    /// A static native taking `(boolean, String)` — `setTaskSchedulerBackgroundMode`.
+    pub fn call_static_bool_string(
+        native: *mut c_void,
+        class_name: &str,
+        flag: bool,
+        text: &str,
+    ) -> Result<(), String> {
+        let cls = CString::new(class_name).map_err(|e| e.to_string())?;
+        let t = CString::new(text).map_err(|e| e.to_string())?;
+        let mut err = vec![0u8; 512];
+        // SAFETY: `native` is the exported JNI native; every buffer outlives the call.
+        let rc = unsafe {
+            cordial_call_static_bool_string(
+                native,
+                cls.as_ptr(),
+                if flag { 1 } else { 0 },
+                t.as_ptr(),
+                err.as_mut_ptr() as *mut c_char,
+                err.len(),
+            )
+        };
+        if rc == 0 { Ok(()) } else { Err(take_err(err)) }
+    }
+
+    /// `NativeSettingsInterface.nativeSetDeviceInfo(DeviceParams)`.
+    pub fn set_device_info(native: *mut c_void, width: i32, height: i32) -> Result<(), String> {
+        let mut err = vec![0u8; 512];
+        // SAFETY: `native` is the exported JNI native; `err` outlives the call.
+        let rc = unsafe {
+            cordial_set_device_info(
+                native,
+                width,
+                height,
                 err.as_mut_ptr() as *mut c_char,
                 err.len(),
             )
