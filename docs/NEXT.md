@@ -72,13 +72,20 @@ session leaves every GLES counter at zero, and a GLES session leaves
 renderer actually ran, in the engine's log, before reading a zero as "nothing
 drew".
 
-## 3. Plugins are designed and not built
+## 3. Plugins: the host exists, the runtime is not wired to it yet
 
-[ADR-002](adr/ADR-002-core-shell-and-ui-handoff.md),
-[ADR-003](adr/ADR-003-plugin-isolation.md) and
-[ADR-005](adr/ADR-005-flag-service.md) describe the shape: out of process, behind
-a capability broker, with flags contributed through layers that already exist in
-`crates/cordial-runtime/src/flags.rs`. None of the host is written.
+`crates/cordial-plugins` has capabilities, the broker, the manifest, user grants
+and a Deno host, with an end-to-end test that runs the real example plugin in
+[`plugins/flag-inspector`](../plugins/flag-inspector).
+
+**What is missing** is the join to the running client: `flags.list` and friends
+are served by the test's stand-in rather than by
+`crates/cordial-runtime/src/flags.rs`, and nothing spawns plugins during a real
+launch. That wiring, plus lifecycle events, is the next piece.
+
+See [ADR-003](adr/ADR-003-plugin-isolation.md) for why isolation is by process
+and [ADR-005](adr/ADR-005-flag-service.md) for why flag writes are two
+capabilities rather than one.
 
 ---
 

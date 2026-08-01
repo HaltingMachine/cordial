@@ -82,7 +82,7 @@ will be declined.
 | Stable | ✅ 26 consecutive clean launches |
 | Frame rate | ✅ ~27 fps steady on Vulkan (GLES fallback is much slower) |
 | Signed in | ❌ not implemented |
-| Plugins | ❌ designed, not built |
+| Plugins | 🟡 host and capability broker built; not yet wired to the running client |
 
 Measured with `vkQueuePresentKHR`: 656, 656 and 655 presents over 24 s across
 three runs, unchanged by injected input — so it renders continuously rather than
@@ -247,6 +247,7 @@ Start with [`docs/NEXT.md`](docs/NEXT.md). The rest is reference.
 | [`docs/adr/ADR-001-in-process-hooking.md`](docs/adr/ADR-001-in-process-hooking.md) | Why Cordial has no in-process hooking, ever |
 | [`docs/adr/ADR-004-plugin-asset-overrides.md`](docs/adr/ADR-004-plugin-asset-overrides.md) | Why plugins cannot replace Roblox's textures or sounds |
 | [`docs/adr/ADR-005-flag-service.md`](docs/adr/ADR-005-flag-service.md) | Why the flag service has two surfaces |
+| [`plugins/README.md`](plugins/README.md) | Writing a plugin, and what a plugin cannot do |
 | [`docs/design/sign-in.md`](docs/design/sign-in.md) | What signing in actually requires — the current blocker |
 | [`docs/design/path-to-a-frame.md`](docs/design/path-to-a-frame.md) | GameActivity, assets, surface |
 | [`docs/design/instances-and-launch.md`](docs/design/instances-and-launch.md) | Multi-instance, multi-account, `roblox://` handling |

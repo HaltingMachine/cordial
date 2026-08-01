@@ -9,6 +9,7 @@
 
 pub mod broker;
 pub mod capability;
+pub mod grants;
 pub mod host;
 pub mod manifest;
 pub mod protocol;
