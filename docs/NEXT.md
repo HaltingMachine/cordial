@@ -59,26 +59,7 @@ One correction that came out of it: the `The requested Ids are invalid`
 thumbnail failure is what the **real, logged-out Android client** also produces.
 It is not a Cordial defect and it is not evidence of anything.
 
-## 2. ~~The GLES fallback runs at about 1 fps~~ — fixed
-
-Every `eglSwapBuffers` blocked for almost exactly 1.00 s inside Mesa itself. The
-engine asks for vsync (`eglSwapInterval(1)`), and this host's X server is
-Xwayland, which owns no CRTC and cannot answer DRI3's vblank queries the way real
-Xorg can — so Mesa fell back to a one-second wait. Vulkan's WSI path does not go
-through that loader code, which is why only GLES was affected.
-
-`eglSwapInterval` is now intercepted and the interval Mesa receives is forced to
-0, scoped to that call rather than setting `vblank_mode=0` for the whole process.
-The engine still paces itself through its own `RenderJob`, so this removes a
-broken 1 Hz clamp underneath that pacing rather than uncapping anything.
-
-**20 → 652 swaps in 20 s, identical across three runs. About 1 fps to about 33.**
-
-`CORDIAL_NO_VULKAN=1` forces the GLES path for testing, and
-`CORDIAL_SWAP_TIMES=1` reports how long each swap blocks — which is what found
-this.
-
-## 3. Plugins: running, but with three methods
+## 2. Plugins: running, but with three methods
 
 `crates/cordial-plugins` has capabilities, a broker, manifests, user grants and a
 Deno host. `crates/cordial-runtime/src/plugin_host.rs` joins it to the client:
@@ -232,6 +213,7 @@ that presented as something else entirely.
 | Vulkan refused to initialise | Roblox needs `VK_KHR_android_surface`, which desktop Mesa never exposes. Translated to `VK_KHR_xlib_surface` behind one interposed `vkGetInstanceProcAddr` |
 | Engine reported "Android API 15" and refused Vulkan | `DeviceParams.osVersion` is read as an API *level*. Neither the system property nor `android_get_device_api_level()` fed it |
 | Paths resolved against the working directory | `NativeSettingsInterface`'s directory setters were never called |
+| GLES ran at about 1 fps while Vulkan was fine | Every `eglSwapBuffers` blocked ~1.00 s inside Mesa. The engine asks for vsync and Xwayland owns no CRTC, so DRI3's vblank query fell back to a one-second wait. The interval Mesa receives is now forced to 0; 20 → 652 swaps in 20 s |
 | Interface looked like a low-end phone | Surface hardcoded to 720p and `dpiScale` to 1.0 — Roblox lays out in dp and picks asset resolutions from exactly those |
 
 ## Branches
