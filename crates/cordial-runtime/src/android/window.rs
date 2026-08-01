@@ -189,15 +189,20 @@ struct XWMHints {
 ///
 /// A window created at 0,0 lands on the primary monitor, which is not where
 /// anyone wants a game window if they kept a second screen for exactly this.
-/// `CORDIAL_MONITOR=<n>` selects the nth monitor reported by Xinerama (0 is the
-/// first); `CORDIAL_WINDOW_POS=<x>,<y>` overrides with explicit coordinates and
-/// wins if both are set.
+/// `CORDIAL_MONITOR=<n>` centres the window on the nth monitor reported by
+/// Xinerama (0 is the first); `CORDIAL_WINDOW_POS=<x>,<y>` overrides with
+/// explicit top-left coordinates and wins if both are set.
+///
+/// Centring rather than pinning to the monitor's corner, because a monitor
+/// origin is not a sensible place for a window — on a layout like
+/// `0,0 3440x1440` beside `3440,240 1920x1200`, the corner is where the bezel
+/// is.
 ///
 /// Xinerama rather than RandR because the query is one call with no resource
 /// management, and every multi-head X server that supports RandR also answers
 /// Xinerama. Returns (0, 0) when nothing is configured or the query fails, which
 /// is exactly the previous behaviour.
-fn window_origin() -> (c_int, c_int) {
+fn window_origin(win_w: c_int, win_h: c_int) -> (c_int, c_int) {
     if let Ok(pos) = std::env::var("CORDIAL_WINDOW_POS") {
         let mut parts = pos.split(',').map(str::trim);
         if let (Some(Ok(x)), Some(Ok(y))) = (
@@ -252,16 +257,20 @@ fn window_origin() -> (c_int, c_int) {
             return (0, 0);
         }
         let list = std::slice::from_raw_parts(screens, n as usize);
-        let origin = match list.get(want) {
-            Some(s) => (s.x_org as c_int, s.y_org as c_int),
+        let m = match list.get(want) {
+            Some(m) => m,
             None => {
                 eprintln!(
                     "[android] CORDIAL_MONITOR={want} but only {n} monitor(s); using the first"
                 );
-                (list[0].x_org as c_int, list[0].y_org as c_int)
+                &list[0]
             }
         };
-        origin
+        // Clamped at the origin so an oversized window still starts on-screen
+        // rather than off the top-left of its monitor.
+        let x = m.x_org as c_int + ((m.width as c_int - win_w) / 2).max(0);
+        let y = m.y_org as c_int + ((m.height as c_int - win_h) / 2).max(0);
+        (x, y)
     }
 }
 
@@ -293,7 +302,7 @@ pub fn open(width: u32, height: u32, title: &str) -> Result<&'static HostWindow,
     // SAFETY: `display` is open; the geometry and border/background pixels are
     // plain values.
     CURRENT_DISPLAY.store(display as usize, std::sync::atomic::Ordering::Relaxed);
-    let (ox, oy) = window_origin();
+    let (ox, oy) = window_origin(width as c_int, height as c_int);
 
     let (window, conn_fd) = unsafe {
         let root = (xlib.default_root_window)(display);
