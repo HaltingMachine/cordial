@@ -10,6 +10,19 @@ place of Android's, and a framework layer that answers the client's calls. No
 emulator, no container, no virtual machine. It talks to your GPU through Vulkan
 or GLES2 the way any native application does.
 
+## Get started
+
+- [Read the documentation 📖](docs)
+- [Start here — what works and what is blocking 🧭](docs/NEXT.md)
+- [Install it 🔽](#install)
+- [How it actually works 🔬](docs/findings.md)
+- [Why there is no script execution, ever 🔒](docs/adr/ADR-001-in-process-hooking.md)
+- [Report a bug 🐛](https://github.com/luohoa97/cordial/issues)
+
+**New here?** Read the warning below first, then
+[`docs/NEXT.md`](docs/NEXT.md) — it is written for someone picking the project
+up cold and says plainly what is broken and what has already been ruled out.
+
 ### Disclosure
 
 **This is NOT an official Roblox client. This project is in no way endorsed or
@@ -64,7 +77,23 @@ on it.
 
 ## Install
 
-Flatpak, built from source. There is no hosted remote yet.
+> Cordial is **not** ready to play Roblox on. Install it if you want to work on
+> it, or to watch it come up. You cannot sign in yet.
+
+### 1. What you need
+
+- x86-64 Linux
+- **Clang** — AOSP bionic uses C11 `_Atomic` inside C++ headers and GCC rejects it
+- An X11 session (Wayland works through XWayland)
+- Roblox's official Android client, which **you supply** — Cordial ships no
+  Roblox code, APK or assets and never will
+
+From an installed APK you need the `lib/x86_64/` objects and the base APK.
+
+### 2. Build it
+
+Flatpak is the intended way. There is no hosted remote yet, so it builds from
+source:
 
 ```bash
 git clone --recursive https://github.com/luohoa97/cordial
@@ -72,32 +101,56 @@ cd cordial
 packaging/build-flatpak.sh --install
 ```
 
-Cordial ships **no Roblox code, APK or assets** and never will. You supply the
-official Android client from your own installation — Cordial needs the
-`lib/x86_64/` objects and the base APK.
-
-For development, skip Flatpak and run the loader directly. **Clang is required**
-— AOSP bionic uses C11 `_Atomic` inside C++ headers, which GCC rejects — and
-x86-64 Linux only:
+For development, skip Flatpak and build the loader directly:
 
 ```bash
+git clone --recursive https://github.com/luohoa97/cordial
+cd cordial
 cargo build --release
+```
 
-CORDIAL_MONITOR=1 CORDIAL_FULLSCREEN=1 \
+### 3. Run it
+
+```bash
 cargo run --release --bin cordial-load -- \
   --lib-dir /path/to/lib/x86_64 --apk /path/to/base.apk \
   --host-libc --game-activity --run 30
 ```
 
-`CORDIAL_MONITOR=<n>` puts the window on the nth monitor, `CORDIAL_FULLSCREEN=1`
-covers it, `CORDIAL_WINDOW_POS=<x>,<y>` overrides with explicit coordinates, and
-`CORDIAL_ANDROID_TRACE=1` logs the Android API calls — which is how to tell
-whether input is reaching the engine. `cordial-load --help` lists the rest.
+A window opens, the engine comes up, and it renders Roblox's logged-out landing
+page at about 27 fps. `--run` is how many seconds to stay up.
 
-The engine also writes its own log to `<files>/appData/logs/`. It is the single
-best diagnostic in the project; read it before forming any theory.
+### 4. Useful knobs
+
+| | |
+|---|---|
+| `CORDIAL_MONITOR=<n>` | open on the nth monitor instead of the primary one |
+| `CORDIAL_FULLSCREEN=1` | cover that monitor |
+| `CORDIAL_WINDOW_POS=<x>,<y>` | explicit position, overrides the above |
+| `CORDIAL_ANDROID_TRACE=1` | log Android API calls |
+| `CORDIAL_COUNT_GL=1` | report graphics calls on exit |
+
+```bash
+CORDIAL_MONITOR=1 CORDIAL_FULLSCREEN=1 cargo run --release --bin cordial-load -- \
+  --lib-dir /path/to/lib/x86_64 --apk /path/to/base.apk \
+  --host-libc --game-activity --run 30
+```
+
+`cordial-load --help` lists the rest.
+
+### 5. When something goes wrong
+
+**Read the engine's own log first.** Roblox writes it to
+`<files>/appData/logs/*.log` and it names subsystems, stages, paths and
+exceptions in its own words. It is the best diagnostic in the project and most
+questions are answered by the newest file in that directory.
+
+To check whether input is reaching the engine, run with
+`CORDIAL_ANDROID_TRACE=1` and look for `onTouchEventNative(...) -> true`.
 
 ## Documentation
+
+Start with [`docs/NEXT.md`](docs/NEXT.md). The rest is reference.
 
 | | |
 |---|---|
