@@ -69,6 +69,27 @@ pub enum Capability {
     /// original asset resolve again with nothing to clean up, because nothing
     /// was ever overwritten to begin with.
     AssetsOverride,
+    /// Register event types under the plugin's own namespace. See ADR-006.
+    ///
+    /// Separate from `EventsPublish` on purpose: declaring is what makes a
+    /// type's origin a fact the registry can check rather than a claim a
+    /// plugin makes about itself, and that check is only worth anything if a
+    /// plugin cannot skip straight to publishing.
+    EventsDeclare,
+    /// Broadcast on an event type the plugin declared with `EventsDeclare`.
+    ///
+    /// Deliberately distinct from declaring: a plugin that could publish on
+    /// any string it liked could impersonate another plugin's events, and a
+    /// subscriber would have no way to tell. This capability only ever lets a
+    /// plugin speak inside a namespace the registry has already attributed to
+    /// it.
+    EventsPublish,
+    /// Receive events, including ones other plugins declared.
+    ///
+    /// Broader than `EventsPublish` deliberately — hearing something happened
+    /// is a different power from being believed when you say it did, and a
+    /// plugin that only reacts should not have to be trusted to speak.
+    EventsSubscribe,
 }
 
 impl Capability {
@@ -84,6 +105,9 @@ impl Capability {
             Capability::NotifySend => "notify.send",
             Capability::UrlOpen => "url.open",
             Capability::AssetsOverride => "assets.override",
+            Capability::EventsDeclare => "events.declare",
+            Capability::EventsPublish => "events.publish",
+            Capability::EventsSubscribe => "events.subscribe",
         }
     }
 
@@ -98,6 +122,9 @@ impl Capability {
             "notify.send" => Capability::NotifySend,
             "url.open" => Capability::UrlOpen,
             "assets.override" => Capability::AssetsOverride,
+            "events.declare" => Capability::EventsDeclare,
+            "events.publish" => Capability::EventsPublish,
+            "events.subscribe" => Capability::EventsSubscribe,
             _ => return None,
         })
     }
@@ -115,6 +142,9 @@ impl Capability {
             Capability::NotifySend,
             Capability::UrlOpen,
             Capability::AssetsOverride,
+            Capability::EventsDeclare,
+            Capability::EventsPublish,
+            Capability::EventsSubscribe,
         ]
     }
 }

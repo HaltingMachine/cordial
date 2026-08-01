@@ -17,6 +17,11 @@
 #     needs. Camera, screenshot and filesystem access are never held by Cordial
 #     on a plugin's behalf; they are granted per-plugin at runtime through
 #     portals, revocably (spec §7).
+#   * The two `--filesystem=xdg-run/...` entries below exist only for the
+#     presence.set/presence.clear broker to find Discord's IPC socket
+#     (ADR-007) — named paths, not `--filesystem=xdg-run` on its own, and
+#     nowhere near `--filesystem=host`. notify.send and url.open needed no
+#     manifest entry at all; see the comment beside them.
 
 app-id: org.cordial.Cordial
 runtime: org.freedesktop.Platform
@@ -49,6 +54,27 @@ finish-args:
   - --socket=pulseaudio
   # Roblox's own data lives under the app's data directory, per instance.
   - --persist=.cordial
+  # Discord's IPC socket, for the presence.set/presence.clear broker
+  # (ADR-007). Named narrowly rather than as a directory: this exposes
+  # exactly one socket path, not the rest of $XDG_RUNTIME_DIR. Discord falls
+  # back to discord-ipc-1 through -9 if -0 is already taken (typically a
+  # second Discord instance on the same machine) — that case is deliberately
+  # not covered here. Widening this to every slot, or to `--filesystem=host`,
+  # is the broader grant ADR-007 explicitly rejects; if -0 turns out to be
+  # insufficient in practice, that is a one-line change to this file, not an
+  # architecture change.
+  - --filesystem=xdg-run/discord-ipc-0
+  # The other half of Discord's own socket search (see presence.rs): when
+  # Discord is itself a Flatpak, its IPC socket lives nested under its own
+  # app-id directory rather than directly in $XDG_RUNTIME_DIR. Read-only,
+  # since Cordial only ever connects out to it.
+  - --filesystem=xdg-run/app/com.discordapp.Discord:ro
+  # notify.send and url.open are not listed here at all: both go through
+  # org.freedesktop.portal.Notification and org.freedesktop.portal.OpenURI,
+  # which Flatpak already exposes to every sandboxed app without a
+  # --talk-name entry. Reaching for org.freedesktop.Notifications directly
+  # would need one; going through the portal keeps this manifest not needing
+  # to grow for either capability.
 
 modules:
   - name: cordial

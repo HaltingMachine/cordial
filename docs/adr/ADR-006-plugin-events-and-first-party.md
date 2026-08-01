@@ -90,9 +90,16 @@ what Cordial did; a plugin claiming Cordial did something it did not is a
 correctness problem for every subscriber. Plugins declare their own or say
 nothing.
 
-**Open:** whether a subscriber can filter by declaring plugin at subscribe time,
-or must filter on receipt. Filtering at subscribe is better for both privacy and
-cost, but needs the registry to answer "who declared this" before delivery.
+**Resolved:** the registry filters at subscribe time, not on receipt. Since
+declaring already has to record who owns each type to authorise `publish`,
+`subscribe` reuses that same lookup rather than making every plugin carry
+its own filter list and having `publish` consult all of them. The cost is
+that `subscribe` refuses a type nobody has declared yet, rather than parking
+the subscription to match something that shows up later — a subscriber that
+starts before its dependency has to wait for it, which is the dependency
+resolution this ADR already describes for first-party plugins ("resolved
+once, shared, not restarted per dependent"), not a new problem. See
+`crates/cordial-plugins/src/events.rs`.
 
 ## What would change this
 

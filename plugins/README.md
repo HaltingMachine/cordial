@@ -69,6 +69,32 @@ here, open an issue: a broker is a payload type and an effect, so adding one is 
 small change rather than a redesign. If a proposed broker *cannot* be small, that
 usually means the capability is too broad and wants splitting.
 
+## Plugins may declare their own events
+
+`events.declare` registers an event type under your plugin's own namespace —
+you provide a bare name, Cordial prefixes it with your plugin id, so
+`flag-manager` declaring `profile-changed` gets `flag-manager/profile-changed`
+back, never a bare `profile-changed`. `events.publish` broadcasts on a type
+you declared; `events.subscribe` receives events, including ones other
+plugins declared.
+
+These are three separate capabilities on purpose (ADR-006). Declaring and
+publishing are split because a plugin that could publish on any string it
+liked could impersonate another plugin's events, and a subscriber would have
+no way to tell — declaring first makes a type's origin a fact the registry
+checks, not a claim a plugin makes about itself. Subscribing is broader than
+publishing: a plugin that only reacts to something should not have to be
+trusted to speak.
+
+Subscribing filters at the point you subscribe, not on every event that
+arrives — which means you can only subscribe to a type someone has already
+declared. If you depend on another plugin's events, that dependency has to
+have started first, the same ordering [ADR-006](../docs/adr/ADR-006-plugin-events-and-first-party.md)
+already describes for first-party plugins.
+
+Core event types are never available to publish on — only Cordial can speak
+for what Cordial did.
+
 ## Flags have two lifetimes
 
 `flags.write` contributes flags that take effect at the **next launch**.
@@ -78,8 +104,18 @@ startup and cannot be changed live at all. They are separate capabilities so tha
 an API call cannot silently do nothing. See
 [ADR-005](../docs/adr/ADR-005-flag-service.md).
 
-## Example
+## Examples
 
 [`flag-inspector/`](flag-inspector) reports which flag overrides are in effect
 and where each came from, then deliberately attempts a write it was not granted
 so the refusal is visible.
+
+[`discord-presence/`](discord-presence) is first-party — it ships with
+Cordial — and is still an ordinary plugin: same manifest, same grants, same
+isolation ([ADR-006](../docs/adr/ADR-006-plugin-events-and-first-party.md)
+is explicit that "built in" and "a plugin" are not opposites). It listens for
+client lifecycle events and keeps Discord Rich Presence in step with them,
+through `presence.set`/`presence.clear` — the two lines in its own source say
+plainly that its Discord application id is a placeholder and that the
+lifecycle push does not yet carry which game is running, because that needs
+work in `cordial-runtime` this plugin does not touch.

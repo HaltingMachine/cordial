@@ -1,0 +1,424 @@
+//! Discord Rich Presence — ADR-007's worked example, made to actually work.
+//!
+//! Cordial holds the connection to Discord's IPC socket; the plugin only ever
+//! sends a [`PresencePayload`]. Nothing here hands a socket, a file
+//! descriptor, or Discord's raw protocol to a plugin — see the module comment
+//! in `broker.rs` and ADR-007 for why that boundary is the whole point.
+//!
+//! The protocol is Discord's own IPC framing, used by every third-party Rich
+//! Presence integration (Cordial is not the first non-Electron client to
+//! implement it): a Unix domain socket at a fixed, well-known location, and
+//! frames of `opcode: u32 LE`, `length: u32 LE`, then that many bytes of
+//! JSON. Opcode 0 is the handshake (`{"v":1,"client_id":"..."}`); opcode 1
+//! carries every subsequent command, including `SET_ACTIVITY`. This is public
+//! protocol documentation, not anything extracted from Roblox — AGENTS.md's
+//! rule against decompiling Roblox has nothing to do with this file.
+
+use serde::Deserialize;
+use serde_json::{json, Value};
+use std::io::{Read, Write};
+use std::os::unix::net::UnixStream;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+
+/// What a plugin may ask Cordial to publish. Deliberately a closed struct
+/// with `deny_unknown_fields` rather than a JSON value forwarded verbatim —
+/// the whole reason this is brokered rather than a raw socket handed to the
+/// plugin is that Cordial decides what shape crosses the wire to Discord, and
+/// a permissive `Value` would quietly undo that the moment Discord's IPC grew
+/// a field this struct does not know about.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PresencePayload {
+    /// The Discord application this presence is published under. Not a
+    /// secret and not itself a channel — it only selects which app's name
+    /// and icon Discord shows next to the activity — but still validated as
+    /// a snowflake so a plugin cannot smuggle an arbitrary string into a
+    /// field Cordial does not otherwise inspect before it reaches Discord.
+    pub client_id: String,
+    #[serde(default)]
+    pub details: Option<String>,
+    #[serde(default)]
+    pub state: Option<String>,
+    /// Unix seconds. `start` without `end` renders as an elapsed counter;
+    /// both together render as a countdown. Discord's own semantics, not
+    /// Cordial's.
+    #[serde(default)]
+    pub start: Option<i64>,
+    #[serde(default)]
+    pub end: Option<i64>,
+    #[serde(default)]
+    pub large_image: Option<String>,
+    #[serde(default)]
+    pub large_text: Option<String>,
+    #[serde(default)]
+    pub small_image: Option<String>,
+    #[serde(default)]
+    pub small_text: Option<String>,
+}
+
+/// Discord's own limit on `details` and `state`; rejecting past it here
+/// means the plugin author finds out from `presence.set`'s response instead
+/// of from Discord silently truncating or refusing the whole activity.
+const TEXT_FIELD_LIMIT: usize = 128;
+
+impl PresencePayload {
+    pub fn parse(value: &Value) -> Result<Self, String> {
+        let payload: PresencePayload =
+            serde_json::from_value(value.clone()).map_err(|e| format!("bad presence payload: {e}"))?;
+        if payload.client_id.is_empty() || !payload.client_id.bytes().all(|b| b.is_ascii_digit()) {
+            return Err("client_id must be a Discord application snowflake (digits only)".into());
+        }
+        for (name, text) in [("details", &payload.details), ("state", &payload.state)] {
+            if let Some(t) = text {
+                if t.chars().count() > TEXT_FIELD_LIMIT {
+                    return Err(format!("{name} must be at most {TEXT_FIELD_LIMIT} characters, Discord's own limit"));
+                }
+            }
+        }
+        Ok(payload)
+    }
+
+    fn to_activity(&self) -> Value {
+        let mut activity = serde_json::Map::new();
+        if let Some(d) = &self.details {
+            activity.insert("details".into(), json!(d));
+        }
+        if let Some(s) = &self.state {
+            activity.insert("state".into(), json!(s));
+        }
+        if self.start.is_some() || self.end.is_some() {
+            let mut ts = serde_json::Map::new();
+            if let Some(s) = self.start {
+                ts.insert("start".into(), json!(s));
+            }
+            if let Some(e) = self.end {
+                ts.insert("end".into(), json!(e));
+            }
+            activity.insert("timestamps".into(), Value::Object(ts));
+        }
+        if self.large_image.is_some() || self.large_text.is_some() || self.small_image.is_some() || self.small_text.is_some() {
+            let mut assets = serde_json::Map::new();
+            if let Some(v) = &self.large_image {
+                assets.insert("large_image".into(), json!(v));
+            }
+            if let Some(v) = &self.large_text {
+                assets.insert("large_text".into(), json!(v));
+            }
+            if let Some(v) = &self.small_image {
+                assets.insert("small_image".into(), json!(v));
+            }
+            if let Some(v) = &self.small_text {
+                assets.insert("small_text".into(), json!(v));
+            }
+            activity.insert("assets".into(), Value::Object(assets));
+        }
+        Value::Object(activity)
+    }
+}
+
+const OP_HANDSHAKE: u32 = 0;
+const OP_FRAME: u32 = 1;
+
+/// Every path Discord's IPC socket might be at, in search order.
+///
+/// ADR-007 names this search as the reason to broker presence at all rather
+/// than let every plugin reimplement it: `discord-ipc-0` through `-9`
+/// (Discord increments the suffix if an earlier one is taken, most often by
+/// a second Discord instance), and, when Discord itself is a Flatpak, nested
+/// under its own app-id directory because Flatpak sandboxes rewrite
+/// `XDG_RUNTIME_DIR` per app.
+fn candidate_sockets() -> Vec<PathBuf> {
+    let Some(runtime_dir) = std::env::var_os("XDG_RUNTIME_DIR") else {
+        return Vec::new();
+    };
+    let runtime_dir = PathBuf::from(runtime_dir);
+    let mut candidates = Vec::with_capacity(20);
+    for slot in 0..10 {
+        candidates.push(runtime_dir.join(format!("discord-ipc-{slot}")));
+    }
+    for slot in 0..10 {
+        candidates.push(
+            runtime_dir
+                .join("app/com.discordapp.Discord")
+                .join(format!("discord-ipc-{slot}")),
+        );
+    }
+    candidates
+}
+
+fn write_frame(stream: &mut UnixStream, opcode: u32, body: &Value) -> std::io::Result<()> {
+    let bytes = serde_json::to_vec(body).expect("presence frames always serialise");
+    stream.write_all(&opcode.to_le_bytes())?;
+    stream.write_all(&(bytes.len() as u32).to_le_bytes())?;
+    stream.write_all(&bytes)
+}
+
+/// Read one frame back. Discord acknowledges both the handshake and every
+/// command, and a socket that never answers is as good as one that is not
+/// there — a two second timeout on the stream (set by the caller) turns a
+/// hang into a clean failure instead of blocking Cordial on a dead peer.
+fn read_frame(stream: &mut UnixStream) -> std::io::Result<(u32, Vec<u8>)> {
+    let mut header = [0u8; 8];
+    stream.read_exact(&mut header)?;
+    let opcode = u32::from_le_bytes(header[0..4].try_into().unwrap());
+    let len = u32::from_le_bytes(header[4..8].try_into().unwrap()) as usize;
+    let mut body = vec![0u8; len];
+    stream.read_exact(&mut body)?;
+    Ok((opcode, body))
+}
+
+fn handshake(stream: &mut UnixStream, client_id: &str) -> std::io::Result<()> {
+    write_frame(stream, OP_HANDSHAKE, &json!({"v": 1, "client_id": client_id}))?;
+    // Discord answers the handshake with a DISPATCH/READY frame; any
+    // well-formed frame back is proof the peer is really Discord's IPC
+    // server and not some other process that happened to be listening on
+    // that path.
+    read_frame(stream)?;
+    Ok(())
+}
+
+static NONCE: AtomicU64 = AtomicU64::new(1);
+
+fn next_nonce() -> String {
+    format!("cordial-{}", NONCE.fetch_add(1, Ordering::Relaxed))
+}
+
+/// Cordial's side of the Discord IPC connection. One instance per running
+/// Cordial process; never exposed to a plugin.
+pub struct DiscordPresence {
+    connected: Option<(String, UnixStream)>,
+    /// Whether "Discord is not running" has already been logged for the
+    /// current stretch of unavailability. Discord not running is the normal
+    /// case (most users do not have it open), so `presence.set` failing must
+    /// not spam the log on every lifecycle event — one line per stretch,
+    /// reset the moment a connection succeeds again, is enough to be found
+    /// without becoming noise. See AGENTS.md: a stub must never claim
+    /// success it did not have, so the call itself still fails every time;
+    /// only the logging is throttled.
+    unavailable_logged: bool,
+}
+
+impl DiscordPresence {
+    pub fn new() -> Self {
+        DiscordPresence { connected: None, unavailable_logged: false }
+    }
+
+    fn log_unavailable_once(&mut self, why: &str) {
+        if !self.unavailable_logged {
+            println!("  presence: {why}; presence.set will keep failing (silently, after this) until it is");
+            self.unavailable_logged = true;
+        }
+    }
+
+    /// Connect and handshake for `client_id` if not already connected under
+    /// it. No retry loop inside this function: one attempt per call, because
+    /// a caller that wants another attempt makes another call — an internal
+    /// retry here would be the tight loop AGENTS.md and ADR-007 both warn
+    /// against for a resource that is routinely just absent.
+    fn ensure_connected(&mut self, client_id: &str) -> Result<(), String> {
+        if let Some((connected_id, _)) = &self.connected {
+            if connected_id == client_id {
+                return Ok(());
+            }
+            // A different client_id: drop the old connection rather than
+            // hold two, since Cordial only ever brokers one presence at a
+            // time in practice and a stale handle left open would leak.
+            self.connected = None;
+        }
+        let candidates = candidate_sockets();
+        if candidates.is_empty() {
+            self.log_unavailable_once("XDG_RUNTIME_DIR is not set, so there is nowhere to look for Discord's IPC socket");
+            return Err("Discord is not running".into());
+        }
+        for path in &candidates {
+            let Ok(mut stream) = UnixStream::connect(path) else {
+                continue;
+            };
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+            if handshake(&mut stream, client_id).is_ok() {
+                self.connected = Some((client_id.to_string(), stream));
+                self.unavailable_logged = false;
+                return Ok(());
+            }
+        }
+        self.log_unavailable_once("no Discord IPC socket answered a handshake; is Discord running?");
+        Err("Discord is not running".into())
+    }
+
+    fn send_activity(&mut self, activity: Value) -> Result<(), String> {
+        let (_, stream) = self.connected.as_mut().expect("ensure_connected must be called first");
+        let frame = json!({
+            "cmd": "SET_ACTIVITY",
+            "args": {"pid": std::process::id(), "activity": activity},
+            "nonce": next_nonce(),
+        });
+        let result = write_frame(stream, OP_FRAME, &frame).and_then(|()| read_frame(stream));
+        match result {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                // The connection is no good any more; drop it so the next
+                // call starts a fresh handshake instead of writing into a
+                // socket we already know is broken.
+                self.connected = None;
+                self.log_unavailable_once("Discord's IPC socket stopped answering");
+                Err(format!("presence update failed: {e}"))
+            }
+        }
+    }
+
+    /// Publish a presence payload. Fails cleanly, without panicking or
+    /// blocking, when Discord is not running — see the module comment.
+    pub fn set(&mut self, payload: &PresencePayload) -> Result<(), String> {
+        self.ensure_connected(&payload.client_id)?;
+        self.send_activity(payload.to_activity())
+    }
+
+    /// Clear whatever presence is currently set. A no-op, not an error, if
+    /// nothing has been set in this process yet — there is nothing to clear
+    /// and no connection worth opening just to say so.
+    pub fn clear(&mut self) -> Result<(), String> {
+        let Some((client_id, _)) = &self.connected else {
+            return Ok(());
+        };
+        let client_id = client_id.clone();
+        self.ensure_connected(&client_id)?;
+        self.send_activity(Value::Null)
+    }
+}
+
+impl Default for DiscordPresence {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::net::UnixListener;
+
+    fn snowflake() -> &'static str {
+        "1234567890123456"
+    }
+
+    #[test]
+    fn a_payload_needs_a_numeric_client_id() {
+        let bad = json!({"client_id": "not-a-snowflake", "details": "In a game"});
+        assert!(PresencePayload::parse(&bad).is_err());
+    }
+
+    #[test]
+    fn a_payload_rejects_fields_discord_does_not_define() {
+        // The struct is deny_unknown_fields on purpose: a plugin must not be
+        // able to smuggle a field Cordial does not itself construct into
+        // what eventually reaches Discord's socket.
+        let bad = json!({"client_id": snowflake(), "cmd": "SOMETHING_ELSE"});
+        assert!(PresencePayload::parse(&bad).is_err());
+    }
+
+    #[test]
+    fn details_over_the_discord_limit_is_refused() {
+        let bad = json!({"client_id": snowflake(), "details": "x".repeat(200)});
+        let e = PresencePayload::parse(&bad).unwrap_err();
+        assert!(e.contains("128"), "{e}");
+    }
+
+    #[test]
+    fn a_well_formed_payload_parses() {
+        let ok = json!({
+            "client_id": snowflake(),
+            "details": "Playing Baseplate",
+            "state": "In a server",
+            "start": 1_700_000_000,
+            "large_image": "roblox-logo",
+        });
+        let p = PresencePayload::parse(&ok).unwrap();
+        assert_eq!(p.client_id, snowflake());
+        assert_eq!(p.details.as_deref(), Some("Playing Baseplate"));
+    }
+
+    /// Stands in for Discord: accepts one connection, reads a handshake
+    /// frame, answers it, then reads one SET_ACTIVITY frame and reports its
+    /// opcode and JSON body back over a channel — this is what "verify
+    /// socket discovery and framing against a local test double" means. It
+    /// is not, and cannot be, a substitute for having watched a real Discord
+    /// client show the activity; see the written report for that caveat.
+    fn spawn_fake_discord(path: PathBuf) -> std::sync::mpsc::Receiver<(u32, Value)> {
+        let listener = UnixListener::bind(&path).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let (op, body) = read_frame(&mut stream).unwrap();
+            assert_eq!(op, OP_HANDSHAKE);
+            let handshake: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(handshake["v"], 1);
+            tx.send((op, handshake)).unwrap();
+            // Acknowledge the handshake the way Discord does, so
+            // DiscordPresence::ensure_connected's read_frame does not hang.
+            write_frame(&mut stream, OP_FRAME, &json!({"evt": "READY"})).unwrap();
+
+            let (op, body) = read_frame(&mut stream).unwrap();
+            let cmd: Value = serde_json::from_slice(&body).unwrap();
+            tx.send((op, cmd)).unwrap();
+            write_frame(&mut stream, OP_FRAME, &json!({"evt": null})).unwrap();
+        });
+        rx
+    }
+
+    // XDG_RUNTIME_DIR is process-wide state, and cargo runs tests in this
+    // file on multiple threads by default. Every test that points it at a
+    // scratch directory holds this lock for as long as the env var is set,
+    // so the two below cannot race each other and corrupt the socket search.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn presence_set_speaks_discords_framing_to_a_local_socket() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("cordial-discord-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("XDG_RUNTIME_DIR", &dir);
+        let socket_path = dir.join("discord-ipc-0");
+
+        let rx = spawn_fake_discord(socket_path.clone());
+
+        let mut presence = DiscordPresence::new();
+        let payload = PresencePayload::parse(&json!({
+            "client_id": snowflake(),
+            "details": "Playing Baseplate",
+            "state": "In a server",
+        }))
+        .unwrap();
+        presence.set(&payload).expect("the fake Discord should accept a well-formed activity");
+
+        let (op, handshake_body) = rx.recv().unwrap();
+        assert_eq!(op, OP_HANDSHAKE);
+        assert_eq!(handshake_body["client_id"], snowflake());
+
+        let (op, activity_frame) = rx.recv().unwrap();
+        assert_eq!(op, OP_FRAME);
+        assert_eq!(activity_frame["cmd"], "SET_ACTIVITY");
+        assert_eq!(activity_frame["args"]["activity"]["details"], "Playing Baseplate");
+        assert_eq!(activity_frame["args"]["activity"]["state"], "In a server");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn presence_set_fails_cleanly_when_nothing_is_listening() {
+        // The normal case: Discord is not running. This must return an
+        // error promptly, not hang and not panic.
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("cordial-discord-absent-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("XDG_RUNTIME_DIR", &dir);
+
+        let mut presence = DiscordPresence::new();
+        let payload = PresencePayload::parse(&json!({"client_id": snowflake()})).unwrap();
+        let err = presence.set(&payload).expect_err("nothing is listening on any candidate socket");
+        assert!(err.contains("not running"), "{err}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

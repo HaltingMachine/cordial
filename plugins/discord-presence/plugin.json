@@ -1,0 +1,6 @@
+{
+  "id": "discord-presence",
+  "name": "Discord Presence",
+  "entry": "main.ts",
+  "capabilities": ["lifecycle.read", "presence.set", "log"]
+}

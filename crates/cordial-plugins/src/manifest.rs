@@ -99,8 +99,19 @@ pub fn parse(text: &str, dir: &Path) -> Result<Plugin, String> {
 ///
 /// A plugin that fails to parse is reported and skipped rather than aborting
 /// discovery: one bad manifest should not stop every other plugin from loading.
+///
+/// A plugin id must be unique across the whole root. This matters beyond
+/// tidiness: the event registry (ADR-006) namespaces a plugin's declared
+/// event types by its id, and grants and the broker index by id too, so two
+/// on-disk plugins claiming the same id would let the second one silently
+/// inherit whatever was approved for, or later declared by, the first. The
+/// second claimant is reported and skipped, the same way an unparseable
+/// manifest is — first one in the sorted directory listing wins, which keeps
+/// discovery deterministic rather than dependent on filesystem enumeration
+/// order.
 pub fn discover(root: &Path) -> Vec<Plugin> {
     let mut found = Vec::new();
+    let mut seen_ids = BTreeSet::new();
     let Ok(entries) = std::fs::read_dir(root) else {
         return found;
     };
@@ -113,7 +124,17 @@ pub fn discover(root: &Path) -> Vec<Plugin> {
             continue;
         };
         match parse(&text, &dir) {
-            Ok(p) => found.push(p),
+            Ok(p) => {
+                if !seen_ids.insert(p.manifest.id.clone()) {
+                    println!(
+                        "  plugin: {} claims id {:?}, already used by another plugin directory; skipping",
+                        path.display(),
+                        p.manifest.id
+                    );
+                    continue;
+                }
+                found.push(p)
+            }
             Err(e) => println!("  plugin: {} is not loadable ({e})", path.display()),
         }
     }
@@ -181,5 +202,37 @@ mod tests {
     fn capabilities_may_be_omitted_entirely() {
         let p = parse(r#"{"id":"quiet","entry":"m.ts"}"#, &dir()).unwrap();
         assert!(p.requested.is_empty());
+    }
+
+    #[test]
+    fn a_duplicate_plugin_id_across_directories_is_refused_not_merged() {
+        // The event registry namespaces by plugin id (ADR-006); if two
+        // directories could both present themselves as "flag-manager", the
+        // second would inherit the first's declared event types and grants
+        // just by claiming the same string. Discovery has to make that
+        // impossible before anything downstream ever sees an id.
+        let root = std::env::temp_dir().join("cordial-manifest-duplicate-id-test");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("aaa-first")).unwrap();
+        std::fs::create_dir_all(root.join("zzz-second")).unwrap();
+        std::fs::write(
+            root.join("aaa-first/plugin.json"),
+            r#"{"id":"flag-manager","entry":"main.ts","capabilities":["log"]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("zzz-second/plugin.json"),
+            r#"{"id":"flag-manager","entry":"main.ts","capabilities":["flags.write"]}"#,
+        )
+        .unwrap();
+
+        let found = discover(&root);
+        assert_eq!(found.len(), 1, "the duplicate must be skipped, not merged or duplicated");
+        // Sorted directory order means "aaa-first" is discovered before
+        // "zzz-second", so its request set (log only) is the one that wins.
+        assert!(found[0].requested.contains(&Capability::Log));
+        assert!(!found[0].requested.contains(&Capability::FlagsWrite));
+
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

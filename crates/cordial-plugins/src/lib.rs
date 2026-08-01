@@ -9,7 +9,11 @@
 
 pub mod broker;
 pub mod capability;
+pub mod events;
 pub mod grants;
 pub mod host;
 pub mod manifest;
+pub mod notify;
+pub mod presence;
 pub mod protocol;
+pub mod urlopen;
