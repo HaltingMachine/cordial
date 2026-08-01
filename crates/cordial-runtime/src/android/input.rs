@@ -398,6 +398,21 @@ impl TextField {
         self.text = text;
     }
 
+    /// As [`Self::seed`], but with the caret placed explicitly rather than at
+    /// the end — for seeding from `InputConnection.setState`, which reports a
+    /// real selection, unlike `showKeyboard`'s byte array which carries no
+    /// caret at all. Clamped into range: a stale or out-of-sync `selectionEnd`
+    /// from the engine must not panic the char-boundary arithmetic elsewhere
+    /// in this struct.
+    fn seed_with_caret(&mut self, text: String, caret_chars: i32) {
+        let len = text.chars().count();
+        self.caret = caret_chars.max(0) as usize;
+        if self.caret > len {
+            self.caret = len;
+        }
+        self.text = text;
+    }
+
     fn insert(&mut self, s: &str) {
         let at = self.byte_offset();
         self.text.insert_str(at, s);
@@ -519,11 +534,42 @@ pub enum Edit<'a> {
 /// Reseed the buffer when focus has moved since it was last filled, shared by
 /// [`edit_text_buffer`] and [`text_buffer_snapshot`] so the two cannot drift
 /// into different reseed conditions.
+///
+/// The *trigger* is still `textbox_generation()` — `showKeyboard`'s
+/// focus-change counter, proven in practice (see `docs/NEXT.md` §1's account
+/// of the bouncing-focus bug this generation check exists to survive). What
+/// changed is the *content* reseeded: `InputConnection.setState` is the
+/// engine's own outbound report of what a field contains, and — once at least
+/// one has actually arrived — is preferred over `showKeyboard`'s byte array,
+/// which is a one-shot snapshot taken only at the moment focus changed and
+/// carries no caret at all (`seed_with_caret` uses `setState`'s
+/// `selectionEnd`; `showKeyboard`'s path still defaults to the end of the
+/// text, via `seed`, as it always has).
+///
+/// Deliberately *not* done: reseeding on every `ime_state_generation()`
+/// change, i.e. treating each `setState` as a live overwrite regardless of
+/// focus. `setState` is also how the engine would echo back a state Cordial
+/// itself just pushed via `pass_text`/`sync_textbox`, and reseeding on that
+/// echo — mid-keystroke, not at a focus boundary — is exactly the shape of
+/// feedback loop that produced the focus-bounce bug `keyboard_report_enabled`
+/// documents. Restricting the new source to the existing, already-safe reseed
+/// boundary avoids reopening that without the interactive test needed to
+/// confirm a live-overwrite version does not regress it.
 fn reseed_if_needed(buf: &mut TextField) {
     let generation = cordial_linker_sys::game_activity::textbox_generation();
     let mut seen = TEXT_GENERATION.lock().unwrap_or_else(|e| e.into_inner());
     if *seen != Some(generation) {
-        buf.seed(cordial_linker_sys::game_activity::textbox_text());
+        if cordial_linker_sys::game_activity::ime_state_generation() > 0 {
+            let text = cordial_linker_sys::game_activity::ime_state_text();
+            let (_, selection_end) = cordial_linker_sys::game_activity::ime_state_selection();
+            buf.seed_with_caret(text, selection_end);
+        } else {
+            // No `setState` has landed yet this session — nothing has told
+            // Cordial anything through the new path, and treating that as
+            // "the field is empty" would wrongly blank a pre-filled box that
+            // `showKeyboard`'s snapshot still has correctly.
+            buf.seed(cordial_linker_sys::game_activity::textbox_text());
+        }
         *seen = Some(generation);
     }
 }

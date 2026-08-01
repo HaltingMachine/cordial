@@ -1201,6 +1201,25 @@ fn main() -> ExitCode {
                                         ) {
                                             Ok(()) => {
                                                 println!("  surface handed to the engine");
+                                                // `setInputConnectionNative`: on real
+                                                // Android this is Java calling native
+                                                // code from inside
+                                                // `onCreateInputConnection`, which
+                                                // Cordial has no view system to
+                                                // trigger — driven directly, once,
+                                                // here, so the engine has somewhere
+                                                // to send `setState`/
+                                                // `setSoftKeyboardActive`/
+                                                // `restartInput` before it ever tries.
+                                                // `Ok(None)` means the native was not
+                                                // registered yet, the same
+                                                // not-yet-vs-failed distinction the
+                                                // other AGDK natives use.
+                                                match linker::game_activity::set_input_connection(handle) {
+                                                    Ok(Some(())) => println!("  InputConnection registered with the engine"),
+                                                    Ok(None) => println!("  setInputConnectionNative not registered yet; IME state will not reach Cordial"),
+                                                    Err(e) => println!("  setInputConnectionNative failed: {e}"),
+                                                }
                                                 let secs = opt.run_seconds;
                                                 println!("  pumping the looper for {secs}s");
                                                 // Android's UI thread runs the

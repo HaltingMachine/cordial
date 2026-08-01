@@ -934,6 +934,15 @@ pub mod game_activity {
             err: *mut c_char,
             err_len: usize,
         ) -> c_int;
+        fn cordial_game_activity_set_input_connection(
+            handle: i64,
+            err: *mut c_char,
+            err_len: usize,
+        ) -> c_int;
+        fn cordial_ime_state_generation() -> u32;
+        fn cordial_ime_soft_keyboard_active() -> c_int;
+        fn cordial_ime_state_text(buf: *mut c_char, n: c_int) -> c_int;
+        fn cordial_ime_state_selection(start: *mut c_int, end: *mut c_int);
     }
 
     /// One `GameActivity` native shaped `(J)V` — `onPauseNative`,
@@ -1143,5 +1152,76 @@ pub mod game_activity {
             -2 => Ok(None),
             _ => Err(take_err(err)),
         }
+    }
+
+    /// `GameActivity.setInputConnectionNative` — hands the engine the
+    /// `InputConnection` it will later call `setState`/`setSoftKeyboardActive`/
+    /// `restartInput` on. Meant to be driven once, early (see the call site in
+    /// `load.rs`), not per frame — a second call would construct and register a
+    /// second `InputConnection` C++ side, but the engine keeps calling back on
+    /// whichever one it saw first, so nothing after the first call would ever
+    /// be reached anyway.
+    pub fn set_input_connection(handle: i64) -> Result<Option<()>, String> {
+        let mut err = vec![0u8; 512];
+        // SAFETY: `err` outlives the call.
+        let rc = unsafe {
+            cordial_game_activity_set_input_connection(
+                handle,
+                err.as_mut_ptr() as *mut c_char,
+                err.len(),
+            )
+        };
+        match rc {
+            0 => Ok(Some(())),
+            -2 => Ok(None),
+            _ => Err(take_err(err)),
+        }
+    }
+
+    /// Bumped on every `InputConnection.setState`/`restartInput` the engine has
+    /// made — the outbound half of the IME contract, as distinct from
+    /// [`textbox_generation`]'s focus-change counter driven by `showKeyboard`.
+    pub fn ime_state_generation() -> u32 {
+        // SAFETY: a plain atomic load on the C++ side.
+        unsafe { cordial_ime_state_generation() }
+    }
+
+    /// Whether the engine last asked for a soft keyboard via
+    /// `InputConnection.setSoftKeyboardActive`. Not currently wired to
+    /// anything — `updateKeyboardSize` remains the outbound acknowledgement
+    /// path (see `android::input`'s `keyboard_report_enabled` doc) — kept
+    /// available for whichever future change replaces it, so that decision
+    /// does not also have to rediscover how to read this flag.
+    pub fn ime_soft_keyboard_active() -> bool {
+        // SAFETY: a plain atomic load on the C++ side.
+        unsafe { cordial_ime_soft_keyboard_active() != 0 }
+    }
+
+    /// The text `InputConnection.setState` last reported, i.e. what the engine
+    /// itself currently believes the focused field contains — the "real"
+    /// contents `android::input`'s reseed should prefer over `showKeyboard`'s
+    /// one-shot byte array once a `setState` has actually been observed for
+    /// the current focus.
+    pub fn ime_state_text() -> String {
+        let mut buf = vec![0u8; 4096];
+        // SAFETY: `buf` is writable for its full length and outlives the call.
+        let n = unsafe { cordial_ime_state_text(buf.as_mut_ptr() as *mut c_char, buf.len() as c_int) };
+        if n <= 0 {
+            return String::new();
+        }
+        String::from_utf8_lossy(&buf[..n as usize]).into_owned()
+    }
+
+    /// The selection `InputConnection.setState` last reported, as a
+    /// `(start, end)` char-offset pair. Roblox's own text boxes are
+    /// single-caret in practice, so `android::input` collapses this to
+    /// `end` for its own caret; the pair is returned as-is in case a future
+    /// caller needs a real selection range.
+    pub fn ime_state_selection() -> (i32, i32) {
+        let mut start: c_int = 0;
+        let mut end: c_int = 0;
+        // SAFETY: `start`/`end` are live out-parameters for the call.
+        unsafe { cordial_ime_state_selection(&mut start, &mut end) };
+        (start, end)
     }
 }

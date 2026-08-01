@@ -148,6 +148,31 @@ struct VkWaylandSurfaceCreateInfoKHR {
 /// situation as the Xlib one above.
 const VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR: i32 = 1000006000;
 
+/// `VkExtent2D` and `VkSurfaceCapabilitiesKHR`, read (never constructed) by
+/// [`vk_get_physical_device_surface_capabilities_khr`] — see that function for
+/// why patching `currentExtent` in this struct is what makes the Wayland
+/// backend render at all.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct VkExtent2D {
+    width: u32,
+    height: u32,
+}
+
+#[repr(C)]
+struct VkSurfaceCapabilitiesKHR {
+    min_image_count: u32,
+    max_image_count: u32,
+    current_extent: VkExtent2D,
+    min_image_extent: VkExtent2D,
+    max_image_extent: VkExtent2D,
+    max_image_array_layers: u32,
+    supported_transforms: u32,
+    current_transform: i32,
+    supported_composite_alpha: u32,
+    supported_usage_flags: u32,
+}
+
 /// `VK_KHR_android_surface`'s spec version, per the Khronos extension registry.
 /// Fixed at 6 since it was introduced; there is nothing to detect it against.
 const ANDROID_SURFACE_SPEC_VERSION: u32 = 6;
@@ -292,6 +317,12 @@ extern "C" fn vk_get_instance_proc_addr(instance: *mut c_void, name: *const c_ch
     }
     // SAFETY: bionic's `vkGetInstanceProcAddr` contract is a NUL-terminated name.
     let bytes = unsafe { CStr::from_ptr(name) }.to_bytes();
+    // The full ordered list of names resolved here is identical between the X11
+    // and Wayland runs (checked directly, byte for byte) — Roblox builds one
+    // static dispatch table regardless of backend, so *which* names get
+    // resolved says nothing about which ones are actually called. Do not re-add
+    // a trace here; it was tried and produced no signal. What answers the
+    // question is instrumenting the handful of WSI calls themselves, below.
     match bytes {
         // A `vkGetInstanceProcAddr(instance, "vkGetInstanceProcAddr")` query
         // must return itself — the spec requires it, and code that
@@ -324,6 +355,22 @@ extern "C" fn vk_get_instance_proc_addr(instance: *mut c_void, name: *const c_ch
             );
             vk_queue_present_khr as *const () as *mut c_void
         }
+        // `vkGetPhysicalDeviceSurfaceCapabilitiesKHR`'s result is patched, not
+        // just forwarded — see [`vk_get_physical_device_surface_capabilities_khr`]
+        // for the failure this fixes. Measured, not guessed: instrumenting this
+        // call (and `vkCreateSwapchainKHR`/`vkAcquireNextImageKHR`, since
+        // reverted — the finding is what matters, not the scaffolding) showed
+        // `currentExtent` coming back as `4294967295x4294967295` on Wayland and
+        // a real `1280x720` on X11 for the identical query, and zero calls to
+        // `vkCreateSwapchainKHR` ever following it on Wayland, against one
+        // (and 653 to `vkAcquireNextImageKHR`) on X11 in the same window.
+        b"vkGetPhysicalDeviceSurfaceCapabilitiesKHR" => {
+            HOST_GET_SURFACE_CAPS.store(
+                unsafe { (h.get_instance_proc_addr)(instance, name) } as usize,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            vk_get_physical_device_surface_capabilities_khr as *const () as *mut c_void
+        }
         // Every other name — `vkCreateDevice`, every `vkCmd*`, everything a real
         // `VkInstance` answers for once one exists — is exactly what the host
         // loader would give a native Linux Vulkan app. Forwarding unconditionally
@@ -347,11 +394,13 @@ extern "C" fn vk_get_device_proc_addr(device: *mut c_void, name: *const c_char) 
     let host: extern "C" fn(*mut c_void, *const c_char) -> *mut c_void =
         unsafe { std::mem::transmute(f) };
     // SAFETY: Vulkan's contract is a NUL-terminated name.
-    if unsafe { CStr::from_ptr(name) }.to_bytes() == b"vkQueuePresentKHR" {
-        HOST_QUEUE_PRESENT.store(host(device, name) as usize, std::sync::atomic::Ordering::Relaxed);
-        return vk_queue_present_khr as *const () as *mut c_void;
+    match unsafe { CStr::from_ptr(name) }.to_bytes() {
+        b"vkQueuePresentKHR" => {
+            HOST_QUEUE_PRESENT.store(host(device, name) as usize, std::sync::atomic::Ordering::Relaxed);
+            vk_queue_present_khr as *const () as *mut c_void
+        }
+        _ => host(device, name),
     }
-    host(device, name)
 }
 
 /// The real `vkQueuePresentKHR`, resolved on first request and then called
@@ -369,6 +418,98 @@ extern "C" fn vk_queue_present_khr(queue: *mut c_void, info: *const c_void) -> i
     // SAFETY: resolved from the host loader for exactly this name.
     let f: extern "C" fn(*mut c_void, *const c_void) -> i32 = unsafe { std::mem::transmute(f) };
     f(queue, info)
+}
+
+static HOST_GET_SURFACE_CAPS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// `0xFFFFFFFF` in both dimensions of `VkSurfaceCapabilitiesKHR::currentExtent`
+/// is not a sentinel Cordial invented — it is `VK_KHR_wayland_surface`'s own
+/// documented value for "the surface size is determined by the swapchain
+/// being created", because unlike an X11 window or a real Android
+/// `ANativeWindow`, a Wayland surface has no size of its own until a buffer
+/// is attached to it.
+const VK_WHOLE_SIZE_UNDEFINED_EXTENT: u32 = 0xFFFF_FFFF;
+
+/// `vkGetPhysicalDeviceSurfaceCapabilitiesKHR`, patched on the Wayland backend
+/// only.
+///
+/// This is the actual cause of the blank window, found by instrumenting the
+/// Vulkan calls Roblox makes (not by reading FLog, which logs nothing helpful
+/// here on either backend — a similarly-worded `Invalid currentExtent -1x-1`
+/// line fires continuously on *both*, from an unrelated, harmless periodic
+/// check, and very nearly passed for the cause before the real one was
+/// measured). What actually differs, read straight from the values Mesa
+/// returns to this same call:
+///
+/// ```text
+///           currentExtent            calls to vkCreateSwapchainKHR that follow
+/// X11       1280x720 (real)           1
+/// Wayland   4294967295x4294967295     0
+/// ```
+///
+/// `4294967295` is `0xFFFFFFFF` — the documented Wayland WSI value above, and
+/// Roblox's own log confirms it reads that as invalid rather than as the
+/// sentinel it is: `Vulkan: skipping framebuffer creation, invalid
+/// currentExtent -1x-1`, repeated every frame, forever, because nothing ever
+/// gives it a different answer. The engine's surface code was written against
+/// Android's `ANativeWindow`-backed `VkSurfaceKHR`, which — like X11 — always
+/// has a real, queryable size; it has no path for "you choose", so it never
+/// reaches `vkCreateSwapchainKHR` at all.
+///
+/// The fix is the same substitution this whole file already makes for the
+/// surface identity itself: report what an Android surface would report.
+/// Cordial's own window is the one source of truth for "how big is Cordial's
+/// window" everywhere else in this codebase (`ANativeWindow_getWidth`,
+/// `wl_egl_window_resize` on the EGL path) — using it here too, instead of
+/// Mesa's honestly-correct-per-spec-but-Android-shaped-code-hostile answer,
+/// keeps that one source of truth rather than adding a second.
+extern "C" fn vk_get_physical_device_surface_capabilities_khr(
+    physical_device: *mut c_void,
+    surface: *mut c_void,
+    out: *mut VkSurfaceCapabilitiesKHR,
+) -> i32 {
+    let f = HOST_GET_SURFACE_CAPS.load(std::sync::atomic::Ordering::Relaxed);
+    if f == 0 {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    type Fn_ = extern "C" fn(*mut c_void, *mut c_void, *mut VkSurfaceCapabilitiesKHR) -> i32;
+    // SAFETY: resolved from the host loader for exactly this name.
+    let f: Fn_ = unsafe { std::mem::transmute(f) };
+    let rc = f(physical_device, surface, out);
+    if rc != VK_SUCCESS || crate::android::backend() != crate::android::Backend::Wayland {
+        return rc;
+    }
+    // SAFETY: `out` is the caller's own out-parameter and `rc == VK_SUCCESS`,
+    // so Mesa has just written a complete `VkSurfaceCapabilitiesKHR` into it;
+    // this file's definition of that struct matches Mesa's ABI (see the
+    // module doc's general point about Vulkan's layout being identical on
+    // Android and desktop Linux).
+    let Some(caps) = (unsafe { out.as_mut() }) else {
+        return rc;
+    };
+    if caps.current_extent.width == VK_WHOLE_SIZE_UNDEFINED_EXTENT
+        && caps.current_extent.height == VK_WHOLE_SIZE_UNDEFINED_EXTENT
+    {
+        if let Some(w) = crate::android::wayland::current() {
+            let (width, height, _) = w.geometry();
+            // Clamped into [minImageExtent, maxImageExtent] on principle —
+            // Cordial's window is always within Mesa's advertised range in
+            // practice (1x1..16384x16384 observed), but a substitution that
+            // could itself hand back an out-of-range extent would just move
+            // this bug rather than fix it.
+            let clamp = |v: i32, lo: u32, hi: u32| (v.max(0) as u32).clamp(lo, hi);
+            caps.current_extent.width =
+                clamp(width, caps.min_image_extent.width, caps.max_image_extent.width);
+            caps.current_extent.height =
+                clamp(height, caps.min_image_extent.height, caps.max_image_extent.height);
+            crate::android::trace(format_args!(
+                "wayland: vkGetPhysicalDeviceSurfaceCapabilitiesKHR currentExtent was undefined \
+                 (0xFFFFFFFF), reporting the window's own {}x{}",
+                caps.current_extent.width, caps.current_extent.height,
+            ));
+        }
+    }
+    rc
 }
 
 extern "C" fn vk_create_instance(

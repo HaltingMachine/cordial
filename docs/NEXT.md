@@ -1,8 +1,10 @@
 # Where to start
 
-Cordial loads Roblox's engine, renders at about 27 fps on Vulkan, does HTTPS,
-takes mouse and keyboard, and reaches the logged-out landing page. It is stable.
-It is not yet usable, because you cannot sign in.
+Cordial loads Roblox's engine on Vulkan, does HTTPS, takes mouse and keyboard,
+and reaches the logged-out landing page — on X11, confirmed by repeated
+screenshot. The Wayland backend now presents frames too (see §1a) — confirmed
+by Vulkan call counts matching X11's, not yet independently confirmed by
+screenshot. Neither is yet usable, because you cannot sign in.
 
 This file is the handover. It says what is blocking, how to work on it, and —
 the part worth reading even if you are in a hurry — **what has already been
@@ -128,6 +130,173 @@ friends, because it is the Android build. What goes away is Cordial inventing th
 editing state in the middle. See
 [ADR-011](adr/ADR-011-wayland-and-libadwaita.md).
 
+### The Android half is bigger than `showKeyboard` — AGDK's `InputConnection`
+
+**Correction to "the engine only speaks `showKeyboard` and friends."** A live
+run's jnivm log shows the engine also reaching for
+`InputConnection.setState`/`setSoftKeyboardActive`/`restartInput` and getting
+`Constructed Unresolved symbol` every time — the *outbound* half of AGDK's own
+`GameTextInput` contract, engine calling out to report its own idea of the
+editing state, as distinct from the *inbound* half
+(`onTextInputEventNative`) already ruled out above. Nothing had ever
+constructed an `InputConnection` object for the engine to call these on, so
+every one of these calls landed on a receiver that did not exist.
+
+Implemented in `native/game_activity.cpp`:
+
+- `InputConnection` (`com/google/androidgamesdk/gametextinput/InputConnection`),
+  constructed once and handed to the engine via
+  `GameActivity.setInputConnectionNative` — driven directly from
+  `load.rs` right after the surface is handed over, the same way
+  `cordial_game_activity_init` drives `initializeNativeCode` directly instead
+  of waiting for a Java caller that does not exist. Signatures are from the
+  shipping APK's dex (`tools/dex_method.py`), not guessed:
+  `setState(Lcom/google/androidgamesdk/gametextinput/State;)V`,
+  `setSoftKeyboardActive(ZI)V`, `restartInput()V`.
+- `GameActivity.setImeEditorInfoFields(III)V`/`setWindowFlags(II)V` — also
+  previously unresolved, now real no-op hooks; resolving is the point, per
+  `NativeTextBoxInfo`'s own comment on the pending-exception hazard an
+  unresolved call carries.
+- `android::input::reseed_if_needed` (`crates/cordial-runtime/src/android/
+  input.rs`) now prefers `InputConnection.setState`'s text and caret over
+  `showKeyboard`'s one-shot byte-array snapshot, once at least one `setState`
+  has actually arrived — `setState` is refreshed rather than captured once at
+  focus time, and carries a real caret where `showKeyboard`'s array carries
+  none.
+
+**Deliberately not done, and why:** reseeding *live*, on every
+`ime_state_generation()` change rather than only at the existing
+focus-change boundary. `setState` is also how the engine would echo back
+whatever Cordial itself just pushed via `pass_text`/`sync_textbox`; treating
+every echo as a fresh overwrite mid-keystroke is the same shape of feedback
+loop that produced the focus-bounce bug two sections up, and confirming a
+live-overwrite version does not reintroduce it needs the interactive test
+this change has not yet had (see below).
+
+**Verified:** `setInputConnectionNative` registers cleanly
+(`CORDIAL_ANDROID_TRACE=1` shows `InputConnection registered with the
+engine`) and a full run reaches `APP_READY (Landing)` with no
+`Constructed Unresolved symbol` for `InputConnection` or either `GameActivity`
+method, on Wayland. **Not yet verified:** that `setState` actually arrives
+once a field is focused and typed into, or that the reseed change makes
+characters appear — both need clicking into a real field and typing, which
+this session's automated environment could not do (the desktop session was
+screen-locked for the remainder of it). Do the interactive test — click a
+field on either backend, type, screenshot — before trusting this as the fix
+rather than as a well-motivated, resolves-cleanly, unverified-live change.
+
+## 1a. The Wayland backend was blank — two independent bugs, both fixed
+
+`CORDIAL_WAYLAND=1` produced a window present in the dock and alt-tab, titled
+correctly, completely blank on screen, for the entire time this project has
+had a Wayland backend. Two unrelated bugs, both real, both now fixed in
+`crates/cordial-runtime/src/android/vulkan.rs` and
+`crates/cordial-runtime/src/android/wayland.rs`. Neither was found by reading
+FLog — see the note in §2a above about why FLog is not useful for this
+question — both were found by instrumenting the actual Vulkan/Wayland calls
+and comparing X11 (works) against Wayland (did not) with real numbers.
+
+**Bug 1: `vkGetPhysicalDeviceSurfaceCapabilitiesKHR`'s `currentExtent` was
+never patched for Wayland, and the engine cannot handle the value Wayland
+sends.** `VK_KHR_wayland_surface` reports `currentExtent` as
+`(0xFFFFFFFF, 0xFFFFFFFF)` — the spec's own "the client picks the size, not
+the platform" sentinel, because unlike an X11 window or a real Android
+`ANativeWindow`, a Wayland surface has no size of its own until a buffer is
+attached. Confirmed directly: `vkGetPhysicalDeviceSurfaceCapabilitiesKHR ->
+0, ... currentExtent=4294967295x4294967295` on Wayland,
+`currentExtent=1280x720` on X11, for the identical call. The engine's own
+FLog explains what it does with that: `Vulkan: skipping framebuffer creation,
+invalid currentExtent -1x-1`, repeated every frame, forever — its surface
+code was written against Android's always-a-real-size `VkSurfaceKHR` and has
+no path for "you choose". Confirmed with a second, independent counter:
+`vkCreateSwapchainKHR` and `vkAcquireNextImageKHR` were called **zero** times
+on Wayland for a whole run that reached `APP_READY (Landing)`, against one
+`vkCreateSwapchainKHR` and 653 `vkAcquireNextImageKHR` calls on X11 in the
+same window — the engine never even attempted to create a swapchain.
+
+The `Invalid currentExtent -1x-1` line is a trap worth naming explicitly: it
+also fires continuously on X11, which renders correctly, from an unrelated,
+harmless periodic check elsewhere in the engine. Trusting that line alone
+without comparing the two backends' actual `vkCreateSwapchainKHR`/
+`vkQueuePresentKHR` call counts would have (and briefly did) point at the
+wrong conclusion.
+
+Fix: `vk_get_physical_device_surface_capabilities_khr` in `vulkan.rs`
+intercepts the call on the Wayland backend only and, when `currentExtent` is
+the undefined sentinel, replaces it with the Wayland window's own current
+size — the same "report what an Android surface would report" substitution
+this file already makes for the surface identity itself
+(`vkCreateAndroidSurfaceKHR -> vkCreateWaylandSurfaceKHR`).
+
+**Bug 2: a second `wl_proxy_add_listener` call on `xdg_surface` silently
+failed, leaving a dangling stack pointer registered, which segfaulted the
+moment the fixed Vulkan path tried to resize.** Once bug 1 was fixed and the
+engine started really presenting, the process reliably segfaulted a few
+frames later — `wl_closure_invoke` (inside `libwayland-client`) jumping to
+address `0xe0` via `libffi`'s `ffi_call`, i.e. calling through a garbage
+function pointer. `open()` in `wayland.rs` used to register a temporary,
+stack-local `XdgSurfaceListener` for the *first* `xdg_surface.configure`
+(before `WaylandWindow` exists for a steady-state listener to reach via
+`current()`), then called `wl_proxy_add_listener` a second time to swap in
+the real, `'static` listener once construction finished. Logging that second
+call's return value directly showed `-1` — `wl_proxy_add_listener` refuses a
+second registration on a proxy that already has one and changes nothing —
+so the dangling stack listener (a local in `open()`, which had long since
+returned and had its stack frame reused many times over) stayed registered
+for the whole session. The *first* subsequent `xdg_surface.configure` — which
+never arrived before bug 1 was fixed, because nothing had ever made the
+window worth reconfiguring — read whatever unrelated bytes now occupied that
+stack slot as a function pointer and jumped to them.
+
+Fix: one `XdgSurfaceListener`, registered once, for the proxy's whole
+lifetime. It writes the initial serial into a small static
+(`INITIAL_XDG_SURFACE_SERIAL`) when `current()` is still `None`, instead of a
+second listener swap. See `xdg_surface_configure`'s own comment in
+`wayland.rs` for the full trace that found this.
+
+**While debugging bug 2, two more listener structs were found undersized the
+same way** — `PointerListener` was missing `frame`/`axis_source`/
+`axis_stop`/`axis_discrete`/`axis_value120`/`axis_relative_direction`
+(`wl_pointer` v5/v5/v5/v5/v8/v9) and `KeyboardListener` was missing
+`repeat_info` (`wl_keyboard` v4). Both fixed with no-op handlers for the same
+reason `XDG_TOPLEVEL_EVENTS` needed `configure_bounds`/`wm_capabilities`
+added: `wl_pointer_interface`/`wl_keyboard_interface` are `dlsym`'d from the
+host's real `libwayland-client.so`, so their `event_count` is whatever the
+host's library version actually declares, not whatever this file happens to
+have a listener field for, and a wire event past the end of a too-short
+listener array is exactly this crash. Neither has actually been observed to
+fire in a captured run yet — they are defensive, following the same
+protocol-version-vs-listener-size reasoning that explained bug 2, not each
+individually confirmed the way bug 2 was.
+
+**Verified, not inferred:** `vkQueuePresentKHR` went from 0 to 663 calls on
+Wayland (668 on X11, same window, same run length), `vkCreateSwapchainKHR`
+now succeeds, and the process completes a full run and reaches
+`APP_READY (Landing)` repeatedly with no crash — checked across several
+consecutive launches, not once. **Not yet verified with a screenshot.** The
+desktop session locked partway through this work (screen-idle timeout, not
+caused by anything here) and did not unlock again before this session ended.
+Everything above is measured through the engine's and Mesa's own return
+values and call counts, which is real evidence that frames are being
+produced and handed to the compositor — it is not the same claim as "a
+screenshot shows Roblox on screen", and the two should not be conflated. Take
+that screenshot (`docs/NEXT.md`'s own note on GNOME's `org.gnome.Shell.
+Screenshot`/portal screenshot mechanisms working where X11 tools cannot
+capture a native Wayland surface still applies) before treating this as
+fully closed rather than "presentation demonstrably works; pixels on screen
+not yet independently confirmed".
+
+**Do not re-run:** blaming `Invalid currentExtent -1x-1` in FLog by itself —
+see above, it is not diagnostic on its own. Do not re-add the "swap listener
+after `WINDOW` exists" pattern for `xdg_surface` — see bug 2.
+
+**Now that Wayland presents frames, [ADR-011](adr/ADR-011-wayland-and-libadwaita.md)'s
+removal trigger is close but not met.** The ADR is explicit that `window.rs`
+and the X11 backend are deleted "when the Wayland backend can reach sign-in",
+not when it renders — and sign-in is still blocked on §2 below, unrelated to
+anything in this section. X11 stays in the tree, and stays load-bearing as
+the control, until that condition is actually met.
+
 ## 2. Sign-in itself
 
 Without a session the client sits on the landing page. Avatar thumbnails fail
@@ -167,31 +336,46 @@ One correction that came out of it: the `The requested Ids are invalid`
 thumbnail failure is what the **real, logged-out Android client** also produces.
 It is not a Cordial defect and it is not evidence of anything.
 
-## 2a. `CORDIAL_COUNT_GL=1` is a broken instrument. Do not trust it.
+## 2a. `CORDIAL_COUNT_GL=1`: not broken, just answering "is GLES running?" — and the
+answer to that is always no
 
-It reports zero for `eglCreateWindowSurface`, `eglSwapBuffers` and `glClear` on
-**both** backends, including the X11 one that demonstrably renders Roblox — the
-landing page has been screenshotted from it repeatedly. A counter that reads zero
-for a path known to be running is measuring something other than what its name
-says.
+**Correction to what this section used to say.** It reported zero for
+`eglCreateWindowSurface`, `eglSwapBuffers` and `glClear` on *both* backends and
+concluded the instrument was broken. It is not. `vkQueuePresentKHR` on the
+*same* counter reads real numbers on both backends now (668 on X11, 663 on
+Wayland, for comparable runs) — checked directly with `CORDIAL_ANDROID_TRACE=1
+CORDIAL_COUNT_GL=1`. The EGL counters read zero because **the engine renders
+through Vulkan on both backends in this build, not GLES**, confirmed the same
+way: `CORDIAL_ANDROID_TRACE=1` alone shows `vkCreateInstance`/
+`vkCreateAndroidSurfaceKHR -> vkCreate{Xlib,Wayland}SurfaceKHR` on every launch,
+X11 or Wayland, with no `eglCreateWindowSurface` ever appearing in the same
+trace. A GLES counter reading zero is not a broken instrument here, it is a
+correct answer to a question ("is the GLES path active") whose answer is no on
+this hardware/driver combination. The earlier entry conflated "this counter
+reads zero" with "this counter is unreliable" without checking which renderer
+was actually live — exactly the control this file's own "Measuring anything"
+section asks for, skipped.
 
-This is the third instrument in this project to mislead in the same way. The
-first was measuring `eglSwapBuffers` after Vulkan had become the renderer; the
-second was a `vkQueuePresentKHR` counter that read zero because device-level
-functions resolve through `vkGetDeviceProcAddr`, which the shim did not
-intercept. The pattern is always the same: the counter sits in an override that
-the engine turns out not to be calling, and zero is read as "it did not happen"
-rather than "I am not watching the right place".
+The specific "suspected, not confirmed" theory this section used to carry —
+that `android::mod::overrides()` appending `glcount::overrides()` *after* the
+backend's own list lets the counting wrapper silently replace `window.rs`/
+`wayland.rs`'s `eglCreateWindowSurface` — is **confirmed false**, by reading
+`glcount::overrides()` directly rather than running anything: it registers
+`eglMakeCurrent`, `glClear`, `glDrawElements`, `glDrawArrays`,
+`glCompileShader`, `glTexImage2D` and `eglSwapBuffers` (or `swap_buffers_timed`
+under `CORDIAL_SWAP_TIMES=1`) — no `eglCreateWindowSurface` entry at all, so
+there is no key for it to collide with in the `BTreeMap` `symtab::build`
+collects overrides into. It cannot be replacing something it never names.
 
-Suspected cause, **not confirmed**: `android::mod` extends the override list with
-`glcount::overrides()` *after* the backend's own, so the counting wrappers may be
-replacing `window.rs`/`wayland.rs`'s `eglCreateWindowSurface` — which would both
-lose the native-window substitution and count a different static. If that is
-right, `CORDIAL_COUNT_GL=1` does not merely fail to measure, it breaks rendering
-while it is set. Worth confirming before the flag is used for anything.
-
-**Do not use it to decide whether a backend renders.** Use the engine's own FLog
-(`GL Renderer`, `GL Version`, `SurfaceController`) or look at the window.
+**Still true and still the right instinct:** do not use `CORDIAL_COUNT_GL=1`'s
+*EGL* counters to decide whether a backend renders, because on a Vulkan build
+they will read zero regardless. `vkQueuePresentKHR` under the same flag is
+reliable and is what actually answered "does Wayland ever present a frame" —
+see §1a above. The engine's own FLog is close to useless for this specific
+question: `SurfaceController`/`RenderJob` log at startup and then go silent for
+the rest of the session on both backends, identically, so there is no
+per-frame signal to read there either. What works is the Vulkan call counter,
+or looking at the window.
 
 ## 2b. Audio never initialises before sign-in, and AAudio is not why
 
