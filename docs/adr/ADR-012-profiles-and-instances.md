@@ -1,0 +1,101 @@
+# ADR-012: A profile is storage; an instance is a window
+
+**Status:** accepted
+**Related:** [ADR-002](ADR-002-core-shell-and-ui-handoff.md), [ADR-005](ADR-005-flag-service.md), [ADR-006](ADR-006-plugin-events-and-first-party.md)
+
+## Decision
+
+Two words, kept distinct, because conflating them designs the wrong thing:
+
+| | |
+|---|---|
+| **Instance** | a running Cordial process — a window. Roblox's own usage. |
+| **Profile** | a directory holding one account's Roblox storage, plugin set and flag overrides. |
+
+An instance *runs* a profile. Profiles live at
+`$XDG_DATA_HOME/cordial/profiles/<name>/`, and **a profile may be held by at most
+one instance at a time**, enforced by an advisory lock rather than by convention.
+
+Multiple instances is launching the process more than once, each against a
+different profile.
+
+## Why the distinction is load-bearing
+
+The earlier path was `cordial/instances/default/run`, which held storage. That is
+the wrong word for what is in it, and the wrong word here is not cosmetic: it
+invites the reader to conclude that a second window needs a second data
+directory, or — worse — that one directory can back two windows. The first is
+false and the second is dangerous.
+
+Roblox means *window* by instance. Matching that is not deference to their
+vocabulary; it is that users asking for "multi-instance" are asking for more
+windows, and the feature should be named after what they asked for.
+
+## Why locking, rather than allowing a profile to be shared
+
+Nothing structurally prevents two Cordial processes opening the same profile.
+Unlike Fishstrap on Windows, there is no singleton mutex to defeat — each Cordial
+process is genuinely independent, which makes multi-instance nearly free here and
+is a real advantage of controlling the storage location ourselves.
+
+That same freedom is the hazard. Two instances on one profile are two processes
+writing one `appData` and one cookie store concurrently. Roblox's storage is not
+built for that, and the realistic outcomes are a corrupted profile or one session
+silently invalidating the other. Neither presents as "you did something
+unsupported"; both present as bugs in Cordial.
+
+So the lock is taken on the profile directory for the lifetime of the instance,
+`LOCK_EX | LOCK_NB`. A second attempt fails immediately with a message naming the
+profile, rather than blocking or racing.
+
+**Advisory, not mandatory, and that is honest.** `flock` does not stop a process
+that never asks. It stops *Cordial* from doing it by accident, which is the
+actual failure mode — a user double-clicking the launcher twice, not an adversary
+bypassing a lock.
+
+## Why not OAuth
+
+Roblox's OAuth 2.0 grants API scopes to third-party applications through the
+creator dashboard. It does not issue a play session, and there is no supported
+mechanism for a client to authenticate on a user's behalf. Account switching is
+therefore not an authentication feature at all: each profile logs in normally and
+keeps its own session in its own directory. Nothing about this design needs
+Roblox to grant anything, which is also why it cannot be withdrawn.
+
+## Consequences
+
+**Accepted:** the storage path changes, and existing users have a session under
+`instances/default`. The change must *move* that directory rather than start
+fresh, because a silent reset presents as being logged out for no reason — which
+is exactly the class of failure this project keeps writing down. Migration runs
+once, when the old path exists and the new one does not.
+
+**Accepted:** a profile is one object holding Roblox storage, plugins and flags
+together, rather than three orthogonal selections. "My alt account with my main's
+plugins" is not a use case worth the cost of explaining which combinations are
+legal.
+
+**Accepted:** the account switcher is a profile switcher. It does not
+authenticate, hold credentials, or know anything about accounts — it selects a
+directory. Cordial never sees a password and never stores a session token itself;
+Roblox does that, inside the profile.
+
+**Accepted:** two windows on one account is not supported. It is a real thing
+people do while testing, but it requires duplicating a live session deliberately,
+and Roblox may invalidate one of them. A profile copy is the honest way to ask
+for it, and it should be an explicit action rather than something a second launch
+does silently.
+
+**Rejected: separating profiles from instances as independent concepts.** It
+doubles the vocabulary and the settings surface to serve combinations nobody has
+asked for.
+
+**Rejected: making the lock mandatory** via a mount or a daemon. The failure this
+guards against is an accident, and an advisory lock stops accidents. Anything
+stronger costs more than the problem.
+
+## What would change this
+
+If Roblox ever ships storage that tolerates concurrent access from two clients,
+the lock becomes unnecessary and same-profile multi-instance becomes free.
+Nothing suggests that is coming.

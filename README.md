@@ -280,6 +280,7 @@ Start with [`docs/NEXT.md`](docs/NEXT.md). The rest is reference.
 | [`docs/adr/ADR-007-host-resources-are-brokered.md`](docs/adr/ADR-007-host-resources-are-brokered.md) | Why a plugin never holds a socket, and Discord RPC as the worked example |
 | [`docs/adr/ADR-008-plugins-are-typescript-on-deno.md`](docs/adr/ADR-008-plugins-are-typescript-on-deno.md) | Why plugins are TypeScript rather than Lua, and what a Deno start actually costs |
 | [`docs/adr/ADR-009-capture-yes-overlay-injection-no.md`](docs/adr/ADR-009-capture-yes-overlay-injection-no.md) | Recording Cordial is supported; loading an overlay into it is not |
+| [`docs/adr/ADR-012-profiles-and-instances.md`](docs/adr/ADR-012-profiles-and-instances.md) | A profile is storage, an instance is a window, and why one profile takes a lock |
 | [`docs/adr/ADR-010-plugin-asset-overlays.md`](docs/adr/ADR-010-plugin-asset-overlays.md) | Why plugins may now overlay Roblox's assets, non-destructively |
 | [`docs/design/instances-and-launch.md`](docs/design/instances-and-launch.md) | Multi-instance, multi-account, and `roblox://` |
 | [`plugins/README.md`](plugins/README.md) | Writing a plugin, and what a plugin cannot do |
