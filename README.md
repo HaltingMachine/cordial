@@ -1,5 +1,7 @@
 # Cordial
 
+**A Linux client for Roblox — plugins and all, all yours.**
+
 > **Warning — read this before you use Cordial with an account you care about.**
 >
 > Roblox does not support third-party clients and operates automated systems that
@@ -26,10 +28,11 @@ exposes a sandboxed, capability-scoped plugin surface on top.
 
 `cordial-load` maps Roblox's 105.6 MB `libroblox.so` with the AOSP bionic linker,
 resolves every relocation, runs all of its static constructors, completes
-`JNI_OnLoad`, brings the app bridge up, hands the engine an EGL surface and
-**draws frames**: `eglSwapBuffers` 96, `glDrawElements` 665, `glCompileShader`
-612, clean exit after twelve seconds. The client narrates itself through
-Cordial's `liblog` and writes its own FastLog to `<files>/appData/logs/`.
+`JNI_OnLoad`, brings the app bridge up, hands the engine a surface and **draws
+frames**. Both renderers work: Vulkan through a `VK_KHR_android_surface` →
+`VK_KHR_xlib_surface` shim, and GLES2/EGL as the fallback when the host has no
+Vulkan. The client narrates itself through Cordial's `liblog` and writes its own
+FastLog to `<files>/appData/logs/`.
 
 The app shell comes up: the engine reaches `APP_READY (Landing)`, talks to
 Roblox over HTTPS, writes its flag cache to disk, and reports no flag failures.
@@ -94,6 +97,35 @@ Reasoning in [ADR-001](docs/adr/ADR-001-in-process-hooking.md).
 
 Also out: client-side integrity flags or watermarks (no root of trust on a machine the
 user owns), and obfuscation-as-security.
+
+## How this was built
+
+Cordial was written almost entirely by **Claude (Anthropic)** — model Opus 5 —
+working from a human's direction, review and hardware. That is not a disclaimer
+bolted on afterwards; it is why the repository looks the way it does. The commit
+messages are long because each one records what was measured and what was
+disproved, and the `docs/` tree exists because an agent that forgets everything
+between sessions has to write down how it knows what it knows.
+
+Read it with that in mind. The engineering is real and the findings were all
+verified by running the thing rather than by reasoning about it — several
+sections of `docs/NEXT.md` are explicitly lists of confident conclusions that
+turned out to be wrong. But nobody should adopt this on the assumption that a
+careful human reviewed every line.
+
+## Licence
+
+GPL-3.0-or-later. See [`LICENSE`](LICENSE).
+
+The vendored and submoduled dependencies are MIT and keep their own notices:
+[`third_party/libbadcpu`](third_party/libbadcpu) (from Sober OSS),
+`mcpelauncher-linker` and `libjnivm` (ChristopherHX / MCMrARM). MIT is
+compatible with GPL-3.0 in this direction.
+
+**Roblox itself is not included and never will be.** Cordial ships no Roblox
+code, no APK and no assets. It loads the official Android client that you supply
+from your own installation. Roblox is a trademark of Roblox Corporation, which
+has nothing to do with this project and does not endorse it.
 
 ## Build
 
