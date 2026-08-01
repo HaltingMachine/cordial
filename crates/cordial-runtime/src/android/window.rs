@@ -186,6 +186,13 @@ struct XSizeHints {
     win_gravity: c_int,
 }
 
+/// `WM_CLASS`, whose second element must match `StartupWMClass` in
+/// `packaging/org.cordial.Cordial.desktop`. A mismatch is invisible in normal
+/// use and shows up as an unnamed window in OBS and portal capture pickers, and
+/// as a second unbranded taskbar entry. See ADR-009.
+const WM_RES_NAME: &str = "cordial";
+const WM_RES_CLASS: &str = "Cordial";
+
 #[repr(C)]
 struct XClassHint {
     res_name: *mut c_char,
@@ -410,9 +417,12 @@ pub fn open(width: u32, height: u32, title: &str) -> Result<&'static HostWindow,
         (xlib.set_wm_hints)(display, w, &mut wm);
 
         // WM_CLASS, so the window is addressable by rule in a tiling or
-        // scripted setup rather than only by title.
-        let res_name = CString::new("cordial").unwrap_or_default();
-        let res_class = CString::new("Cordial").unwrap_or_default();
+        // scripted setup rather than only by title. It is also how a capture
+        // tool and the desktop entry resolve the window to the application
+        // (ADR-009), which is why the class is a constant with a test against
+        // the .desktop rather than a literal here.
+        let res_name = CString::new(WM_RES_NAME).unwrap_or_default();
+        let res_class = CString::new(WM_RES_CLASS).unwrap_or_default();
         let mut class = XClassHint {
             res_name: res_name.as_ptr() as *mut c_char,
             res_class: res_class.as_ptr() as *mut c_char,
@@ -1337,5 +1347,22 @@ mod tests {
             INPUT_EVENT_MASK & KEY_BUTTON_MOTION_MASK,
             KEY_BUTTON_MOTION_MASK
         );
+    }
+
+    #[test]
+    fn wm_class_matches_the_desktop_entry() {
+        // A capture tool, the taskbar and the portal picker all resolve a
+        // window to its application by matching WM_CLASS against
+        // StartupWMClass. When they disagree nothing errors — Cordial just
+        // shows up in OBS and GNOME as a nameless, iconless window, which is
+        // exactly the kind of break nobody notices until a user reports it.
+        // ADR-009 commits to this staying true, so it is checked rather than
+        // asserted in prose.
+        let desktop = include_str!("../../../../packaging/org.cordial.Cordial.desktop");
+        let declared = desktop
+            .lines()
+            .find_map(|l| l.strip_prefix("StartupWMClass="))
+            .expect("desktop entry declares StartupWMClass");
+        assert_eq!(declared.trim(), WM_RES_CLASS);
     }
 }

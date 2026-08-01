@@ -268,6 +268,7 @@ Start with [`docs/NEXT.md`](docs/NEXT.md). The rest is reference.
 | [`docs/adr/ADR-006-plugin-events-and-first-party.md`](docs/adr/ADR-006-plugin-events-and-first-party.md) | Plugin-declared events, and why built-in features are still plugins |
 | [`docs/adr/ADR-007-host-resources-are-brokered.md`](docs/adr/ADR-007-host-resources-are-brokered.md) | Why a plugin never holds a socket, and Discord RPC as the worked example |
 | [`docs/adr/ADR-008-plugins-are-typescript-on-deno.md`](docs/adr/ADR-008-plugins-are-typescript-on-deno.md) | Why plugins are TypeScript rather than Lua, and what a Deno start actually costs |
+| [`docs/adr/ADR-009-capture-yes-overlay-injection-no.md`](docs/adr/ADR-009-capture-yes-overlay-injection-no.md) | Recording Cordial is supported; loading an overlay into it is not |
 | [`docs/design/instances-and-launch.md`](docs/design/instances-and-launch.md) | Multi-instance, multi-account, and `roblox://` |
 | [`plugins/README.md`](plugins/README.md) | Writing a plugin, and what a plugin cannot do |
 | [`docs/design/sign-in.md`](docs/design/sign-in.md) | What signing in actually requires — the current blocker |
