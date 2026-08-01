@@ -56,6 +56,8 @@ pub fn required_capability(method: &str) -> Option<Capability> {
         "flags.setDynamic" => Capability::FlagsWriteDynamic,
         "log.write" => Capability::Log,
         "lifecycle.subscribe" => Capability::LifecycleRead,
+        "presence.set" => Capability::PresenceSet,
+        "presence.clear" => Capability::PresenceSet,
         _ => return None,
     })
 }
@@ -83,6 +85,15 @@ mod tests {
         let line = serde_json::to_string(&d).unwrap();
         assert!(line.contains(r#""status":"denied""#));
         assert_eq!(serde_json::from_str::<Response>(&line).unwrap(), d);
+    }
+
+    #[test]
+    fn presence_is_one_capability_covering_set_and_clear() {
+        // Clearing presence is not a lesser power than setting it — both say
+        // something about what the user is doing — so they share a capability
+        // rather than inviting a plugin to ask for two.
+        assert_eq!(required_capability("presence.set"), Some(Capability::PresenceSet));
+        assert_eq!(required_capability("presence.clear"), Some(Capability::PresenceSet));
     }
 
     #[test]

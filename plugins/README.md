@@ -36,6 +36,25 @@ replace Roblox's assets. Those are absent from the API rather than disabled — 
 [ADR-003](../docs/adr/ADR-003-plugin-isolation.md) and
 [ADR-004](../docs/adr/ADR-004-plugin-asset-overrides.md).
 
+## Host resources are brokered, never handed over
+
+A plugin never receives a socket, a D-Bus connection or a file descriptor, and
+installing one can never widen Cordial's Flatpak permissions. Where a capability
+needs a host resource, Cordial holds the permission and performs the effect.
+
+Discord Rich Presence is the example: `presence.set` takes a presence payload.
+Cordial owns the connection to Discord's IPC socket — your plugin never learns
+where it is, cannot read Discord's state, and cannot send anything else down it.
+
+The reasoning is in [ADR-007](../docs/adr/ADR-007-host-resources-are-brokered.md),
+and the short version is that a Flatpak permission is app-wide and permanent
+while a capability is per-plugin and revocable. If installing a plugin could add
+a permission, uninstalling it would not take the permission away.
+
+This also means a resource Cordial does not already broker needs a change to
+Cordial rather than to your manifest. Slower on purpose: the manifest is the one
+place anyone can read the whole sandbox, and it should stay true.
+
 ## Flags have two lifetimes
 
 `flags.write` contributes flags that take effect at the **next launch**.

@@ -31,6 +31,19 @@ pub enum Capability {
     Log,
     /// Observe client lifecycle events — launch, ready, shutdown.
     LifecycleRead,
+    /// Publish Discord Rich Presence.
+    ///
+    /// The effect, not the channel. Cordial owns the connection to Discord's
+    /// IPC socket and the plugin sends a presence payload; it never learns the
+    /// socket's location, cannot read Discord's state, and cannot send arbitrary
+    /// frames. See ADR-007 — a plugin can never hold a host resource, because a
+    /// Flatpak permission is app-wide and permanent while a capability is
+    /// per-plugin and revocable, and the two cannot be made to mean the same
+    /// thing.
+    ///
+    /// Off unless granted, and privacy-relevant: what someone is playing and
+    /// when is not always something they want broadcast.
+    PresenceSet,
 }
 
 impl Capability {
@@ -42,6 +55,7 @@ impl Capability {
             Capability::FlagsWriteDynamic => "flags.write.dynamic",
             Capability::Log => "log",
             Capability::LifecycleRead => "lifecycle.read",
+            Capability::PresenceSet => "presence.set",
         }
     }
 
@@ -52,6 +66,7 @@ impl Capability {
             "flags.write.dynamic" => Capability::FlagsWriteDynamic,
             "log" => Capability::Log,
             "lifecycle.read" => Capability::LifecycleRead,
+            "presence.set" => Capability::PresenceSet,
             _ => return None,
         })
     }
@@ -65,6 +80,7 @@ impl Capability {
             Capability::FlagsWriteDynamic,
             Capability::Log,
             Capability::LifecycleRead,
+            Capability::PresenceSet,
         ]
     }
 }
