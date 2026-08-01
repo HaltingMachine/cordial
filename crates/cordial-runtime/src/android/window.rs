@@ -510,6 +510,12 @@ impl HostWindow {
         self.display
     }
 
+    /// The X connection's descriptor, so the looper can wait on input rather
+    /// than poll for it.
+    pub fn connection_fd(&self) -> c_int {
+        self.conn_fd
+    }
+
     pub fn geometry(&self) -> (i32, i32, i32) {
         let g = *self.buffers.lock().unwrap_or_else(|e| e.into_inner());
         (g.width, g.height, g.format)

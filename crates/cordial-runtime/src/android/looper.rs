@@ -170,19 +170,49 @@ pub fn prepare_for_current_thread() -> bool {
 /// path driven by `CORDIAL_SKIP_AGDK`.
 pub fn pump(duration: std::time::Duration, game_activity_handle: Option<i64>) {
     let deadline = std::time::Instant::now() + duration;
+
+    // Watch the X connection alongside the engine's own descriptors, so a
+    // keypress or a click ends the wait immediately.
+    //
+    // Without this the loop drained input, then slept in `epoll_wait` for up to
+    // 50 ms regardless of what the user did — so an event arriving just after a
+    // drain waited out the whole timeout before anything saw it. That is up to
+    // 50 ms of latency added to every input, on top of the frame the engine
+    // then takes to act on it, and it is pure waiting rather than work.
+    //
+    // The 50 ms timeout stays, because it is what makes the loop notice
+    // `deadline`; it is now the idle period rather than the input period.
+    let watching = game_activity_handle.is_some()
+        && super::window::current().is_some_and(|w| watch_input_fd(w.connection_fd()));
+
     while std::time::Instant::now() < deadline {
         if let Some(handle) = game_activity_handle {
             super::window::pump_input_events(handle);
         }
-        // A bounded timeout rather than -1: the loop has to notice the deadline
-        // even when nothing is happening.
         looper_poll_once(
-            50,
+            if watching { 50 } else { 8 },
             std::ptr::null_mut(),
             std::ptr::null_mut(),
             std::ptr::null_mut(),
         );
     }
+}
+
+/// Add a descriptor to the calling thread's looper so `pollOnce` returns as soon
+/// as it is readable.
+///
+/// Returns false when there is no looper on this thread or the descriptor
+/// cannot be registered, in which case the caller should fall back to polling
+/// more often rather than assuming it will be woken.
+fn watch_input_fd(fd: c_int) -> bool {
+    let Some(l) = Looper::for_thread() else {
+        return false;
+    };
+    let mut ev = EpollEvent { events: EPOLLIN, data: fd as u64 };
+    // SAFETY: `l.epoll` is this looper's epoll descriptor and `ev` is live for
+    // the call. Re-registering an already-watched fd fails harmlessly.
+    let rc = unsafe { epoll_ctl(l.epoll, EPOLL_CTL_ADD, fd, &mut ev) };
+    rc == 0
 }
 
 // ------------------------------------------------------------------- the API
