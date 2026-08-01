@@ -46,14 +46,14 @@ It has still only existed for two days.
 | Renders — Vulkan, with GLES2 fallback | ✅ |
 | Networking / HTTPS | ✅ |
 | Mouse and keyboard reach the engine | ✅ |
-| Stable | ❌ crashes on roughly 1 launch in 3 |
+| Stable | ✅ 26 consecutive clean launches |
 | Playable frame rate | ❌ about 1 fps |
 | Signed in | ❌ not implemented |
 | Plugins | ❌ designed, not built |
 
-The two blockers are a `SIGSEGV` on an `HttpClient` thread and a render loop that
-ticks once a second. Both are characterised in [`docs/NEXT.md`](docs/NEXT.md),
-along with the explanations that were tested and ruled out.
+The remaining blocker is a render loop that ticks about once a second. It is
+characterised in [`docs/NEXT.md`](docs/NEXT.md) along with the explanations that
+were tested and ruled out.
 
 **Do not install this expecting to play Roblox.** Install it if you want to work
 on it.

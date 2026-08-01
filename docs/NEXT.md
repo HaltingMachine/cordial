@@ -149,7 +149,35 @@ drops to zero** — the static-flag problem below resolved itself once HTTPS
 worked, so it was a symptom, not a cause. Left recorded because the measurement
 technique is the reusable part.
 
-## Blocker 1: it crashes on roughly a third of runs
+## Fixed: the crash on a third of runs
+
+`realpath(path, NULL)` is a GNU extension where **glibc allocates the result and
+the caller frees it**. Roblox statically links its own allocator — `malloc`,
+`free`, `operator new` and `operator delete` are not undefined symbols in
+`libroblox.so` at all — so when it released a buffer that came from the host
+allocator, the free ran inside mimalloc, whose arena lookup is keyed on the
+pointer's own address. A host pointer was never registered there, the first
+level came back null, and the next dereference was unconditional:
+`movq (%rax,%rcx), %rdi` with `rax=0`.
+
+Only reachable once HTTPS completes a request, because that is when the cURL
+layer re-resolves the CA bundle path per connection — which is why it appeared
+the moment networking started working.
+
+Cordial's `s_realpath` no longer forwards the allocating form. It returns
+`NULL`/`ENOTSUP`, the documented POSIX failure, and the caller falls back to the
+path string it already had. There is no buffer Cordial *could* hand back safely,
+because Roblox's allocator is not reachable from outside it.
+
+Measured 5/16 before and 16/16 after by the agent that found it, then 10/10
+independently on a checkout carrying every other change.
+
+**Disproved on the way there:** a `pthread_create` override skipping per-thread
+setup (there is no such override — it is a plain passthrough), a
+`pthread_mutex_t`/`pthread_attr_t` ABI mismatch, and the same cross-allocator
+theory applied to `malloc`/`free` directly.
+
+## Previously: it crashed on roughly a third of runs
 
 Deterministic signature, same every time:
 

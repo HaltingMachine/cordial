@@ -27,6 +27,7 @@
 #include <cstring>
 #include <cstdlib>
 
+#include <cerrno>
 #include <dirent.h>
 #include <sys/syscall.h>
 #include <fcntl.h>
@@ -126,6 +127,45 @@ DIR* s_opendir(const char* path) {
 
 char* s_realpath(const char* path, char* resolved) {
     REMAP(path);
+    if (!resolved) {
+        // glibc's `realpath(path, NULL)` is a GNU extension: it `malloc`s the
+        // result buffer itself and hands ownership to the caller, who is
+        // expected to `free` it. That allocation comes from the *host's*
+        // allocator — Roblox statically links its own (mimalloc, going by
+        // `DFLog::Mimalloc`), and every one of its `malloc`/`free`/`new`/
+        // `delete` symbols is resolved internally, never through Cordial's
+        // symbol table. When the engine later releases a buffer this call
+        // handed it, that release runs entirely inside Roblox's own
+        // allocator, which indexes a table keyed by the pointer's own
+        // address to find the arena that owns it. A host-`malloc`'d pointer
+        // was never registered in that table, so the lookup's first level
+        // comes back null and the very next dereference — unconditional,
+        // with no null check — faults.
+        //
+        // This is exactly what feeds Roblox's cURL-based HTTP stack the
+        // CA-bundle path (`./exe/cacert.pem`, resolved once per connection
+        // going by `CORDIAL_TRACE_PATHS=1`): confirmed live under lldb with a
+        // breakpoint on this function — `resolved` is null, the host
+        // `realpath` call mallocs, and the pointer it returns is the exact
+        // address that later faults on the `HttpClient` thread with
+        // `rax=0x0, rcx=0xe000` — a segment-map miss for foreign memory.
+        //
+        // There is no buffer Cordial can hand back here that is safe for the
+        // engine to free through its own allocator, because that allocator's
+        // bookkeeping is not reachable from here (its `malloc`/`free` are not
+        // exported). The only safe move is to never produce the host
+        // allocation in the first place. Resolving into a stack buffer only
+        // for the trace log and reporting failure (as `realpath` is
+        // documented to do when resolution cannot be completed) is a real,
+        // if slightly degraded, POSIX outcome: the caller falls back to the
+        // path it already had, which is what every caller of this GNU form is
+        // required to handle.
+        char tmp[PATH_MAX];
+        char* r = ::realpath(real, tmp);
+        trace("realpath", real, r ? r : "null (unsupported: no caller buffer)");
+        errno = r ? ENOTSUP : errno;
+        return nullptr;
+    }
     char* r = ::realpath(real, resolved);
     trace("realpath", real, r ? r : "null");
     return r;
