@@ -10,6 +10,23 @@ place of Android's, and a framework layer that answers the client's calls. No
 emulator, no container, no virtual machine. It talks to your GPU through Vulkan
 or GLES2 the way any native application does.
 
+**It is also, as far as we know, the first user-extensible Roblox client.** Not
+extensible in the sense of replacing files or setting flags — other launchers do
+both — but in the sense that *you can write code that runs as part of the client
+and adds functionality to it*. Plugins are ordinary programs in their own
+processes, they get named capabilities rather than access, and Cordial's own
+default features are built as plugins so the API has to be good enough for them.
+
+To be exact about the claim, since "first" invites correction: browser extensions
+extend Roblox's **website**; launcher mods replace **assets**; FastFlag managers
+change **settings Roblox already reads**. None of those load user-written code
+into the client. If a client that does already exists, we would genuinely like to
+know.
+
+What this is **not** is a way to modify Roblox itself. There is no script
+execution, no hooking, and no memory access — absent from the API rather than
+disabled. Plugins extend *Cordial*.
+
 ## Get started
 
 - [Read the documentation 📖](docs)
@@ -248,6 +265,8 @@ Start with [`docs/NEXT.md`](docs/NEXT.md). The rest is reference.
 | [`docs/adr/ADR-001-in-process-hooking.md`](docs/adr/ADR-001-in-process-hooking.md) | Why Cordial has no in-process hooking, ever |
 | [`docs/adr/ADR-004-plugin-asset-overrides.md`](docs/adr/ADR-004-plugin-asset-overrides.md) | Why plugins cannot replace Roblox's textures or sounds |
 | [`docs/adr/ADR-005-flag-service.md`](docs/adr/ADR-005-flag-service.md) | Why the flag service has two surfaces |
+| [`docs/adr/ADR-006-plugin-events-and-first-party.md`](docs/adr/ADR-006-plugin-events-and-first-party.md) | Plugin-declared events, and why built-in features are still plugins |
+| [`docs/design/instances-and-launch.md`](docs/design/instances-and-launch.md) | Multi-instance, multi-account, and `roblox://` |
 | [`plugins/README.md`](plugins/README.md) | Writing a plugin, and what a plugin cannot do |
 | [`docs/design/sign-in.md`](docs/design/sign-in.md) | What signing in actually requires — the current blocker |
 | [`docs/design/path-to-a-frame.md`](docs/design/path-to-a-frame.md) | GameActivity, assets, surface |

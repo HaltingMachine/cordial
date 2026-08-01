@@ -160,6 +160,30 @@ honest caveat: a lot of simultaneous sessions from one machine can look automate
 to anti-abuse systems whether or not it is, and that risk lands on the user's
 accounts, not on Cordial. Worth saying once in the UI, without ceremony.
 
+## 7a. Update from the sign-in investigation
+
+Two findings since this was written, both bearing on §2.
+
+**The `roblox://` URIs declared by the APK are game-join-shaped, not
+bare-auth-shaped.** That does not break the design — a join ticket still carries
+the account that pressed Play — but it weakens the idea that a URI alone can
+bring up a *logged-in client with no game to join*. A launcher that wants to open
+an instance at the home screen as a particular account may not have a URI for it.
+See [`sign-in.md`](sign-in.md).
+
+**Plain login is Lua-rendered and reachable in-client**, verified on screen. So
+an instance can sign itself in without a browser at all, which is a second route
+to per-instance accounts that this document did not consider: the isolation
+argument then rests entirely on separate data directories, and not at all on
+ticket semantics. That is a *stronger* position than §2's, because it depends on
+something already measured rather than something still unverified.
+
+**Consequence for the account picker.** §7 refuses to be an account manager, and
+that still holds. A picker over *instances* — which the user names, and whose
+contents Cordial never inspects — gives the Chrome-profile experience without
+Cordial learning which account is which. The picker chooses a data directory, not
+an identity.
+
 ## 8. Open questions
 
 - Verify the `roblox://` URI format and whether tickets are genuinely single-use
