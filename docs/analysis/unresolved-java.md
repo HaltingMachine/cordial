@@ -3,7 +3,7 @@
 **Method:** one real run, captured in full, of
 
 ```
-cd ~/Projects/cordial
+cd <repo>
 LIBDIR=<scratchpad>/apk/native/lib/x86_64
 APK=<scratchpad>/apk/base.apk
 CORDIAL_STUB_QUIET=1 CORDIAL_LOG_LEVEL=v timeout 90 ./target/release/cordial-load \

@@ -235,6 +235,27 @@ pub fn build(host_libc: bool) -> SymbolTable {
         table.stats.entry(name).or_default();
     }
 
+    // Vulkan is `dlopen`ed, not linked — it contributes no undefined symbols to
+    // `libroblox.so` and so never reaches the per-symbol classification above.
+    // Register it as its own virtual library, exporting only
+    // `vkGetInstanceProcAddr`; everything else is fetched dynamically through
+    // it. See `android::vulkan`. When the host has no Vulkan at all, both
+    // sonames are left unregistered and Roblox's `dlopen` fails exactly as it
+    // does today — a clean fall-through to GLES.
+    match crate::android::vulkan::get_instance_proc_addr_symbol() {
+        Some(addr) => {
+            for name in crate::android::vulkan::LIBRARY_NAMES {
+                table.libraries.entry(name).or_default().push(Entry {
+                    symbol: "vkGetInstanceProcAddr",
+                    address: addr,
+                    source: Source::Cordial,
+                });
+                table.stats.entry(name).or_default().record(Source::Cordial);
+            }
+        }
+        None => table.missing_host_libs.push("libvulkan.so.1"),
+    }
+
     table
 }
 
