@@ -152,6 +152,18 @@ const VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR: i32 = 1000006000;
 /// Fixed at 6 since it was introduced; there is nothing to detect it against.
 const ANDROID_SURFACE_SPEC_VERSION: u32 = 6;
 
+/// The real surface extension `VK_KHR_android_surface` is substituted for,
+/// according to whichever display backend [`crate::android::backend`]
+/// selected. `backend()` is chosen once, from the environment, before any
+/// window opens (see its own doc comment) — Vulkan bring-up always happens
+/// after that choice is fixed, so there is no point in this call racing it.
+fn real_surface_extension_name() -> &'static CStr {
+    match crate::android::backend() {
+        crate::android::Backend::Wayland => c"VK_KHR_wayland_surface",
+        crate::android::Backend::X11 => c"VK_KHR_xlib_surface",
+    }
+}
+
 const VK_SUCCESS: i32 = 0;
 const VK_INCOMPLETE: i32 = 5;
 const VK_ERROR_INITIALIZATION_FAILED: i32 = -3;
@@ -386,10 +398,12 @@ extern "C" fn vk_create_instance(
     // The host must never be asked to enable an extension it does not
     // implement. `VK_KHR_android_surface` only exists in what Roblox sees —
     // `vk_enumerate_instance_extension_properties` invented it — so it is
-    // rewritten back to the real `VK_KHR_xlib_surface` before this ever reaches
-    // Mesa. Everything else passes through untouched, including extensions this
-    // shim knows nothing about; the host rejecting one it truly lacks is the
-    // correct failure, not something to mask here.
+    // rewritten back to the real extension for whichever backend is live
+    // before this ever reaches Mesa. Everything else passes through
+    // untouched, including extensions this shim knows nothing about; the
+    // host rejecting one it truly lacks is the correct failure, not
+    // something to mask here.
+    let real_name = real_surface_extension_name();
     let mut swapped = false;
     let rewritten: Vec<*const c_char> = names
         .iter()
@@ -397,7 +411,7 @@ extern "C" fn vk_create_instance(
             if !p.is_null() && unsafe { CStr::from_ptr(p) }.to_bytes() == b"VK_KHR_android_surface"
             {
                 swapped = true;
-                c"VK_KHR_xlib_surface".as_ptr()
+                real_name.as_ptr()
             } else {
                 p
             }
@@ -405,7 +419,8 @@ extern "C" fn vk_create_instance(
         .collect();
 
     crate::android::trace(format_args!(
-        "vkCreateInstance: {count} extension(s) requested, VK_KHR_android_surface -> VK_KHR_xlib_surface: {swapped}"
+        "vkCreateInstance: {count} extension(s) requested, VK_KHR_android_surface -> {}: {swapped}",
+        real_name.to_string_lossy()
     ));
 
     let patched = VkInstanceCreateInfo {
@@ -460,23 +475,27 @@ extern "C" fn vk_enumerate_instance_extension_properties(
         combined.truncate(host_count as usize);
     }
 
-    // Mesa reports its own name for this capability, `VK_KHR_xlib_surface`;
-    // Roblox will only ever ask a Vulkan loader for `VK_KHR_android_surface`,
-    // because that is the only surface extension Android ever had. Advertise it
-    // whenever the host has the capability it stands in for — layer-provided
-    // extension lists (`layer_name` non-null) are left as the layer reported
-    // them, since this is an ICD-level substitution, not a layer's.
-    let has_xlib = combined.iter().any(|p| p.name_matches(b"VK_KHR_xlib_surface"));
+    // Mesa reports its own name for this capability — `VK_KHR_xlib_surface`
+    // on X11, `VK_KHR_wayland_surface` on Wayland, per whichever backend
+    // `real_surface_extension_name` says is live. Roblox will only ever ask a
+    // Vulkan loader for `VK_KHR_android_surface`, because that is the only
+    // surface extension Android ever had. Advertise it whenever the host has
+    // the capability it stands in for — layer-provided extension lists
+    // (`layer_name` non-null) are left as the layer reported them, since this
+    // is an ICD-level substitution, not a layer's.
+    let real_name = real_surface_extension_name();
+    let has_real = combined.iter().any(|p| p.name_matches(real_name.to_bytes()));
     let has_android = combined
         .iter()
         .any(|p| p.name_matches(b"VK_KHR_android_surface"));
-    if layer_name.is_null() && has_xlib && !has_android {
+    if layer_name.is_null() && has_real && !has_android {
         combined.push(VkExtensionProperties::named(
             "VK_KHR_android_surface",
             ANDROID_SURFACE_SPEC_VERSION,
         ));
         crate::android::trace(format_args!(
-            "vkEnumerateInstanceExtensionProperties: advertising VK_KHR_android_surface"
+            "vkEnumerateInstanceExtensionProperties: advertising VK_KHR_android_surface (backing {})",
+            real_name.to_string_lossy()
         ));
     }
 
@@ -505,12 +524,15 @@ extern "C" fn vk_enumerate_instance_extension_properties(
     }
 }
 
-/// `vkCreateAndroidSurfaceKHR`, answered with `vkCreateXlibSurfaceKHR`.
+/// `vkCreateAndroidSurfaceKHR`, answered with `vkCreateXlibSurfaceKHR` on X11
+/// or `vkCreateWaylandSurfaceKHR` on Wayland, according to
+/// [`crate::android::backend`].
 ///
-/// The `ANativeWindow*` inside `pCreateInfo` is Cordial's own — there is exactly
-/// one window (see `android::window`) — so it is not read; the X11 handles come
-/// from `HostWindow` directly, the same pair `egl_create_window_surface` already
-/// substitutes for EGL.
+/// The `ANativeWindow*` inside `pCreateInfo` is Cordial's own — there is
+/// exactly one window — so it is not read; the real handles come from
+/// whichever backend's window singleton is live, the same pair
+/// `egl_create_window_surface` already substitutes for EGL in each backend's
+/// own module (`window.rs`/`wayland.rs`).
 extern "C" fn vk_create_android_surface_khr(
     instance: *mut c_void,
     create_info: *const VkAndroidSurfaceCreateInfoKHR,
@@ -521,35 +543,76 @@ extern "C" fn vk_create_android_surface_khr(
     let Some(h) = host() else {
         return VK_ERROR_INITIALIZATION_FAILED;
     };
-    let Some(win) = crate::android::window::current() else {
-        return VK_ERROR_INITIALIZATION_FAILED;
-    };
 
-    // SAFETY: `instance` is a real host `VkInstance` by the time the engine can
-    // reach this call, and the name is Mesa's own documented export.
-    let f = unsafe { (h.get_instance_proc_addr)(instance, c"vkCreateXlibSurfaceKHR".as_ptr()) };
-    if f.is_null() {
-        return VK_ERROR_EXTENSION_NOT_PRESENT;
+    match crate::android::backend() {
+        crate::android::Backend::Wayland => {
+            let Some(win) = crate::android::wayland::current() else {
+                return VK_ERROR_INITIALIZATION_FAILED;
+            };
+            // SAFETY: `instance` is a real host `VkInstance` by the time the
+            // engine can reach this call, and the name is Mesa's own
+            // documented export.
+            let f = unsafe {
+                (h.get_instance_proc_addr)(instance, c"vkCreateWaylandSurfaceKHR".as_ptr())
+            };
+            if f.is_null() {
+                return VK_ERROR_EXTENSION_NOT_PRESENT;
+            }
+            type Fn_ = unsafe extern "C" fn(
+                *mut c_void,
+                *const VkWaylandSurfaceCreateInfoKHR,
+                *const c_void,
+                *mut *mut c_void,
+            ) -> i32;
+            // SAFETY: resolved from the host for exactly this name.
+            let f: Fn_ = unsafe { std::mem::transmute(f) };
+            let wayland_info = VkWaylandSurfaceCreateInfoKHR {
+                s_type: VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR,
+                p_next: std::ptr::null(),
+                flags: 0,
+                display: win.wl_display(),
+                surface: win.wl_surface(),
+            };
+            crate::android::trace(format_args!(
+                "vkCreateAndroidSurfaceKHR -> vkCreateWaylandSurfaceKHR"
+            ));
+            // SAFETY: `wayland_info` matches Mesa's
+            // `VkWaylandSurfaceCreateInfoKHR` layout exactly (see the module
+            // doc); `instance`, `allocator` and `surface_out` are the
+            // caller's own arguments, forwarded unchanged.
+            unsafe { f(instance, &wayland_info, allocator, surface_out) }
+        }
+        crate::android::Backend::X11 => {
+            let Some(win) = crate::android::window::current() else {
+                return VK_ERROR_INITIALIZATION_FAILED;
+            };
+            // SAFETY: as above.
+            let f =
+                unsafe { (h.get_instance_proc_addr)(instance, c"vkCreateXlibSurfaceKHR".as_ptr()) };
+            if f.is_null() {
+                return VK_ERROR_EXTENSION_NOT_PRESENT;
+            }
+            type Fn_ = unsafe extern "C" fn(
+                *mut c_void,
+                *const VkXlibSurfaceCreateInfoKHR,
+                *const c_void,
+                *mut *mut c_void,
+            ) -> i32;
+            // SAFETY: resolved from the host for exactly this name.
+            let f: Fn_ = unsafe { std::mem::transmute(f) };
+            let xlib_info = VkXlibSurfaceCreateInfoKHR {
+                s_type: VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR,
+                p_next: std::ptr::null(),
+                flags: 0,
+                dpy: win.egl_native_display(),
+                window: win.egl_native_window(),
+            };
+            crate::android::trace(format_args!("vkCreateAndroidSurfaceKHR -> vkCreateXlibSurfaceKHR"));
+            // SAFETY: `xlib_info` matches Mesa's `VkXlibSurfaceCreateInfoKHR`
+            // layout exactly (see the module doc); `instance`, `allocator`
+            // and `surface_out` are the caller's own arguments, forwarded
+            // unchanged.
+            unsafe { f(instance, &xlib_info, allocator, surface_out) }
+        }
     }
-    type Fn_ = unsafe extern "C" fn(
-        *mut c_void,
-        *const VkXlibSurfaceCreateInfoKHR,
-        *const c_void,
-        *mut *mut c_void,
-    ) -> i32;
-    // SAFETY: resolved from the host for exactly this name.
-    let f: Fn_ = unsafe { std::mem::transmute(f) };
-
-    let xlib_info = VkXlibSurfaceCreateInfoKHR {
-        s_type: VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR,
-        p_next: std::ptr::null(),
-        flags: 0,
-        dpy: win.egl_native_display(),
-        window: win.egl_native_window(),
-    };
-    crate::android::trace(format_args!("vkCreateAndroidSurfaceKHR -> vkCreateXlibSurfaceKHR"));
-    // SAFETY: `xlib_info` matches Mesa's `VkXlibSurfaceCreateInfoKHR` layout
-    // exactly (see the module doc); `instance`, `allocator` and `surface_out`
-    // are the caller's own arguments, forwarded unchanged.
-    unsafe { f(instance, &xlib_info, allocator, surface_out) }
 }

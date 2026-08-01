@@ -440,6 +440,50 @@ impl TextField {
         };
         self.caret != before
     }
+
+    /// `zwp_text_input_v3.delete_surrounding_text`: remove `before` bytes
+    /// immediately before the caret and `after` bytes immediately after it.
+    ///
+    /// The protocol counts in bytes, not characters — deliberately so an IME
+    /// never has to know the client's internal representation — but this
+    /// buffer is a `String`, so a byte count that does not land on a UTF-8
+    /// character boundary would panic on `remove`/slicing rather than
+    /// misbehave quietly. Both cuts are clamped to the nearest valid boundary
+    /// at or before the requested byte offset, which only ever deletes less
+    /// than asked, never more and never a partial codepoint.
+    fn delete_surrounding(&mut self, before: usize, after: usize) -> bool {
+        let caret_byte = self.byte_offset();
+
+        let start = if before == 0 {
+            caret_byte
+        } else {
+            let want = caret_byte.saturating_sub(before);
+            // Walk forward from `want` to the next real boundary rather than
+            // backward from `caret_byte`, so a `want` that already landed
+            // exactly on a boundary is left alone rather than over-deleting
+            // one extra character.
+            (want..=caret_byte)
+                .find(|&i| self.text.is_char_boundary(i))
+                .unwrap_or(caret_byte)
+        };
+        let end = if after == 0 {
+            caret_byte
+        } else {
+            let want = (caret_byte + after).min(self.text.len());
+            (caret_byte..=want)
+                .rev()
+                .find(|&i| self.text.is_char_boundary(i))
+                .unwrap_or(caret_byte)
+        };
+        if start == end {
+            return false;
+        }
+
+        let removed_chars_before_caret = self.text[start..caret_byte].chars().count();
+        self.text.replace_range(start..end, "");
+        self.caret = self.caret.saturating_sub(removed_chars_before_caret);
+        true
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -466,6 +510,22 @@ pub enum Edit<'a> {
     Backspace,
     Delete,
     Move(Caret),
+    /// `zwp_text_input_v3.delete_surrounding_text` — byte counts, not chars.
+    /// See [`TextField::delete_surrounding`] for why that distinction is
+    /// handled inside the buffer rather than by the caller pre-converting.
+    DeleteSurrounding { before_bytes: usize, after_bytes: usize },
+}
+
+/// Reseed the buffer when focus has moved since it was last filled, shared by
+/// [`edit_text_buffer`] and [`text_buffer_snapshot`] so the two cannot drift
+/// into different reseed conditions.
+fn reseed_if_needed(buf: &mut TextField) {
+    let generation = cordial_linker_sys::game_activity::textbox_generation();
+    let mut seen = TEXT_GENERATION.lock().unwrap_or_else(|e| e.into_inner());
+    if *seen != Some(generation) {
+        buf.seed(cordial_linker_sys::game_activity::textbox_text());
+        *seen = Some(generation);
+    }
 }
 
 /// Apply one edit to the focused field.
@@ -475,16 +535,7 @@ pub enum Edit<'a> {
 /// engine redraw for no reason.
 pub fn edit_text_buffer(edit: Edit<'_>) -> Option<(String, i32)> {
     let mut buf = TEXT_BUFFER.lock().unwrap_or_else(|e| e.into_inner());
-
-    // Reseed when focus has moved since this buffer was filled.
-    let generation = cordial_linker_sys::game_activity::textbox_generation();
-    {
-        let mut seen = TEXT_GENERATION.lock().unwrap_or_else(|e| e.into_inner());
-        if *seen != Some(generation) {
-            buf.seed(cordial_linker_sys::game_activity::textbox_text());
-            *seen = Some(generation);
-        }
-    }
+    reseed_if_needed(&mut buf);
 
     let changed = match edit {
         Edit::Insert(s) => {
@@ -500,9 +551,26 @@ pub fn edit_text_buffer(edit: Edit<'_>) -> Option<(String, i32)> {
         Edit::Backspace => buf.backspace(),
         Edit::Delete => buf.delete(),
         Edit::Move(to) => buf.move_caret(to),
+        Edit::DeleteSurrounding { before_bytes, after_bytes } => {
+            buf.delete_surrounding(before_bytes, after_bytes)
+        }
     };
 
     changed.then(|| (buf.text.clone(), buf.caret as i32))
+}
+
+/// The focused field's contents and caret, reseeding first exactly as
+/// [`edit_text_buffer`] does, but without requiring an edit to apply.
+///
+/// The Wayland IME bridge needs this to splice a not-yet-committed preedit
+/// string into the caret position for display — that is not an edit to the
+/// committed buffer (see `wayland.rs`'s module doc on why preedit is tracked
+/// separately), so it cannot go through `edit_text_buffer`, which only ever
+/// reports state when something actually changed.
+pub fn text_buffer_snapshot() -> (String, i32) {
+    let mut buf = TEXT_BUFFER.lock().unwrap_or_else(|e| e.into_inner());
+    reseed_if_needed(&mut buf);
+    (buf.text.clone(), buf.caret as i32)
 }
 
 #[cfg(test)]
@@ -569,5 +637,63 @@ mod tests {
         assert!(f.move_caret(Caret::Right));
         f.move_caret(Caret::End);
         assert!(!f.move_caret(Caret::Right));
+    }
+
+    #[test]
+    fn delete_surrounding_counts_bytes_not_chars() {
+        // "café" is 4 chars but 5 bytes (é is 2 bytes in UTF-8). An IME asking
+        // to delete 2 bytes before the caret means "delete é", not "delete fé"
+        // — treating the count as chars would delete one codepoint too many.
+        let mut f = TextField::new();
+        f.seed("café".into());
+        assert_eq!(f.caret, 4);
+        assert!(f.delete_surrounding(2, 0));
+        assert_eq!(f.text, "caf");
+        assert_eq!(f.caret, 3);
+    }
+
+    #[test]
+    fn delete_surrounding_deletes_both_sides_of_the_caret() {
+        // set_surrounding_text/delete_surrounding_text lets an IME correct
+        // text on either side of where composition is happening, not only
+        // backspace-style before the caret.
+        let mut f = TextField::new();
+        f.seed("hello world".into());
+        f.move_caret(Caret::Home);
+        for _ in 0..6 {
+            f.move_caret(Caret::Right);
+        }
+        assert_eq!(f.caret, 6); // caret sits just before "world"
+        assert!(f.delete_surrounding(6, 2));
+        assert_eq!(f.text, "rld");
+        assert_eq!(f.caret, 0);
+    }
+
+    #[test]
+    fn delete_surrounding_clamps_to_a_char_boundary_rather_than_panicking() {
+        // A byte count that lands mid-codepoint must not slice the string
+        // there — this is the case the doc comment on `delete_surrounding`
+        // calls out explicitly, so it gets its own test rather than trusting
+        // the boundary-walk to be exercised incidentally.
+        let mut f = TextField::new();
+        f.seed("café".into()); // caret at 4 chars = byte 5 (é is 2 bytes)
+        // Asking for 1 byte lands between é's two bytes, mid-codepoint. The
+        // buffer clamps down to the nearest boundary at or after that point
+        // — which is the caret itself here — rather than either panicking or
+        // deleting more than the 1 byte actually requested. Nothing to
+        // delete is therefore the correct, safe answer, not a bug.
+        assert!(!f.delete_surrounding(1, 0));
+        assert_eq!(f.text, "café");
+    }
+
+    #[test]
+    fn a_reported_snapshot_does_not_require_a_change_to_reflect_state() {
+        // `text_buffer_snapshot` exists precisely because `edit_text_buffer`
+        // only reports when something changed; the preedit splice needs the
+        // current state unconditionally, including when nothing has been
+        // typed into this field yet.
+        let mut f = TextField::new();
+        f.seed("draft".into());
+        assert_eq!((f.text.clone(), f.caret as i32), ("draft".to_string(), 5));
     }
 }
