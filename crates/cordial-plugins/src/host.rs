@@ -11,7 +11,12 @@
 //! channel is a named, brokered one.
 
 use crate::broker::Broker;
-use crate::protocol::{required_capability, Request, Response};
+use crate::capability::Capability;
+use crate::events::EventRegistry;
+use crate::presence::{DiscordPresence, PresencePayload};
+use crate::protocol::{required_capability, Push, Request, Response};
+use crate::{notify, urlopen};
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -62,6 +67,17 @@ impl Plugin {
         self.stdin.flush()
     }
 
+    /// Deliver a message the plugin did not ask for in this call — a
+    /// lifecycle event, or another plugin's published event arriving for a
+    /// subscriber. See [`Push`] for how a plugin tells this apart from a
+    /// reply to one of its own requests.
+    pub fn push(&mut self, push: &Push) -> std::io::Result<()> {
+        let line = serde_json::to_string(push).expect("Push always serialises");
+        self.stdin.write_all(line.as_bytes())?;
+        self.stdin.write_all(b"\n")?;
+        self.stdin.flush()
+    }
+
     pub fn kill(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
@@ -83,6 +99,164 @@ pub fn authorise(broker: &mut Broker, plugin: &str, req: &Request) -> Result<(),
             Err(Response::Denied { id: req.id, capability: cap.name().to_string() })
         }
         Some(_) => Ok(()),
+    }
+}
+
+/// Everything one running Cordial process needs to serve the capabilities
+/// this crate actually performs an effect for: the grants, the event
+/// registry, and the one live Discord connection. A `Session` is where
+/// ADR-007 stops being a description and starts being true — it is the one
+/// place that has both a plugin's authorised request and the host resource
+/// the request wants to act on, and nothing upstream of it ever holds the
+/// two together.
+///
+/// `Session` only ever answers the methods it has a real broker for —
+/// `presence.*`, `notify.send`, `url.open`, `events.*`, and the
+/// `lifecycle.subscribe` acknowledgement paired with `push_lifecycle` below.
+/// Everything else (`flags.*`, `log.write`, `assets.override`) is still only
+/// `authorise`d here; a caller that wants those served has to do it itself,
+/// the way `tests/flag_inspector.rs` already does. Falling through to an
+/// explicit "no broker wired" error rather than silently returning `Ok`
+/// keeps this file honest about what it does and does not implement — see
+/// AGENTS.md on a stub never claiming success it did not have.
+pub struct Session {
+    pub broker: Broker,
+    pub events: EventRegistry,
+    presence: DiscordPresence,
+    plugins: BTreeMap<String, Plugin>,
+}
+
+impl Session {
+    pub fn new() -> Self {
+        Session {
+            broker: Broker::new(),
+            events: EventRegistry::new(),
+            presence: DiscordPresence::new(),
+            plugins: BTreeMap::new(),
+        }
+    }
+
+    /// Adopt a spawned plugin so it can receive pushes — lifecycle events and
+    /// other plugins' published events — in addition to answering its own
+    /// requests through [`Session::handle`].
+    pub fn add_plugin(&mut self, plugin: Plugin) {
+        self.plugins.insert(plugin.id.clone(), plugin);
+    }
+
+    pub fn remove_plugin(&mut self, id: &str) -> Option<Plugin> {
+        self.plugins.remove(id)
+    }
+
+    /// Access an adopted plugin directly — for reading its next request and
+    /// replying, the way a caller drives any other `Plugin`. Needed because
+    /// once a `Plugin` is adopted its stdio is also the channel `handle`
+    /// pushes events down, so a caller cannot keep its own separate handle to
+    /// the same process.
+    pub fn plugin_mut(&mut self, id: &str) -> Option<&mut Plugin> {
+        self.plugins.get_mut(id)
+    }
+
+    /// Deliver a client lifecycle event to every plugin holding
+    /// `lifecycle.read`. There is no request to deny for a plugin that lacks
+    /// the capability — only a push nobody asked to receive — so it is
+    /// simply not sent rather than answered with a denial nobody is waiting
+    /// for.
+    pub fn push_lifecycle(&mut self, event: &str) {
+        let recipients: Vec<String> = self
+            .plugins
+            .keys()
+            .filter(|id| self.broker.granted(id).contains(&Capability::LifecycleRead))
+            .cloned()
+            .collect();
+        for id in recipients {
+            if let Some(plugin) = self.plugins.get_mut(&id) {
+                let _ = plugin.push(&Push { event: event.to_string(), payload: serde_json::Value::Null });
+            }
+        }
+    }
+
+    /// Authorise, then perform, one call from `plugin_id`.
+    pub fn handle(&mut self, plugin_id: &str, req: &Request) -> Response {
+        if let Err(refusal) = authorise(&mut self.broker, plugin_id, req) {
+            return refusal;
+        }
+        match req.method.as_str() {
+            "presence.set" => match PresencePayload::parse(&req.params) {
+                Ok(payload) => respond(req.id, self.presence.set(&payload)),
+                Err(message) => Response::Error { id: req.id, message },
+            },
+            "presence.clear" => respond(req.id, self.presence.clear()),
+            // Delivery for lifecycle events is capability-gated, not a
+            // subscription list — see push_lifecycle — so this call has
+            // nothing to record. It exists so a plugin gets a definite
+            // acknowledgement that it holds lifecycle.read, the same way
+            // events.subscribe acknowledges a subscription, rather than the
+            // plugin having to infer that from the first push ever arriving.
+            "lifecycle.subscribe" => Response::Ok { id: req.id, result: serde_json::Value::Null },
+            "notify.send" => {
+                let summary = req.params.get("summary").and_then(|v| v.as_str());
+                let body = req.params.get("body").and_then(|v| v.as_str()).unwrap_or("");
+                match summary {
+                    Some(summary) => respond(req.id, notify::send(summary, body)),
+                    None => Response::Error { id: req.id, message: "notify.send needs a summary".into() },
+                }
+            }
+            "url.open" => match req.params.get("url").and_then(|v| v.as_str()) {
+                Some(url) => respond(req.id, urlopen::open(url)),
+                None => Response::Error { id: req.id, message: "url.open needs a url".into() },
+            },
+            "events.declare" => match req.params.get("name").and_then(|v| v.as_str()) {
+                Some(name) => match self.events.declare(plugin_id, name) {
+                    Ok(event_type) => Response::Ok { id: req.id, result: serde_json::json!({"type": event_type}) },
+                    Err(message) => Response::Error { id: req.id, message },
+                },
+                None => Response::Error { id: req.id, message: "events.declare needs a name".into() },
+            },
+            "events.publish" => self.publish(plugin_id, req),
+            "events.subscribe" => match req.params.get("type").and_then(|v| v.as_str()) {
+                Some(event_type) => match self.events.subscribe(plugin_id, event_type) {
+                    Ok(()) => Response::Ok { id: req.id, result: serde_json::Value::Null },
+                    Err(message) => Response::Error { id: req.id, message },
+                },
+                None => Response::Error { id: req.id, message: "events.subscribe needs a type".into() },
+            },
+            other => Response::Error { id: req.id, message: format!("no broker wired for {other:?}") },
+        }
+    }
+
+    fn publish(&mut self, plugin_id: &str, req: &Request) -> Response {
+        let Some(event_type) = req.params.get("type").and_then(|v| v.as_str()) else {
+            return Response::Error { id: req.id, message: "events.publish needs a type".into() };
+        };
+        if !self.events.may_publish(plugin_id, event_type) {
+            return Response::Error {
+                id: req.id,
+                message: format!(
+                    "{plugin_id:?} may not publish on {event_type:?}; it must declare that type before publishing on it"
+                ),
+            };
+        }
+        let payload = req.params.get("payload").cloned().unwrap_or(serde_json::Value::Null);
+        for subscriber in self.events.subscribers(event_type) {
+            let subscriber = subscriber.to_string();
+            if let Some(plugin) = self.plugins.get_mut(&subscriber) {
+                let _ = plugin.push(&Push { event: event_type.to_string(), payload: payload.clone() });
+            }
+        }
+        Response::Ok { id: req.id, result: serde_json::Value::Null }
+    }
+}
+
+impl Default for Session {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn respond(id: u64, result: Result<(), String>) -> Response {
+    match result {
+        Ok(()) => Response::Ok { id, result: serde_json::Value::Null },
+        Err(message) => Response::Error { id, message },
     }
 }
 
@@ -121,6 +295,96 @@ mod tests {
         match authorise(&mut b, "p", &req("flags.nonsense")) {
             Err(Response::Error { message, .. }) => assert!(message.contains("unknown method")),
             other => panic!("expected an error, got {other:?}"),
+        }
+    }
+
+    fn call(method: &str, params: serde_json::Value) -> Request {
+        Request { id: 1, method: method.into(), params }
+    }
+
+    #[test]
+    fn session_denies_an_ungranted_brokered_capability_rather_than_erroring() {
+        // The distinction protocol.rs draws between `denied` and `error` has
+        // to survive contact with a real effect-performing broker, not just
+        // the plain `authorise` check — a plugin without notify.send must see
+        // a denial, not a message about the D-Bus call that never happened.
+        let mut session = Session::new();
+        let res = session.handle("p", &call("notify.send", serde_json::json!({"summary": "hi"})));
+        match res {
+            Response::Denied { capability, .. } => assert_eq!(capability, "notify.send"),
+            other => panic!("expected a denial, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn session_refuses_a_non_http_url_scheme_once_granted() {
+        // ADR-007's doc comment on UrlOpen is explicit that this must not
+        // become file:// traversal — checked here past the capability gate,
+        // where a granted-but-malicious call would otherwise reach the portal.
+        let mut session = Session::new();
+        session.broker.grant("p", [Capability::UrlOpen]);
+        let res = session.handle("p", &call("url.open", serde_json::json!({"url": "file:///etc/passwd"})));
+        match res {
+            Response::Error { message, .. } => assert!(message.contains("refused"), "{message}"),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn session_refuses_a_publish_on_a_type_the_plugin_never_declared() {
+        // events.publish alone is not enough — ADR-006 splits declare from
+        // publish precisely so holding this capability cannot be used to
+        // impersonate a type nobody gave this plugin.
+        let mut session = Session::new();
+        session.broker.grant("evil", [Capability::EventsPublish]);
+        let res = session.handle(
+            "evil",
+            &call("events.publish", serde_json::json!({"type": "flag-manager/profile-changed", "payload": {}})),
+        );
+        match res {
+            Response::Error { message, .. } => assert!(message.contains("may not publish"), "{message}"),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn session_lets_a_plugin_declare_then_publish_on_its_own_type() {
+        let mut session = Session::new();
+        session.broker.grant("flag-manager", [Capability::EventsDeclare, Capability::EventsPublish]);
+        let declared = session.handle("flag-manager", &call("events.declare", serde_json::json!({"name": "profile-changed"})));
+        let event_type = match declared {
+            Response::Ok { result, .. } => result["type"].as_str().unwrap().to_string(),
+            other => panic!("expected declare to succeed, got {other:?}"),
+        };
+        assert_eq!(event_type, "flag-manager/profile-changed");
+
+        let published = session.handle(
+            "flag-manager",
+            &call("events.publish", serde_json::json!({"type": event_type, "payload": {"slot": 2}})),
+        );
+        assert!(matches!(published, Response::Ok { .. }), "{published:?}");
+    }
+
+    #[test]
+    fn lifecycle_subscribe_acknowledges_holding_the_capability() {
+        let mut session = Session::new();
+        session.broker.grant("p", [Capability::LifecycleRead]);
+        let res = session.handle("p", &call("lifecycle.subscribe", serde_json::Value::Null));
+        assert!(matches!(res, Response::Ok { .. }), "{res:?}");
+    }
+
+    #[test]
+    fn session_has_no_broker_for_flags_and_says_so_rather_than_pretending() {
+        // flags.* is deliberately out of this module's scope (see the
+        // Session doc comment); it must fail loudly as "no broker wired"
+        // rather than silently answering Ok with nothing behind it, which is
+        // exactly the stub-that-lies AGENTS.md warns against.
+        let mut session = Session::new();
+        session.broker.grant("p", [Capability::FlagsRead]);
+        let res = session.handle("p", &call("flags.list", serde_json::Value::Null));
+        match res {
+            Response::Error { message, .. } => assert!(message.contains("no broker wired"), "{message}"),
+            other => panic!("expected an explicit no-broker error, got {other:?}"),
         }
     }
 }

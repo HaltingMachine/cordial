@@ -176,14 +176,32 @@ resolver. Verified in a live launch — the example plugin in
 [`plugins/flag-inspector`](../plugins/flag-inspector) reads a flag the user
 actually set and is refused a capability it did not request.
 
-**What is missing** is surface area, not structure. Only `flags.list`,
-`flags.get` and `log.write` are implemented. `flags.write`,
-`flags.write.dynamic` and `lifecycle.subscribe` are defined as capabilities and
-return `error: not implemented yet` — deliberately `error` rather than `denied`,
-so an author is not sent looking for a permission that was never the problem.
+**Update, still true where it matters:** `presence.set`/`presence.clear`,
+`notify.send`, `url.open`, and the three `events.*` methods (ADR-006) are now
+real, effect-performing brokers — Discord IPC framing, the freedesktop
+notification and OpenURI portals, and an event registry with ownership rules
+— all implemented and tested in `crates/cordial-plugins` (see `presence.rs`,
+`notify.rs`, `urlopen.rs`, `events.rs`, and `host.rs`'s `Session`, which is the
+single dispatcher that authorises and performs all of them). `lifecycle.read`
+now has something to push, too: `Session::push_lifecycle` delivers `launch`,
+`ready` and `shutdown` to any plugin holding the capability. A first-party
+plugin, [`plugins/discord-presence`](../plugins/discord-presence), exercises
+the whole path — verified against a local Discord IPC test double, not a real
+Discord client (none is available where this was built); see the plugin's own
+source comment.
 
-Lifecycle events have nothing to subscribe to yet. That is the natural next
-piece now that the client has a real shutdown sequence to report.
+**What is still missing is the join, not the brokers.** `serve()`'s `dispatch`
+in `crates/cordial-runtime/src/plugin_host.rs` is a separate, older function
+that predates `Session` and still only answers `flags.list`, `flags.get` and
+`log.write`, falling through to `error: not implemented yet` for everything
+else — including the four methods above, which now have real implementations
+sitting unused one crate away. `plugin_host.rs` was out of scope for the work
+that added them (other agents were active there), so the live client still
+cannot broker Discord presence, notifications, URL-opening or plugin events
+until `dispatch` is replaced with (or delegates to) `cordial_plugins::host::
+Session::handle`, and `push_lifecycle` is called from wherever the client's
+own launch/ready/shutdown transitions are detected. That wiring, plus
+`flags.write` and `flags.write.dynamic`, is what remains.
 
 See [ADR-003](adr/ADR-003-plugin-isolation.md) for why isolation is by process,
 [ADR-004](adr/ADR-004-plugin-asset-overrides.md) for why plugins cannot replace

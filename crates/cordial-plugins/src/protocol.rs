@@ -43,6 +43,20 @@ impl Response {
     }
 }
 
+/// A message the host sends without being asked, because something happened
+/// on Cordial's own timeline rather than because the plugin made a call — a
+/// lifecycle event, or another plugin's published event arriving for a
+/// subscriber. Distinct from `Response` on the wire: a `Response` always
+/// carries `status` and answers a specific request `id`; a `Push` carries
+/// neither, so a plugin's dispatcher can tell "this is a reply I am waiting
+/// for" from "this arrived on its own" just by checking which shape a line
+/// deserialises as.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Push {
+    pub event: String,
+    pub payload: serde_json::Value,
+}
+
 /// Which capability a method requires, or `None` if the method is unknown.
 ///
 /// A closed mapping rather than a convention like "flags.* needs flags": a
@@ -61,6 +75,9 @@ pub fn required_capability(method: &str) -> Option<Capability> {
         "notify.send" => Capability::NotifySend,
         "url.open" => Capability::UrlOpen,
         "assets.override" => Capability::AssetsOverride,
+        "events.declare" => Capability::EventsDeclare,
+        "events.publish" => Capability::EventsPublish,
+        "events.subscribe" => Capability::EventsSubscribe,
         _ => return None,
     })
 }
@@ -133,5 +150,29 @@ mod tests {
             required_capability("flags.setDynamic"),
             Some(Capability::FlagsWriteDynamic)
         );
+    }
+
+    #[test]
+    fn declaring_publishing_and_subscribing_are_three_separate_capabilities() {
+        // ADR-006 is explicit that these three must not collapse into one: a
+        // plugin that can only subscribe must not thereby be able to publish,
+        // and a plugin that can publish must have declared first.
+        assert_eq!(required_capability("events.declare"), Some(Capability::EventsDeclare));
+        assert_eq!(required_capability("events.publish"), Some(Capability::EventsPublish));
+        assert_eq!(required_capability("events.subscribe"), Some(Capability::EventsSubscribe));
+        assert_ne!(required_capability("events.declare"), required_capability("events.publish"));
+        assert_ne!(required_capability("events.publish"), required_capability("events.subscribe"));
+    }
+
+    #[test]
+    fn a_push_is_shaped_differently_from_a_response_on_the_wire() {
+        // A plugin's dispatcher tells a push from a reply by shape alone —
+        // no `status`, no `id` — so this must never accidentally grow either
+        // field and become ambiguous with a `Response`.
+        let push = Push { event: "flag-manager/profile-changed".into(), payload: serde_json::json!({"slot": 2}) };
+        let line = serde_json::to_string(&push).unwrap();
+        assert!(!line.contains(r#""status""#), "{line}");
+        assert!(!line.contains(r#""id""#), "{line}");
+        assert_eq!(serde_json::from_str::<Push>(&line).unwrap(), push);
     }
 }
