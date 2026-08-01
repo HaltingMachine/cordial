@@ -65,6 +65,10 @@ env:
                                      CORDIAL_MONITOR
   CORDIAL_FULLSCREEN=1               cover the chosen monitor and ask the
                                      window manager for fullscreen
+  CORDIAL_RESOLUTION=<w>x<h>         render resolution (default 1280x720);
+                                     CORDIAL_FULLSCREEN overrides it
+  CORDIAL_DPI_SCALE=<f>              UI density Roblox lays out against.
+                                     1.0 is a low-density phone; try 1.5-2
 ";
 
 fn parse() -> Result<Options, String> {
@@ -240,6 +244,32 @@ fn enter_run_dir(opt: &mut Options) {
     if let Err(e) = std::env::set_current_dir(&root) {
         println!("  could not enter {}: {e}", root.display());
     }
+}
+
+/// The render resolution, and why it is not simply the window size.
+///
+/// Roblox sizes its framebuffers and picks UI asset resolutions from what the
+/// surface reports, so 1280x720 is not just a small window — it is the whole
+/// pipeline running at 720p. On a 1920x1200 panel that is the difference
+/// between a native image and an upscaled one.
+///
+/// `CORDIAL_RESOLUTION=<w>x<h>`; defaults to 1280x720, and `CORDIAL_FULLSCREEN`
+/// overrides both with the monitor's own size.
+fn requested_resolution() -> (u32, u32) {
+    let Ok(v) = std::env::var("CORDIAL_RESOLUTION") else {
+        return (1280, 720);
+    };
+    let mut parts = v.split(['x', 'X']).map(str::trim);
+    if let (Some(Ok(w)), Some(Ok(h))) = (
+        parts.next().map(str::parse::<u32>),
+        parts.next().map(str::parse::<u32>),
+    ) {
+        if w >= 320 && h >= 240 && w <= 7680 && h <= 4320 {
+            return (w, h);
+        }
+    }
+    println!("  CORDIAL_RESOLUTION={v:?} is not <w>x<h> within reason; using 1280x720");
+    (1280, 720)
 }
 
 fn main() -> ExitCode {
@@ -439,8 +469,9 @@ fn main() -> ExitCode {
                 };
                 if skip_agdk {
                     // The bridge sequence, without a handle and without AGDK.
+                    let (rw, rh) = requested_resolution();
                     match cordial_runtime::android::window::open(
-                        1280, 720, &cordial_runtime::window_title("OpenGL ES"),
+                        rw, rh, &cordial_runtime::window_title("OpenGL ES"),
                     ) {
                         Err(e) => println!("  no window: {e}"),
                         Ok(w) => {
@@ -589,8 +620,9 @@ fn main() -> ExitCode {
                                 // The engine renders into an ANativeWindow, so
                                 // there has to be a real one before the surface
                                 // callbacks arrive.
+                                let (rw, rh) = requested_resolution();
                                 match cordial_runtime::android::window::open(
-                                    1280, 720, &cordial_runtime::window_title("OpenGL ES"),
+                                    rw, rh, &cordial_runtime::window_title("OpenGL ES"),
                                 ) {
                                     Err(e) => println!("  no window: {e}"),
                                     Ok(w) => {

@@ -127,6 +127,8 @@ page at about 27 fps. `--run` is how many seconds to stay up.
 | `CORDIAL_MONITOR=<n>` | open on the nth monitor instead of the primary one |
 | `CORDIAL_FULLSCREEN=1` | cover that monitor |
 | `CORDIAL_WINDOW_POS=<x>,<y>` | explicit position, overrides the above |
+| `CORDIAL_RESOLUTION=<w>x<h>` | render resolution, default 1280x720 |
+| `CORDIAL_DPI_SCALE=<f>` | UI density Roblox lays out against; 1.0 is a low-density phone |
 | `CORDIAL_ANDROID_TRACE=1` | log Android API calls |
 | `CORDIAL_COUNT_GL=1` | report graphics calls on exit |
 
@@ -137,6 +139,22 @@ CORDIAL_MONITOR=1 CORDIAL_FULLSCREEN=1 cargo run --release --bin cordial-load --
 ```
 
 `cordial-load --help` lists the rest.
+
+**If the interface looks coarse**, it is being laid out for a low-density phone.
+Raise both — the render resolution is 720p by default and `dpiScale` is 1.0,
+which is what Roblox treats as a cheap handset:
+
+```bash
+CORDIAL_MONITOR=1 CORDIAL_RESOLUTION=1920x1200 CORDIAL_DPI_SCALE=1.75 \
+cargo run --release --bin cordial-load -- \
+  --lib-dir /path/to/lib/x86_64 --apk /path/to/base.apk \
+  --host-libc --game-activity --run 30
+```
+
+Roblox's graphics-quality FastFlags (`DebugFRMQualityLevelOverride` and the MSAA
+overrides) were tested and change nothing here, because they govern 3D scene
+rendering and the logged-out landing page is a 2D interface. Resolution and
+density are the levers that apply to it.
 
 ### 5. When something goes wrong
 

@@ -15,6 +15,7 @@
 #include <jnivm.h>
 
 #include <cstdio>
+#include <cstdlib>
 #include <memory>
 #include <map>
 #include <mutex>
@@ -584,7 +585,26 @@ public:
         p->isKeyboardDevice = true;
         p->isMouseDevice = true;
         p->isTouchDevice = false;
-        p->dpiScale = 1.0f;
+        // Roblox lays its UI out in dp and picks image-asset resolutions from
+        // this. At 1.0 it builds the interface for a low-density phone, which
+        // is why the app shell looks coarse on a desktop panel. Overridable
+        // because the right value depends on the display, and nothing here can
+        // measure the display's physical size reliably.
+        {
+            const char* v = getenv("CORDIAL_DPI_SCALE");
+            float scale = 1.0f;
+            if (v && *v) {
+                float parsed = strtof(v, nullptr);
+                if (parsed > 0.0f && parsed <= 8.0f) {
+                    scale = parsed;
+                } else {
+                    fprintf(stderr,
+                            "[android] CORDIAL_DPI_SCALE=%s is not a scale between 0 and 8;"
+                            " using 1.0\n", v);
+                }
+            }
+            p->dpiScale = scale;
+        }
         // Physical size at roughly 96 DPI, which is what a desktop display is.
         // A phone's 400+ DPI here would make the engine scale its UI for a
         // screen held at arm's length.
