@@ -87,6 +87,10 @@ fn plausible(body: &str) -> bool {
 /// it can be given, and a client that starts without flags is more useful than
 /// one that refuses to start because a CDN was unreachable.
 pub fn load(explicit: Option<&str>) -> Option<String> {
+    load_base(explicit).map(apply_overrides)
+}
+
+fn load_base(explicit: Option<&str>) -> Option<String> {
     if let Some(path) = explicit {
         return std::fs::read_to_string(path).ok();
     }
@@ -107,6 +111,99 @@ pub fn load(explicit: Option<&str>) -> Option<String> {
     }
 }
 
+/// Where the user's own FastFlag overrides live.
+pub fn overrides_path() -> PathBuf {
+    std::env::var_os("CORDIAL_FLAGS")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::var_os("XDG_CONFIG_HOME")
+                .map(PathBuf::from)
+                .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+                .unwrap_or_else(std::env::temp_dir)
+                .join("cordial/flags.json")
+        })
+}
+
+/// Merge the user's flag overrides into the settings document.
+///
+/// This is the mechanism that demonstrably works. Setting a flag here changes
+/// engine behaviour — verified with a control:
+/// `DFFlagRbxTransportUseRtcioRna=False` removes
+/// `Initialized RtcIoRna with 1 event loop threads` from the engine's own log,
+/// and the same run without it has that line.
+///
+/// `nativePreloadFlagOverrides` is *not* the mechanism, despite the name. It
+/// was tried with several document shapes and changed nothing observable.
+///
+/// One caveat worth knowing before wiring anything to this: `FFlag`/`FInt`/
+/// `FString` are read once during startup, so changing them requires a
+/// relaunch. Only the `DFFlag`/`DFInt`/`DFString` family is re-read while the
+/// client runs.
+///
+/// Never fails the launch. A malformed overrides file is reported and skipped,
+/// because a typo in a config file should not stop the client from starting.
+fn apply_overrides(doc: String) -> String {
+    let path = overrides_path();
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return doc;
+    };
+    let overrides: serde_json::Map<String, serde_json::Value> =
+        match serde_json::from_str(&text) {
+            Ok(serde_json::Value::Object(m)) => m,
+            Ok(_) => {
+                println!("  flag overrides: {} is not a JSON object; ignoring", path.display());
+                return doc;
+            }
+            Err(e) => {
+                println!("  flag overrides: {} is not valid JSON ({e}); ignoring", path.display());
+                return doc;
+            }
+        };
+    if overrides.is_empty() {
+        return doc;
+    }
+
+    match merge(&doc, overrides) {
+        Ok((merged, applied)) => {
+            println!("  flag overrides: {applied} applied from {}", path.display());
+            merged
+        }
+        Err(why) => {
+            println!("  flag overrides: {why}; ignoring overrides");
+            doc
+        }
+    }
+}
+
+/// Merge overrides into `applicationSettings`, returning the document and how
+/// many were applied. Split out from the file handling so it can be tested.
+fn merge(
+    doc: &str,
+    overrides: serde_json::Map<String, serde_json::Value>,
+) -> Result<(String, usize), &'static str> {
+    let mut parsed: serde_json::Value =
+        serde_json::from_str(doc).map_err(|_| "the settings document did not parse")?;
+    let app = parsed
+        .get_mut("applicationSettings")
+        .and_then(serde_json::Value::as_object_mut)
+        .ok_or("no applicationSettings object")?;
+
+    // Roblox's own document stores every value as a string, including numbers
+    // and booleans, so anything written as a bare `true` or `7` is converted
+    // rather than rejected — a config file should not require knowing that.
+    let mut applied = 0usize;
+    for (k, v) in overrides {
+        let as_string = match v {
+            serde_json::Value::String(s) => s,
+            other => other.to_string(),
+        };
+        app.insert(k, serde_json::Value::String(as_string));
+        applied += 1;
+    }
+    let out = serde_json::to_string(&parsed).map_err(|_| "the merged document did not serialise")?;
+    Ok((out, applied))
+}
+
 fn fetch() -> Option<String> {
     let body = ureq::get(URL)
         .call()
@@ -123,6 +220,41 @@ fn fetch() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn map(pairs: &[(&str, serde_json::Value)]) -> serde_json::Map<String, serde_json::Value> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.clone())).collect()
+    }
+
+    #[test]
+    fn an_override_replaces_an_existing_flag() {
+        let doc = r#"{"applicationSettings":{"DFFlagX":"True","FFlagY":"False"}}"#;
+        let (out, n) = merge(doc, map(&[("DFFlagX", serde_json::json!(false))])).unwrap();
+        assert_eq!(n, 1);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["applicationSettings"]["DFFlagX"], "false");
+        // untouched flags survive
+        assert_eq!(v["applicationSettings"]["FFlagY"], "False");
+    }
+
+    #[test]
+    fn non_string_values_are_converted_rather_than_rejected() {
+        // Roblox stores every value as a string, so a config file written with
+        // a bare `7` or `true` has to work rather than be a silent no-op.
+        let doc = r#"{"applicationSettings":{}}"#;
+        let (out, _) = merge(
+            doc,
+            map(&[("FIntA", serde_json::json!(7)), ("FFlagB", serde_json::json!(true))]),
+        )
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["applicationSettings"]["FIntA"], "7");
+        assert_eq!(v["applicationSettings"]["FFlagB"], "true");
+    }
+
+    #[test]
+    fn a_document_without_application_settings_is_refused() {
+        assert!(merge(r#"{"nope":{}}"#, map(&[("FFlagX", serde_json::json!(1))])).is_err());
+    }
 
     #[test]
     fn an_error_body_is_not_mistaken_for_settings() {

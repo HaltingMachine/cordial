@@ -50,6 +50,25 @@ It has still only existed for two days.
 > **If your account matters to you, do not use it here.** If you use Cordial and
 > get banned, that is on you, and the maintainers cannot get it reversed.
 
+### We do not endorse exploiting
+
+Cordial is a compatibility runtime, not a cheat tool, and **we do not endorse or
+support using it to exploit Roblox or any experience running on it.**
+
+That is not only a position, it is a property of the build. Cordial has no
+script executor, no hooking, no memory access to the Roblox process and no API
+by which a plugin could request any of them — not disabled, *absent*, so there
+is no primitive in the binary to extract or re-enable in a fork. Plugins run in
+a separate process behind a capability broker and cannot read Cordial's memory,
+let alone Roblox's. The reasoning is in
+[ADR-001](docs/adr/ADR-001-in-process-hooking.md) and
+[ADR-003](docs/adr/ADR-003-plugin-isolation.md), and it is deliberately load-
+bearing: a restriction can be lifted in a fork, a capability that was never
+built cannot.
+
+If you want an executor, this is the wrong project, and pull requests adding one
+will be declined.
+
 ## Status: early. It runs and draws; you cannot sign in yet.
 
 | | |
@@ -139,6 +158,30 @@ CORDIAL_MONITOR=1 CORDIAL_FULLSCREEN=1 cargo run --release --bin cordial-load --
 ```
 
 `cordial-load --help` lists the rest.
+
+### Changing FastFlags
+
+Roblox is configured by FastFlags, and Cordial lets you override any of them.
+Create `~/.config/cordial/flags.json` (or point `CORDIAL_FLAGS` at another file)
+with a flat object:
+
+```json
+{
+  "DFFlagRbxTransportUseRtcioRna": false,
+  "FIntTaskSchedulerAutoThreadLimit": 8,
+  "FStringDebugGraphicsPreferredBackend": "Vulkan"
+}
+```
+
+Values may be written as booleans, numbers or strings — Roblox stores them all
+as strings and Cordial converts. The overrides are merged into the settings
+document the engine is given at startup, and the launch log reports how many
+were applied.
+
+**`FFlag`, `FInt` and `FString` are read once at startup**, so changing them
+needs a relaunch. Only the `DFFlag`/`DFInt`/`DFString` family is re-read while
+the client is running. That distinction matters if you are building anything
+that changes flags dynamically.
 
 **If the interface looks coarse**, it is being laid out for a low-density phone.
 Raise both — the render resolution is 720p by default and `dpiScale` is 1.0,
