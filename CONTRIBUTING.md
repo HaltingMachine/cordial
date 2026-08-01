@@ -1,0 +1,152 @@
+# Contributing to Cordial
+
+Cordial is a runtime for a 116 MB stripped binary nobody here has the source to.
+That shapes everything about how work gets done on it, and this document is
+mostly about that method rather than about code style.
+
+Read [`docs/NEXT.md`](docs/NEXT.md) first. It is written for someone picking the
+project up cold and says what is blocking, what has been tried, and — the part
+that matters most — what has been **disproved**.
+
+## The one rule
+
+**Grep the trace before disassembling anything.**
+
+`docs/traces/` holds a logcat capture of the same Roblox APK running on real
+Android. When a question comes up about what the engine expects, that capture is
+a lookup, not an investigation.
+
+This is not a stylistic preference. Over one long session, **nine consecutive
+conclusions drawn from reading the stripped binary were wrong**, and every
+conclusion drawn from running something held up. The capture exists so that
+never has to happen again.
+
+## Verify by running
+
+A claim about this engine is worth what it was measured with.
+
+- If you cannot test a claim, **label it `INFERRED`** and say so, in the code
+  comment and in the pull request. That is a perfectly acceptable state for a
+  finding to be in. Presenting it as established is not.
+- Timing and stability claims need **repetition**. "It works now" after one run
+  is not a result — one bug in this project's history reproduced on roughly one
+  launch in three, and its rate moved with machine load.
+- Use a **control**. The flag override mechanism was only confirmed by showing a
+  log line disappears with the flag set and is present without it, in the same
+  session. A change that appears to work is not the same as a change that works.
+
+## Record what you disproved
+
+Half of `docs/NEXT.md` is a list of explanations that turned out to be wrong.
+That is deliberate and it is the highest-value thing you can contribute.
+
+When you rule something out, write it down with the evidence. It stops the next
+person spending a day on it, and it is why several sections of this repository
+read like a lab notebook. Commit messages here are long for the same reason —
+they record what was measured, not just what changed.
+
+If you find that something already written down is wrong, **say so plainly and
+correct it**. Several commits in this history exist only to retract an earlier
+claim. That is a healthy thing for a project like this, not an embarrassment.
+
+## Reading the engine
+
+Roblox narrates itself. The single best diagnostic in the project is the
+engine's own log:
+
+```
+<files>/appData/logs/<version>_<timestamp>_Player_*.log
+```
+
+It names subsystems, stages, file paths and exceptions in Roblox's own words.
+Read the newest one before forming a theory. Most questions are answered there
+and nobody finds it on their own, which is why it is mentioned three times in
+this repository.
+
+Useful switches:
+
+| | |
+|---|---|
+| `CORDIAL_ANDROID_TRACE=1` | every Android API call Cordial serves |
+| `CORDIAL_TRACE_PATHS=1` | every path-taking libc call, with thread id |
+| `CORDIAL_COUNT_GL=1` | graphics call counts on exit |
+| `CORDIAL_MONITOR=<n>` | open the window on another monitor |
+
+`CORDIAL_TRACE=1` is **ABI-unsafe** — it wraps variadic functions with
+fixed-arity declarations and makes the engine abort. It cannot answer "which
+path?" questions; `CORDIAL_TRACE_PATHS=1` can.
+
+## Debugging facts that cost real time to learn
+
+- **lldb breakpoints inside `libroblox.so` do not work, and fail silently.**
+  Cordial `mmap`s it outside the system linker, so lldb never lists the image and
+  every breakpoint stays unresolved with hit count 0. The working technique is
+  `memory write` of `0xCC`, then rewinding `$pc` and restoring the byte on trap.
+  Crash-stop backtraces and breakpoints in Cordial's own code are unaffected.
+- **Read syscall arguments from `/proc/<pid>/task/<tid>/syscall`** while lldb has
+  the process stopped, rather than from registers. It gives the number and all
+  six arguments with no guesswork about the libc wrapper's register shuffling.
+- **There are three threads named `Main`.** Use `thread backtrace all`.
+- lldb is at `/home/linuxbrew/.linuxbrew/bin/lldb`. There is no gdb and no
+  strace.
+
+## Things that are permanently out of scope
+
+**No in-process code execution against the Roblox process.** No hooking, no
+memory patching, no injected script environment, and no API by which a plugin
+could request one. Not disabled — *absent*, so there is no primitive in the
+binary to extract or re-enable in a fork. See
+[ADR-001](docs/adr/ADR-001-in-process-hooking.md).
+
+**No overriding Roblox's own assets.** Replacing textures and sounds is the
+direct mechanism behind wallhacks and ESP, and there is no clean line inside
+Roblox's asset namespace — its built-in textures are used inside experiences.
+Plugins theme *Cordial's* surface. See
+[ADR-004](docs/adr/ADR-004-plugin-asset-overrides.md).
+
+**We do not endorse exploiting.** Pull requests adding an executor, an asset
+override for Roblox content, or anything of that shape will be declined.
+
+Also out: client-side integrity flags or watermarks, and
+obfuscation-as-security.
+
+## No Roblox code, ever
+
+Cordial ships no Roblox code, APK, asset or decompiled material, and never will.
+Do not commit any, do not vendor any, and do not paste decompiler output into an
+issue or a comment.
+
+Observing a running binary is fine and is how nearly everything here was
+established — call order, load order, argument shapes, syscalls, timing.
+Transcribing a decompilation of how it implements something is not. The line is
+not the tool, it is what you take away.
+
+## Practical
+
+```bash
+git clone --recursive https://github.com/luohoa97/cordial
+cd cordial
+cargo build --release      # Clang required; AOSP bionic does not build with GCC
+cargo test --release
+```
+
+Before opening a pull request:
+
+- `cargo test --release` passes
+- `cargo build --release` is warning-clean for code you touched
+- the client still launches — repeatedly, not once
+- your commit message says what you **measured**, not just what you changed
+
+Licensed GPL-3.0-or-later. By contributing you agree your work ships under it.
+Third-party notices live in
+[`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) and must be kept accurate;
+MIT and Apache-2.0 obligations are satisfied only while those notices travel
+with the build.
+
+## A note on how this was built
+
+Most of this repository was written by Claude (Anthropic) working with a human
+directing the architecture. That is disclosed in the README and it is relevant
+to you as a contributor: the code is real and the findings were verified by
+running things, but **no human has reviewed every line**. Review accordingly, and
+if you find something wrong, the project would rather hear it than not.

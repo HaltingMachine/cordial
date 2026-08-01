@@ -18,6 +18,7 @@ or GLES2 the way any native application does.
 - [How it actually works 🔬](docs/findings.md)
 - [Why there is no script execution, ever 🔒](docs/adr/ADR-001-in-process-hooking.md)
 - [Report a bug 🐛](https://github.com/luohoa97/cordial/issues)
+- [Contribute 🛠️](CONTRIBUTING.md)
 
 **New here?** Read the warning below first, then
 [`docs/NEXT.md`](docs/NEXT.md) — it is written for someone picking the project
@@ -244,6 +245,8 @@ Start with [`docs/NEXT.md`](docs/NEXT.md). The rest is reference.
 | [`docs/framework-api-inventory.md`](docs/framework-api-inventory.md) | The framework backlog, enumerated from the shipping APK |
 | [`docs/traces/`](docs/traces) | A capture of the same APK on real Android — the ground truth this project checks itself against |
 | [`docs/adr/ADR-001-in-process-hooking.md`](docs/adr/ADR-001-in-process-hooking.md) | Why Cordial has no in-process hooking, ever |
+| [`docs/adr/ADR-004-plugin-asset-overrides.md`](docs/adr/ADR-004-plugin-asset-overrides.md) | Why plugins cannot replace Roblox's textures or sounds |
+| [`docs/adr/ADR-005-flag-service.md`](docs/adr/ADR-005-flag-service.md) | Why the flag service has two surfaces |
 | [`docs/design/path-to-a-frame.md`](docs/design/path-to-a-frame.md) | GameActivity, assets, surface |
 | [`docs/design/instances-and-launch.md`](docs/design/instances-and-launch.md) | Multi-instance, multi-account, `roblox://` handling |
 | [`docs/base-evaluation.md`](docs/base-evaluation.md) | Port-vs-write assessment of the prior art |
