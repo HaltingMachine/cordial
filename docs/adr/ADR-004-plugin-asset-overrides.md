@@ -1,8 +1,14 @@
 # ADR-004: Plugins do not override Roblox's assets
 
-**Status:** accepted
+**Status:** superseded by [ADR-010](ADR-010-plugin-asset-overlays.md)
 **Supersedes:** nothing
 **Related:** [ADR-001](ADR-001-in-process-hooking.md), [ADR-003](ADR-003-plugin-isolation.md)
+
+> Two of this ADR's three supporting claims were checked against primary
+> sources — Sober's `asset_overlay` directory and Bloxstrap's `Modifications`
+> folder — and did not hold up. [ADR-010](ADR-010-plugin-asset-overlays.md)
+> reverses the decision below and explains why. The text is kept as written,
+> for the record, rather than edited to look like it was right all along.
 
 ## Decision
 
