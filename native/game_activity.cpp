@@ -820,6 +820,126 @@ int cordial_input_pass_text(void* fn, long long which, const char* text, int fla
     }
 }
 
+/// `onSurfaceChangedNative` + `onContentRectChangedNative` for a live resize.
+///
+/// Bring-up drives these once, from the same place it creates the surface. A
+/// window that the user drags to a new size has to drive them again, or the
+/// engine keeps rendering at the size it was told at startup while the window
+/// is a different shape.
+///
+/// The surface object is deliberately *not* new: `shared_surface(env, false)`
+/// returns the one the engine already has, because this is the same surface
+/// changing size rather than a replacement. Passing a fresh object would read
+/// to the engine as a surface it has never seen.
+int cordial_game_activity_surface_resized(long long handle, int format, int width, int height,
+                                          char* err, size_t err_len) {
+    auto* env = cordial::process_env();
+    if (!env) {
+        snprintf(err, err_len, "no JavaVM");
+        return -1;
+    }
+    try {
+        auto* jni = env->GetJNIEnv();
+        auto cls = env->GetClass("com/google/androidgamesdk/GameActivity");
+        auto native = [&](const char* name) -> void* {
+            std::lock_guard<std::mutex> lock(cls->mtx);
+            auto it = cls->natives.find(name);
+            return it == cls->natives.end() ? nullptr : it->second;
+        };
+        auto jactivity = cordial::to_jni(env, cordial::shared_activity(env));
+        auto jsurface = cordial::to_jni(env, cordial::shared_surface(env, /*make_new=*/false));
+
+        using SurfaceChangedFn = void (*)(JNIEnv*, jobject, jlong, jobject, jint, jint, jint);
+        using RectFn = void (*)(JNIEnv*, jobject, jlong, jint, jint, jint, jint);
+        if (auto f = native("onSurfaceChangedNative")) {
+            reinterpret_cast<SurfaceChangedFn>(f)(jni, jactivity, (jlong)handle, jsurface,
+                                                  (jint)format, (jint)width, (jint)height);
+        }
+        if (auto f = native("onContentRectChangedNative")) {
+            reinterpret_cast<RectFn>(f)(jni, jactivity, (jlong)handle, 0, 0, (jint)width,
+                                        (jint)height);
+        }
+        return 0;
+    } catch (const std::exception& e) {
+        snprintf(err, err_len, "%s", e.what());
+        return -1;
+    } catch (...) {
+        snprintf(err, err_len, "non-standard C++ exception");
+        return -1;
+    }
+}
+
+/// `NativeGLInterface.updateKeyboardSize(boolean, int, int, int, int)`.
+///
+/// The acknowledgement that closes the text-entry handshake. Android's order is
+/// engine calls `showKeyboard`, the platform opens an IME, and the platform then
+/// reports the keyboard's geometry back through this. Until it arrives the
+/// engine has focused the box but has not begun capturing — which renders as a
+/// focus outline with no blinking caret, and is exactly what Cordial showed
+/// while it answered `showKeyboard` and said nothing further.
+///
+/// The Waydroid capture has the Android side of this as
+/// `onUpdateKeyboardSize() v:false x:0 y:999 w:2491 h:0`, which is where the
+/// argument order below comes from.
+///
+/// Cordial reports a zero-height keyboard: there is no soft keyboard taking up
+/// screen space on a desktop, and a non-zero height would make the engine shift
+/// its layout up to avoid something that is not there.
+int cordial_input_update_keyboard_size(void* fn, int visible, int x, int y, int w, int h,
+                                       char* err, size_t err_len) {
+    using Call = void (*)(JNIEnv*, jobject, jboolean, jint, jint, jint, jint);
+    auto* env = cordial::process_env();
+    if (!fn || !env) {
+        snprintf(err, err_len, "no JavaVM, or updateKeyboardSize is not exported");
+        return -1;
+    }
+    try {
+        auto cls = env->GetClass("com/roblox/engine/jni/NativeGLInterface");
+        reinterpret_cast<Call>(fn)(env->GetJNIEnv(), (jobject)cordial::to_jni(env, cls),
+                                   visible ? JNI_TRUE : JNI_FALSE, x, y, w, h);
+        return 0;
+    } catch (const std::exception& e) {
+        snprintf(err, err_len, "%s", e.what());
+        return -1;
+    } catch (...) {
+        snprintf(err, err_len, "non-standard C++ exception");
+        return -1;
+    }
+}
+
+/// `NativeGLInterface.syncTextboxTextAndCursorPosition2(String, int)`.
+///
+/// The per-keystroke half of text entry, and the one that was missing. Its dex
+/// signature is `(Ljava/lang/String;I)V` — text and cursor, and notably *no*
+/// box handle, because it applies to whichever box currently has focus. That is
+/// what an IME calls as the user types; `nativePassText` carries a handle and is
+/// a different moment in the contract.
+///
+/// Driving only `nativePassText` left the login form's fields empty even with a
+/// correct handle, which is what sent this looking at the declared shapes.
+int cordial_input_sync_textbox(void* fn, const char* text, int cursor, char* err,
+                               size_t err_len) {
+    using Call = void (*)(JNIEnv*, jobject, jstring, jint);
+    auto* env = cordial::process_env();
+    if (!fn || !env) {
+        snprintf(err, err_len, "no JavaVM, or syncTextboxTextAndCursorPosition2 is not exported");
+        return -1;
+    }
+    try {
+        auto cls = env->GetClass("com/roblox/engine/jni/NativeGLInterface");
+        auto str = std::make_shared<cordial::String>(std::string(text ? text : ""));
+        reinterpret_cast<Call>(fn)(env->GetJNIEnv(), (jobject)cordial::to_jni(env, cls),
+                                   (jstring)cordial::to_jni(env, str), cursor);
+        return 0;
+    } catch (const std::exception& e) {
+        snprintf(err, err_len, "%s", e.what());
+        return -1;
+    } catch (...) {
+        snprintf(err, err_len, "non-standard C++ exception");
+        return -1;
+    }
+}
+
 int cordial_input_mouse_move(void* fn, float x, float y, float dx, float dy, char* err,
                              size_t err_len) {
     using Call = void (*)(JNIEnv*, jobject, jfloat, jfloat, jfloat, jfloat);

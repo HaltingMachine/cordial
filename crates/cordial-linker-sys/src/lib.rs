@@ -896,6 +896,18 @@ pub mod game_activity {
             f: *mut c_void, down: c_int, key_code: c_int, modifiers: c_int, is_repeat: c_int,
             err: *mut c_char, n: usize,
         ) -> c_int;
+        fn cordial_game_activity_surface_resized(
+            handle: i64, format: c_int, width: c_int, height: c_int,
+            err: *mut c_char, n: usize,
+        ) -> c_int;
+        fn cordial_input_update_keyboard_size(
+            f: *mut c_void, visible: c_int, x: c_int, y: c_int, w: c_int, h: c_int,
+            err: *mut c_char, n: usize,
+        ) -> c_int;
+        fn cordial_input_sync_textbox(
+            f: *mut c_void, text: *const c_char, cursor: c_int,
+            err: *mut c_char, n: usize,
+        ) -> c_int;
         fn cordial_input_pass_text(
             f: *mut c_void, which: i64, text: *const c_char, flag: c_int, cursor: c_int,
             err: *mut c_char, n: usize,
@@ -908,6 +920,9 @@ pub mod game_activity {
             f: *mut c_void, x: f32, y: f32, down: c_int, button: c_int,
             err: *mut c_char, n: usize,
         ) -> c_int;
+        fn cordial_textbox_handle() -> i64;
+        fn cordial_textbox_generation() -> c_int;
+        fn cordial_textbox_text(buf: *mut c_char, n: c_int) -> c_int;
         fn cordial_game_activity_window_focus(
             handle: i64,
             focused: c_int,
@@ -978,14 +993,91 @@ pub mod game_activity {
         if rc == 0 { Ok(()) } else { Err(take_err(err)) }
     }
 
+    /// Which text box the engine has focus in, learned from `showKeyboard`.
+    /// `None` when nothing is focused — text must then not be sent at all,
+    /// rather than sent to handle 0, which is what left the login form empty.
+    pub fn focused_textbox() -> Option<i64> {
+        // SAFETY: a plain atomic load on the C++ side.
+        match unsafe { cordial_textbox_handle() } {
+            0 => None,
+            h => Some(h),
+        }
+    }
+
+    /// Bumped on every focus change. Editing state keyed on this reseeds when
+    /// focus moves, without comparing handles — a handle can be reused once a
+    /// box is destroyed, so equal handles do not imply the same box.
+    pub fn textbox_generation() -> u32 {
+        // SAFETY: a plain atomic load on the C++ side.
+        unsafe { cordial_textbox_generation() as u32 }
+    }
+
+    /// The focused box's contents, as the engine reported them at focus time.
+    pub fn textbox_text() -> String {
+        let mut buf = vec![0u8; 4096];
+        // SAFETY: `buf` is writable for its full length and outlives the call.
+        let n = unsafe { cordial_textbox_text(buf.as_mut_ptr() as *mut c_char, buf.len() as c_int) };
+        if n <= 0 {
+            return String::new();
+        }
+        String::from_utf8_lossy(&buf[..n as usize]).into_owned()
+    }
+
+    /// Re-drive `onSurfaceChangedNative` after the host window is resized.
+    pub fn surface_resized(handle: i64, format: i32, width: i32, height: i32) -> Result<(), String> {
+        let mut err = vec![0u8; 512];
+        // SAFETY: `err` outlives the call.
+        let rc = unsafe {
+            cordial_game_activity_surface_resized(
+                handle, format, width, height,
+                err.as_mut_ptr() as *mut c_char, err.len(),
+            )
+        };
+        if rc == 0 { Ok(()) } else { Err(take_err(err)) }
+    }
+
+    /// `NativeGLInterface.updateKeyboardSize` — tells the engine an editor is
+    /// up. Without it the engine focuses a box but never starts capturing.
+    pub fn update_keyboard_size(
+        native: *mut c_void, visible: bool, x: i32, y: i32, w: i32, h: i32,
+    ) -> Result<(), String> {
+        let mut err = vec![0u8; 512];
+        // SAFETY: `err` outlives the call.
+        let rc = unsafe {
+            cordial_input_update_keyboard_size(
+                native, visible as c_int, x, y, w, h,
+                err.as_mut_ptr() as *mut c_char, err.len(),
+            )
+        };
+        if rc == 0 { Ok(()) } else { Err(take_err(err)) }
+    }
+
+    /// `NativeGLInterface.syncTextboxTextAndCursorPosition2` — the per-keystroke
+    /// text update. Takes no box handle: it applies to whatever has focus.
+    pub fn sync_textbox(native: *mut c_void, text: &str, cursor: i32) -> Result<(), String> {
+        let t = CString::new(text).map_err(|e| e.to_string())?;
+        let mut err = vec![0u8; 512];
+        // SAFETY: `t` and `err` outlive the call.
+        let rc = unsafe {
+            cordial_input_sync_textbox(
+                native, t.as_ptr(), cursor,
+                err.as_mut_ptr() as *mut c_char, err.len(),
+            )
+        };
+        if rc == 0 { Ok(()) } else { Err(take_err(err)) }
+    }
+
     /// `NativeGLInterface.nativePassText` — text entered into a focused box.
-    pub fn pass_text(native: *mut c_void, text: &str, cursor: i32) -> Result<(), String> {
+    ///
+    /// `which` is the handle from `showKeyboard`, which is how the engine knows
+    /// which box the text belongs to.
+    pub fn pass_text(native: *mut c_void, which: i64, text: &str, cursor: i32) -> Result<(), String> {
         let t = CString::new(text).map_err(|e| e.to_string())?;
         let mut err = vec![0u8; 512];
         // SAFETY: `t` and `err` outlive the call.
         let rc = unsafe {
             cordial_input_pass_text(
-                native, 0, t.as_ptr(), 0, cursor,
+                native, which, t.as_ptr(), 0, cursor,
                 err.as_mut_ptr() as *mut c_char, err.len(),
             )
         };

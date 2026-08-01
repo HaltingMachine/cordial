@@ -33,7 +33,12 @@ pub const WINDOW_FORMAT_RGBA_8888: i32 = 1;
 ///
 /// Module-level rather than local to `open()` so the redraw wiring can be
 /// checked (`EXPOSURE_MASK` bit present) without a live X server.
-const INPUT_EVENT_MASK: c_long = 0x1 | 0x2 | 0x4 | 0x8 | 0x40 | 0x8000;
+/// StructureNotifyMask (0x20000) is included so `ConfigureNotify` arrives when
+/// the window is resized. Without it Cordial never learned its own window had
+/// changed size: the engine kept rendering at the size it was told at startup
+/// while X cleared the window to its background colour, which is the black
+/// flash on every resize.
+const INPUT_EVENT_MASK: c_long = 0x1 | 0x2 | 0x4 | 0x8 | 0x40 | 0x8000 | 0x20000;
 
 type Display = *mut c_void;
 type Window = c_ulong;
@@ -66,6 +71,26 @@ struct Xlib {
     /// reimplemented by hand.
     lookup_string:
         unsafe extern "C" fn(*mut c_void, *mut c_char, c_int, *mut c_ulong, *mut c_void) -> c_int,
+    // ---- cursor, so the host pointer does not double the engine's own ----
+    create_bitmap_from_data:
+        unsafe extern "C" fn(Display, Window, *const c_char, c_uint, c_uint) -> c_ulong,
+    create_pixmap_cursor: unsafe extern "C" fn(
+        Display, c_ulong, c_ulong, *mut XColor, *mut XColor, c_uint, c_uint,
+    ) -> c_ulong,
+    define_cursor: unsafe extern "C" fn(Display, Window, c_ulong) -> c_int,
+    free_pixmap: unsafe extern "C" fn(Display, c_ulong) -> c_int,
+}
+
+/// `XColor`. Only the pixel/RGB prefix is read by `XCreatePixmapCursor`, but the
+/// whole struct has to be the right size because Xlib writes through the pointer.
+#[repr(C)]
+struct XColor {
+    pixel: c_ulong,
+    red: u16,
+    green: u16,
+    blue: u16,
+    flags: c_char,
+    pad: c_char,
 }
 
 extern "C" {
@@ -113,6 +138,10 @@ impl Xlib {
             pending: sym!("XPending"),
             next_event: sym!("XNextEvent"),
             lookup_string: sym!("XLookupString"),
+            create_bitmap_from_data: sym!("XCreateBitmapFromData"),
+            create_pixmap_cursor: sym!("XCreatePixmapCursor"),
+            define_cursor: sym!("XDefineCursor"),
+            free_pixmap: sym!("XFreePixmap"),
         })
     }
 }
@@ -429,6 +458,46 @@ pub fn open(width: u32, height: u32, title: &str) -> Result<&'static HostWindow,
         };
         (xlib.set_class_hint)(display, w, &mut class);
 
+        // Hide the host pointer over this window.
+        //
+        // Roblox draws its own cursor, so the X11 one sits alongside it and the
+        // client shows two. Cordial cannot suppress the engine's — that would be
+        // reaching into its rendering — so the host's is the one that goes.
+        //
+        // `XDefineCursor` is scoped to this window: the pointer is invisible
+        // while it is over Cordial and completely untouched everywhere else on
+        // the desktop. That matters more than it sounds. The global alternatives
+        // (`XFixesHideCursor`, grabbing the pointer) change the cursor for the
+        // whole session, and this project has already hijacked the developer's
+        // real pointer once with `XTestFakeMotionEvent` — window-scoped is the
+        // rule here, not a preference.
+        //
+        // `CORDIAL_SHOW_CURSOR=1` puts it back, for debugging input where seeing
+        // where the host thinks the pointer is matters.
+        if std::env::var_os("CORDIAL_SHOW_CURSOR").is_none() {
+            // A 1x1 all-zero bitmap used as both source and mask: no pixels are
+            // drawn and none are opaque, which is the portable "no cursor".
+            let blank: [c_char; 1] = [0];
+            let pixmap = (xlib.create_bitmap_from_data)(display, w, blank.as_ptr(), 1, 1);
+            if pixmap != 0 {
+                let mut black = XColor {
+                    pixel: 0, red: 0, green: 0, blue: 0, flags: 0, pad: 0,
+                };
+                let cursor = (xlib.create_pixmap_cursor)(
+                    display, pixmap, pixmap, &mut black, &mut black, 0, 0,
+                );
+                if cursor != 0 {
+                    (xlib.define_cursor)(display, w, cursor);
+                    eprintln!("[cordial] host cursor hidden over the client window");
+                } else {
+                    eprintln!("[cordial] could not create a blank cursor; host pointer stays visible");
+                }
+                // The cursor holds its own reference to the pixmap contents, so
+                // the pixmap is freed now rather than leaked for the process.
+                (xlib.free_pixmap)(display, pixmap);
+            }
+        }
+
         (xlib.select_input)(display, w, INPUT_EVENT_MASK);
         (xlib.map_window)(display, w);
         // Let the window manager finish its own placement before arguing with
@@ -599,6 +668,26 @@ const MOTION_NOTIFY: c_int = 6;
 const BUTTON_PRESS: c_int = 4;
 const BUTTON_RELEASE: c_int = 5;
 const EXPOSE: c_int = 12;
+const CONFIGURE_NOTIFY: c_int = 22;
+
+/// `XConfigureEvent`. Another distinct layout: it carries the window's new
+/// geometry rather than a damaged rectangle.
+#[repr(C)]
+struct XConfigureEvent {
+    type_: c_int,
+    serial: c_ulong,
+    send_event: c_int,
+    display: *mut c_void,
+    event: c_ulong,
+    window: c_ulong,
+    x: c_int,
+    y: c_int,
+    width: c_int,
+    height: c_int,
+    border_width: c_int,
+    above: c_ulong,
+    override_redirect: c_int,
+}
 
 /// `XExposeEvent`. A different layout from `XInputEvent` above — Expose
 /// carries a damaged rectangle and a batching `count`, not a pointer/keycode
@@ -904,42 +993,74 @@ impl HostWindow {
             )
         };
         let ev = unsafe { &*(buf.as_ptr() as *const XInputEvent) };
-        let Some(keycode) = keysym_to_android(keysym) else {
-            super::trace(format_args!("unmapped X11 keysym {keysym:#x}"));
-            return;
-        };
         let unicode = if n > 0 { text[0] as i32 } else { 0 };
         let meta = android_meta_state(ev.state);
         let now = self.now_ms();
+
+        if trace_text() {
+            eprintln!(
+                "[cordial] key {} keysym={keysym:#x} text={:?} keycode={:?} focus={:?}",
+                if down { "down" } else { "up" },
+                std::str::from_utf8(&text[..n.max(0) as usize]).unwrap_or(""),
+                keysym_to_android(keysym),
+                cordial_linker_sys::game_activity::focused_textbox(),
+            );
+        }
 
         // Real per-key downTime tracking (one slot per held key) is not
         // implemented; both fields use the current time on every call. That
         // is a simplification, not a faithful `downTime`, and is called out in
         // the report — it does not block a key reaching the engine, only the
         // precision of one timing field most UI code does not consult.
-        deliver_key(handle, down, keycode, ev.detail as i32, meta, 0, unicode, now, now);
-
-        pass_key_event(down, keycode, meta);
+        // Keys the Android keycode table covers. A keysym with no mapping — the
+        // shifted symbols, `@` among them — used to `return` here, which also
+        // skipped the text path below and silently dropped the character. Text
+        // does not need an Android keycode: `@` is a character whether or not
+        // AKEYCODE has a name for it, and an email address is unusable without
+        // it. So this is now a branch rather than an exit.
+        if let Some(keycode) = keysym_to_android(keysym) {
+            deliver_key(handle, down, keycode, ev.detail as i32, meta, 0, unicode, now, now);
+            pass_key_event(down, keycode, meta);
+        } else {
+            super::trace(format_args!("unmapped X11 keysym {keysym:#x}"));
+        }
 
         // And the text path. Android text fields are edited by state, not by
         // keystrokes — delivering the key alone leaves the box empty, which is
         // exactly what the login form did before this. Only on key-down: a
         // release would deliver the same state twice.
         if down {
+            // Only when the engine has told us a box is focused, via
+            // `showKeyboard`. Sending text with no focused box means sending it
+            // to handle 0, which is not a box — the engine drops it, silently,
+            // which is exactly how this failed before.
+            let Some(which) = cordial_linker_sys::game_activity::focused_textbox() else {
+                return;
+            };
             let typed = if n > 0 {
                 std::str::from_utf8(&text[..n as usize]).unwrap_or("")
             } else {
                 ""
             };
-            // XK_BackSpace
-            let backspace = keysym == 0xff08;
-            if let Some(contents) = edit_text_buffer(typed, backspace) {
-                let len = contents.chars().count() as i32;
+            // Editing keys, before text: an IME consumes these itself rather
+            // than committing them, and `XLookupString` reports nothing for
+            // them anyway. Keysyms from keysymdef.h.
+            let edit = match keysym {
+                0xff08 => Edit::Backspace,           // XK_BackSpace
+                0xffff => Edit::Delete,              // XK_Delete
+                0xff51 => Edit::Move(Caret::Left),   // XK_Left
+                0xff53 => Edit::Move(Caret::Right),  // XK_Right
+                0xff50 => Edit::Move(Caret::Home),   // XK_Home
+                0xff57 => Edit::Move(Caret::End),    // XK_End
+                _ => Edit::Insert(typed),
+            };
+            if let Some((contents, caret)) = edit_text_buffer(edit) {
                 // AGDK's GameTextInput path, and Roblox's own. Both are driven
                 // for the same reason as the mouse: the first is the documented
                 // contract, the second is what the interface reads.
-                let _ = cordial_linker_sys::game_activity::text_input(handle, &contents, len, len);
-                pass_text(&contents, len);
+                let _ =
+                    cordial_linker_sys::game_activity::text_input(handle, &contents, caret, caret);
+                pass_text(which, &contents, caret);
             }
         }
     }
@@ -947,6 +1068,11 @@ impl HostWindow {
     /// Drain and deliver whatever X11 input is already queued, then return.
     /// See the module-level comment above for why this never blocks.
     fn pump_input_events(&self, handle: i64) {
+        // Before draining input: if the engine has opened or closed an editor
+        // since last time, acknowledge it. Cheap — an atomic load and a
+        // comparison unless something actually changed.
+        report_keyboard_state();
+
         let mut pfd = PollFd { fd: self.conn_fd, events: POLLIN, revents: 0 };
         // SAFETY: `pfd` is a live array of length 1; a 0ms timeout makes this a
         // pure non-blocking check.
@@ -997,8 +1123,41 @@ impl HostWindow {
                         deliver_surface_redraw(handle);
                     }
                 }
+                CONFIGURE_NOTIFY => {
+                    // SAFETY: the event type says `XNextEvent` filled `buf` as
+                    // the `XConfigureEvent` member of Xlib's union.
+                    let ev = unsafe { &*(buf.as_ptr() as *const XConfigureEvent) };
+                    self.dispatch_configure(handle, ev.width, ev.height);
+                }
                 _ => {}
             }
+        }
+    }
+
+    /// The window changed size. Update what the engine is told about it.
+    ///
+    /// X sends `ConfigureNotify` for moves as well as resizes, and a resize
+    /// drag produces a stream of them, so this returns early unless the size
+    /// actually changed — re-driving `onSurfaceChangedNative` for every pixel
+    /// of a drag would rebuild the engine's framebuffers dozens of times a
+    /// second.
+    fn dispatch_configure(&self, handle: i64, width: i32, height: i32) {
+        if width <= 0 || height <= 0 {
+            return;
+        }
+        let format = {
+            let mut g = self.buffers.lock().unwrap_or_else(|e| e.into_inner());
+            if g.width == width && g.height == height {
+                return;
+            }
+            g.width = width;
+            g.height = height;
+            g.format
+        };
+        if let Err(e) = cordial_linker_sys::game_activity::surface_resized(
+            handle, format, width, height,
+        ) {
+            super::trace(format_args!("surface resize failed: {e}"));
         }
     }
 }
@@ -1218,17 +1377,60 @@ static PASS_KEY_EVENT: std::sync::atomic::AtomicPtr<c_void> =
     std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
 static PASS_TEXT: std::sync::atomic::AtomicPtr<c_void> =
     std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+/// `syncTextboxTextAndCursorPosition2`. Separate from `PASS_TEXT` because it is
+/// a different call at a different moment, not an alternative spelling of one.
+static SYNC_TEXTBOX: std::sync::atomic::AtomicPtr<c_void> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+/// `updateKeyboardSize`, the acknowledgement that an editor is up.
+static UPDATE_KEYBOARD_SIZE: std::sync::atomic::AtomicPtr<c_void> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+/// Focus generation the keyboard state was last reported for.
+static KEYBOARD_REPORTED: Mutex<Option<u32>> = Mutex::new(None);
 
 pub fn set_input_natives(
     mouse_move: *mut c_void,
     mouse_button: *mut c_void,
     key_event: *mut c_void,
     pass_text: *mut c_void,
+    sync_textbox: *mut c_void,
+    update_keyboard_size: *mut c_void,
 ) {
     PASS_MOUSE_MOVE.store(mouse_move, std::sync::atomic::Ordering::Relaxed);
     PASS_MOUSE_BUTTON.store(mouse_button, std::sync::atomic::Ordering::Relaxed);
     PASS_KEY_EVENT.store(key_event, std::sync::atomic::Ordering::Relaxed);
     PASS_TEXT.store(pass_text, std::sync::atomic::Ordering::Relaxed);
+    SYNC_TEXTBOX.store(sync_textbox, std::sync::atomic::Ordering::Relaxed);
+    UPDATE_KEYBOARD_SIZE.store(update_keyboard_size, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Tell the engine whether an editor is up, when that has changed.
+///
+/// This closes the handshake `showKeyboard` opens. It runs from the input pump
+/// rather than from inside `showKeyboard` itself because on Android the reply
+/// comes from the UI thread after the IME has actually appeared, not
+/// synchronously from within the request — and calling back into the engine
+/// from inside its own call is a re-entry this has no reason to risk.
+fn report_keyboard_state() {
+    let f = UPDATE_KEYBOARD_SIZE.load(std::sync::atomic::Ordering::Relaxed);
+    if f.is_null() {
+        return;
+    }
+    let generation = cordial_linker_sys::game_activity::textbox_generation();
+    {
+        let mut seen = KEYBOARD_REPORTED.lock().unwrap_or_else(|e| e.into_inner());
+        if *seen == Some(generation) {
+            return;
+        }
+        *seen = Some(generation);
+    }
+    let visible = cordial_linker_sys::game_activity::focused_textbox().is_some();
+    let (w, h) = current().map(|c| { let g = c.geometry(); (g.0, g.1) }).unwrap_or((1280, 720));
+    // Zero height: no soft keyboard occupies the screen here, and a real height
+    // would make the engine shift its layout up to avoid nothing.
+    let r = cordial_linker_sys::game_activity::update_keyboard_size(f, visible, 0, h, w, 0);
+    if trace_text() {
+        eprintln!("[cordial] updateKeyboardSize(visible={visible}, w={w}, h=0) -> {r:?}");
+    }
 }
 
 fn pass_key_event(down: bool, key_code: i32, modifiers: i32) {
@@ -1238,10 +1440,32 @@ fn pass_key_event(down: bool, key_code: i32, modifiers: i32) {
     }
 }
 
-fn pass_text(text: &str, cursor: i32) {
+fn pass_text(which: i64, text: &str, cursor: i32) {
+    // The per-keystroke sync first: this is the call that actually fills the
+    // field. `nativePassText` is driven alongside it for the same reason both
+    // mouse paths are — the interface declares both and the cost of driving
+    // one that turns out to be a no-op is nothing.
+    let sync = SYNC_TEXTBOX.load(std::sync::atomic::Ordering::Relaxed);
+    if !sync.is_null() {
+        if let Err(e) = cordial_linker_sys::game_activity::sync_textbox(sync, text, cursor) {
+            if trace_text() {
+                eprintln!("[cordial] syncTextbox failed: {e}");
+            }
+        }
+    }
     let f = PASS_TEXT.load(std::sync::atomic::Ordering::Relaxed);
     if !f.is_null() {
-        let _ = cordial_linker_sys::game_activity::pass_text(f, text, cursor);
+        if let Err(e) = cordial_linker_sys::game_activity::pass_text(f, which, text, cursor) {
+            if trace_text() {
+                eprintln!("[cordial] passText failed: {e}");
+            }
+        }
+    }
+    if trace_text() {
+        eprintln!(
+            "[cordial] text -> {text:?} caret={cursor} sync={} passText={}",
+            !sync.is_null(), !f.is_null()
+        );
     }
 }
 
@@ -1271,27 +1495,162 @@ fn pass_mouse_button(x: f32, y: f32, down: bool) {
 /// that yet, so a field change currently carries the previous field's text over.
 /// Documented rather than hidden because it will be visible the moment someone
 /// tabs between two boxes.
-static TEXT_BUFFER: Mutex<String> = Mutex::new(String::new());
+/// `CORDIAL_TRACE_TEXT=1`. Text entry is the one path where the interesting
+/// question is what the host *saw*, not what the engine did, so it gets its own
+/// switch rather than riding on the general trace — which is documented as
+/// ABI-unsafe and aborts the engine.
+fn trace_text() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("CORDIAL_TRACE_TEXT").is_some())
+}
 
-/// Feed a keystroke into the focused field, if there is one.
+static TEXT_BUFFER: Mutex<TextField> = Mutex::new(TextField::new());
+
+/// The editing state Cordial keeps on behalf of the engine.
 ///
-/// Returns whether the buffer changed, so the caller only delivers state when
-/// something actually happened.
-fn edit_text_buffer(keysym_text: &str, backspace: bool) -> Option<String> {
-    let mut buf = TEXT_BUFFER.lock().unwrap_or_else(|e| e.into_inner());
-    if backspace {
-        if buf.pop().is_none() {
-            return None;
-        }
-    } else {
-        // Control characters are not text. A field receives what a person typed,
-        // not every key they pressed.
-        if keysym_text.is_empty() || keysym_text.chars().any(|c| c.is_control()) {
-            return None;
-        }
-        buf.push_str(keysym_text);
+/// Android delegates text editing to the IME, and with a hardware keyboard the
+/// IME is still in the loop — it receives the key events and commits finished
+/// text through the InputConnection. Cordial is that IME here, so it owns the
+/// caret as well as the contents. Sending the whole string with the caret
+/// pinned to the end is what made typing feel broken: every keystroke dragged
+/// the caret back, so arrows and clicking into the middle of a field could not
+/// work by construction.
+///
+/// The caret is counted in `char`s, not bytes, because that is what the engine
+/// is told and what a person means by "third character".
+struct TextField {
+    text: String,
+    caret: usize,
+}
+
+impl TextField {
+    const fn new() -> Self {
+        TextField { text: String::new(), caret: 0 }
     }
-    Some(buf.clone())
+
+    /// Byte offset of the caret, for slicing.
+    fn byte_offset(&self) -> usize {
+        self.text
+            .char_indices()
+            .nth(self.caret)
+            .map(|(i, _)| i)
+            .unwrap_or(self.text.len())
+    }
+
+    fn len_chars(&self) -> usize {
+        self.text.chars().count()
+    }
+
+    fn seed(&mut self, text: String) {
+        self.caret = text.chars().count();
+        self.text = text;
+    }
+
+    fn insert(&mut self, s: &str) {
+        let at = self.byte_offset();
+        self.text.insert_str(at, s);
+        self.caret += s.chars().count();
+    }
+
+    /// Delete the character before the caret. False when there is nothing to
+    /// delete, so the caller can avoid sending an unchanged state.
+    fn backspace(&mut self) -> bool {
+        if self.caret == 0 {
+            return false;
+        }
+        self.caret -= 1;
+        let at = self.byte_offset();
+        self.text.remove(at);
+        true
+    }
+
+    /// Delete the character at the caret — the `Delete` key, as distinct from
+    /// backspace. Without it, correcting a typo means deleting everything after
+    /// it too.
+    fn delete(&mut self) -> bool {
+        if self.caret >= self.len_chars() {
+            return false;
+        }
+        let at = self.byte_offset();
+        self.text.remove(at);
+        true
+    }
+
+    /// Move the caret. Returns whether it moved, so a Left at position zero
+    /// does not resend identical state.
+    fn move_caret(&mut self, to: Caret) -> bool {
+        let before = self.caret;
+        self.caret = match to {
+            Caret::Left => self.caret.saturating_sub(1),
+            Caret::Right => (self.caret + 1).min(self.len_chars()),
+            Caret::Home => 0,
+            Caret::End => self.len_chars(),
+        };
+        self.caret != before
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Caret {
+    Left,
+    Right,
+    Home,
+    End,
+}
+
+/// The focus generation `TEXT_BUFFER` was last seeded for. `showKeyboard`
+/// bumps the engine-side counter on every focus change; when this falls behind
+/// it, the buffer belongs to a box that no longer has focus and is reseeded
+/// from whatever the engine says the newly focused box contains.
+///
+/// Without this, moving from the username field to the password field carries
+/// the username into it, and the first keystroke in a pre-filled field appends
+/// rather than continues.
+static TEXT_GENERATION: Mutex<Option<u32>> = Mutex::new(None);
+
+/// What a key press means to the focused field.
+enum Edit<'a> {
+    Insert(&'a str),
+    Backspace,
+    Delete,
+    Move(Caret),
+}
+
+/// Apply one edit to the focused field.
+///
+/// Returns the contents and caret to send, or `None` when nothing changed —
+/// resending identical state on every arrow key at the end of a field makes the
+/// engine redraw for no reason.
+fn edit_text_buffer(edit: Edit<'_>) -> Option<(String, i32)> {
+    let mut buf = TEXT_BUFFER.lock().unwrap_or_else(|e| e.into_inner());
+
+    // Reseed when focus has moved since this buffer was filled.
+    let generation = cordial_linker_sys::game_activity::textbox_generation();
+    {
+        let mut seen = TEXT_GENERATION.lock().unwrap_or_else(|e| e.into_inner());
+        if *seen != Some(generation) {
+            buf.seed(cordial_linker_sys::game_activity::textbox_text());
+            *seen = Some(generation);
+        }
+    }
+
+    let changed = match edit {
+        Edit::Insert(s) => {
+            // Control characters are not text. A field receives what a person
+            // typed, not every key they pressed.
+            if s.is_empty() || s.chars().any(|c| c.is_control()) {
+                false
+            } else {
+                buf.insert(s);
+                true
+            }
+        }
+        Edit::Backspace => buf.backspace(),
+        Edit::Delete => buf.delete(),
+        Edit::Move(to) => buf.move_caret(to),
+    };
+
+    changed.then(|| (buf.text.clone(), buf.caret as i32))
 }
 
 pub fn overrides() -> Vec<(&'static str, *mut c_void)> {
@@ -1347,6 +1706,68 @@ mod tests {
             INPUT_EVENT_MASK & KEY_BUTTON_MOTION_MASK,
             KEY_BUTTON_MOTION_MASK
         );
+    }
+
+    #[test]
+    fn a_caret_edits_where_it_is_not_at_the_end() {
+        // Every keystroke used to send the whole string with the caret pinned to
+        // the end, which meant arrows and clicking into the middle of a field
+        // could not work however the engine behaved. This is the regression that
+        // made typing feel broken rather than absent.
+        let mut f = TextField::new();
+        f.seed("hello".into());
+        assert_eq!(f.caret, 5);
+        assert!(f.move_caret(Caret::Home));
+        assert_eq!(f.caret, 0);
+        f.insert("say ");
+        assert_eq!(f.text, "say hello");
+        assert_eq!(f.caret, 4);
+    }
+
+    #[test]
+    fn backspace_and_delete_are_not_the_same_key() {
+        // Backspace removes before the caret, Delete at it. Treating Delete as
+        // backspace loses the character on the wrong side of the cursor, which
+        // is the sort of bug people describe as "it eats my text".
+        let mut f = TextField::new();
+        f.seed("abc".into());
+        f.move_caret(Caret::Home);
+        assert!(!f.backspace()); // nothing before the caret
+        assert!(f.delete());
+        assert_eq!(f.text, "bc");
+        assert_eq!(f.caret, 0);
+        f.move_caret(Caret::End);
+        assert!(f.backspace());
+        assert_eq!(f.text, "b");
+    }
+
+    #[test]
+    fn the_caret_is_counted_in_characters_not_bytes() {
+        // The engine is told a character offset. Counting bytes puts the caret
+        // mid-codepoint for any non-ASCII input and slices a String there, which
+        // panics rather than misbehaving quietly.
+        let mut f = TextField::new();
+        f.seed("héllo".into());
+        assert_eq!(f.caret, 5);
+        f.move_caret(Caret::Home);
+        f.move_caret(Caret::Right);
+        f.move_caret(Caret::Right);
+        assert_eq!(f.caret, 2);
+        f.insert("X");
+        assert_eq!(f.text, "héXllo");
+    }
+
+    #[test]
+    fn a_caret_move_that_goes_nowhere_reports_no_change() {
+        // Left at position zero must not resend identical state; the engine
+        // would redraw the field on every held arrow key for nothing.
+        let mut f = TextField::new();
+        f.seed("ab".into());
+        f.move_caret(Caret::Home);
+        assert!(!f.move_caret(Caret::Left));
+        assert!(f.move_caret(Caret::Right));
+        f.move_caret(Caret::End);
+        assert!(!f.move_caret(Caret::Right));
     }
 
     #[test]

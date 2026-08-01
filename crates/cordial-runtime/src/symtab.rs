@@ -47,12 +47,17 @@ const ANDROID_PREFIXES: &[(&str, &str)] = &[
     ("ASurface", "libandroid.so"),
     ("AFont", "libandroid.so"),
     ("ASystemFont", "libandroid.so"),
+    // OpenSL ES. Current Roblox builds reference these directly rather than
+    // through `dlsym`, and seven of the eight are data symbols, so they must
+    // resolve at load time or `libroblox.so` does not load at all.
+    ("SL_IID_", "libOpenSLES.so"),
+    ("slCreateEngine", "libOpenSLES.so"),
 ];
 
 /// In `libroblox.so`'s `DT_NEEDED` but contributing no undefined symbols — they
 /// are consulted via `dlsym` at runtime, if at all. They still have to exist for
 /// the `DT_NEEDED` walk to succeed.
-pub const EMPTY_LIBRARIES: &[&str] = &["libOpenSLES.so", "libOpenMAXAL.so"];
+pub const EMPTY_LIBRARIES: &[&str] = &["libOpenMAXAL.so"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {

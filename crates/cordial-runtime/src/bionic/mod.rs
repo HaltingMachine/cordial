@@ -68,6 +68,9 @@ pub fn function_overrides() -> Vec<(&'static str, *mut c_void)> {
     // glibc, and the `AI_*` constants disagree outright. Same class as the
     // `sigset_t` and `pthread_mutex_t` translations above.
     v.extend(netdb_overrides());
+    // OpenSL ES. Data symbols, so a missing one fails the DT_NEEDED walk rather
+    // than the first audio call — see `opensles_overrides`.
+    v.extend(opensles_overrides());
     if std::env::var_os("CORDIAL_TRACE_PATHS").is_some() {
         extern "C" {
             fn cordial_set_path_trace(on: c_int);
@@ -357,6 +360,45 @@ pub fn liblog_overrides() -> Vec<(&'static str, *mut c_void)> {
         .iter()
         .map(|e| {
             // SAFETY: each `name` is a string literal in liblog.cpp.
+            let name = unsafe { CStr::from_ptr(e.name) }.to_str().unwrap_or("");
+            (name, e.addr)
+        })
+        .collect()
+}
+
+// -------------------------------------------------------------------- OpenSL
+
+/// OpenSL ES, implemented in `native/opensles.cpp`.
+///
+/// Seven of these eight are *data* symbols (`SLInterfaceID` is a pointer to a
+/// UUID struct), and a missing data symbol fails the `DT_NEEDED` walk outright
+/// rather than at first use. Current Roblox builds reference them directly,
+/// which is why `libOpenSLES.so` can no longer be an empty library.
+///
+/// This links; it does not implement audio. See the file for why
+/// `slCreateEngine` reports failure rather than pretending.
+pub fn opensles_overrides() -> Vec<(&'static str, *mut c_void)> {
+    #[repr(C)]
+    struct Symbol {
+        name: *const c_char,
+        addr: *mut c_void,
+    }
+    extern "C" {
+        fn cordial_opensles_symbols(count: *mut usize) -> *const Symbol;
+    }
+
+    let mut count = 0usize;
+    // SAFETY: the table is a static in opensles.cpp and outlives the process.
+    let table = unsafe { cordial_opensles_symbols(&mut count) };
+    if table.is_null() {
+        return Vec::new();
+    }
+    // SAFETY: `table` points at `count` initialised entries with static names.
+    let entries = unsafe { std::slice::from_raw_parts(table, count) };
+    entries
+        .iter()
+        .map(|e| {
+            // SAFETY: each `name` is a string literal in opensles.cpp.
             let name = unsafe { CStr::from_ptr(e.name) }.to_str().unwrap_or("");
             (name, e.addr)
         })

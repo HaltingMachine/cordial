@@ -21,7 +21,7 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../third_party/mcpelauncher-linker
 # Thin extern "C" surface over the linker's C++ API, so Rust can drive it.
 # Android liblog. Roblox narrates its own startup through it, so this is the
 # runtime layer's most valuable diagnostic — and the source of onLogLine/onJoin.
-add_library(cordial_liblog STATIC liblog.cpp system_paths.cpp netdb_compat.cpp)
+add_library(cordial_liblog STATIC liblog.cpp system_paths.cpp netdb_compat.cpp opensles.cpp)
 
 add_library(cordial_linker_shim STATIC shim.cpp)
 target_link_libraries(cordial_linker_shim PUBLIC linker)

@@ -15,12 +15,77 @@
 
 #include <cstdio>
 #include <sys/stat.h>
+#include <atomic>
 #include <chrono>
 #include <cctype>
 #include <cstdlib>
+#include <cstring>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <memory>
+
+// ------------------------------------------------------- focused text box
+//
+// Which text box the engine currently has focus in, learned from
+// `showKeyboard` and needed by `nativePassText`. See the comment on
+// `NativeGLJavaInterface::showKeyboard` for why this has to be plumbed through
+// rather than assumed.
+//
+// Written from the engine's thread inside `showKeyboard`, read from the input
+// thread when a key is dispatched, so it is guarded rather than plain.
+namespace {
+std::atomic<long long> g_textbox_handle{0};
+std::mutex g_textbox_mutex;
+std::string g_textbox_text;
+/// Bumped on every focus change so the input side can tell "same box, keep
+/// editing" from "new box, reseed the buffer" without comparing handles — a
+/// handle can be reused after a box is destroyed.
+std::atomic<unsigned> g_textbox_generation{0};
+} // namespace
+
+extern "C" void cordial_textbox_focused(long long handle, const char* text) {
+    if (getenv("CORDIAL_TRACE_TEXT")) {
+        fprintf(stderr, "[cordial] textbox focused handle=%lld current=%zu bytes\n",
+                handle, text ? strlen(text) : 0);
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_textbox_mutex);
+        g_textbox_text = text ? text : "";
+    }
+    g_textbox_handle.store(handle, std::memory_order_release);
+    g_textbox_generation.fetch_add(1, std::memory_order_acq_rel);
+}
+
+extern "C" void cordial_textbox_blurred() {
+    if (getenv("CORDIAL_TRACE_TEXT")) {
+        fprintf(stderr, "[cordial] textbox blurred\n");
+    }
+    g_textbox_handle.store(0, std::memory_order_release);
+    g_textbox_generation.fetch_add(1, std::memory_order_acq_rel);
+}
+
+/// The focused box's handle, or 0 when nothing is focused. A 0 here is why
+/// text must not be sent at all, rather than sent to handle 0.
+extern "C" long long cordial_textbox_handle() {
+    return g_textbox_handle.load(std::memory_order_acquire);
+}
+
+extern "C" unsigned cordial_textbox_generation() {
+    return g_textbox_generation.load(std::memory_order_acquire);
+}
+
+/// Copy the focused box's current contents into `buf`. Returns the number of
+/// bytes written, not counting the NUL.
+extern "C" int cordial_textbox_text(char* buf, int n) {
+    if (!buf || n <= 0) return 0;
+    std::lock_guard<std::mutex> lock(g_textbox_mutex);
+    int len = static_cast<int>(g_textbox_text.size());
+    if (len > n - 1) len = n - 1;
+    memcpy(buf, g_textbox_text.data(), static_cast<size_t>(len));
+    buf[len] = '\0';
+    return len;
+}
 
 namespace cordial {
 
@@ -117,18 +182,39 @@ public:
         return DeviceStaticParams::Create();
     }
 
-    // The on-screen keyboard. On desktop there is none: host key events reach the
-    // engine through the input path instead, so these are correctly no-ops rather
-    // than unimplemented. `showKeyboard` carries the text-box state the IME would
-    // have edited, which desktop input never needs.
+    // The on-screen keyboard, and the half of text entry that runs engine->host.
+    //
+    // These were no-ops on the reasoning that a desktop has no soft keyboard, so
+    // host key events could reach the engine through the input path alone. That
+    // was wrong, and it is why the login form's boxes stayed empty: the `jlong`
+    // is the *handle of the text box being edited*, and it is the only place the
+    // host is ever told which box has focus. Android's IME keeps it and passes it
+    // straight back as the first argument of `nativePassText`. Cordial threw it
+    // away and then sent text for handle 0, so every keystroke arrived addressed
+    // to a box that was not the focused one.
+    //
+    // The `byte[]` is the box's current contents. Editing has to start from that
+    // rather than from an empty buffer, otherwise the first keystroke in a
+    // pre-filled or re-focused field wipes it.
+    //
     // Signature is (JZ[BLcom/roblox/engine/jni/model/NativeTextBoxInfo;)V. libjnivm
     // matches hooks on the descriptor derived from the C++ types, so `byte[]` has
     // to be an Array<jbyte> and the last argument the real class — Object would
     // produce Ljava/lang/Object; and silently never match.
-    static void showKeyboard(ENV*, Class*, jlong, jboolean,
-                             std::shared_ptr<jnivm::Array<jbyte>>,
-                             std::shared_ptr<NativeTextBoxInfo>) {}
-    static void hideKeyboard(ENV*, Class*) {}
+    static void showKeyboard(ENV*, Class*, jlong handle, jboolean,
+                             std::shared_ptr<jnivm::Array<jbyte>> current,
+                             std::shared_ptr<NativeTextBoxInfo>) {
+        std::string text;
+        if (current) {
+            for (jsize i = 0; i < current->getSize(); i++) {
+                jbyte b = (*current)[i];
+                if (b == 0) break;
+                text.push_back(static_cast<char>(b));
+            }
+        }
+        cordial_textbox_focused(handle, text.c_str());
+    }
+    static void hideKeyboard(ENV*, Class*) { cordial_textbox_blurred(); }
 
     // In-app purchases go through Google Play Billing, which does not exist here.
     // Silently doing nothing is the honest behaviour: the alternative is

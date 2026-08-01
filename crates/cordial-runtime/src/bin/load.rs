@@ -1034,7 +1034,13 @@ fn main() -> ExitCode {
                                             let tx = lib.symbol(
                                                 "Java_com_roblox_engine_jni_NativeGLInterface_nativePassText",
                                             ).unwrap_or(std::ptr::null_mut());
-                                            cordial_runtime::android::window::set_input_natives(mv, bt, ke, tx);
+                                            let sy = lib.symbol(
+                                                "Java_com_roblox_engine_jni_NativeGLInterface_syncTextboxTextAndCursorPosition2",
+                                            ).unwrap_or(std::ptr::null_mut());
+                                            let uk = lib.symbol(
+                                                "Java_com_roblox_engine_jni_NativeGLInterface_updateKeyboardSize",
+                                            ).unwrap_or(std::ptr::null_mut());
+                                            cordial_runtime::android::window::set_input_natives(mv, bt, ke, tx, sy, uk);
                                             if mv.is_null() || bt.is_null() {
                                                 println!("  input: NativeInputInterface not fully exported; UI input will not work");
                                             }

@@ -663,6 +663,7 @@ libroblox.so	getcwd
 libroblox.so	getentropy
 libroblox.so	getenv
 libroblox.so	geteuid
+libroblox.so	getgid
 libroblox.so	gethostbyname
 libroblox.so	gethostname
 libroblox.so	getnameinfo
@@ -892,6 +893,7 @@ libroblox.so	pwrite
 libroblox.so	qsort
 libroblox.so	raise
 libroblox.so	rand
+libroblox.so	random
 libroblox.so	read
 libroblox.so	__read_chk
 libroblox.so	readdir
@@ -941,6 +943,14 @@ libroblox.so	sincosf
 libroblox.so	sinf
 libroblox.so	sinh
 libroblox.so	sinhf
+libroblox.so	slCreateEngine
+libroblox.so	SL_IID_ANDROIDCONFIGURATION
+libroblox.so	SL_IID_ANDROIDSIMPLEBUFFERQUEUE
+libroblox.so	SL_IID_BUFFERQUEUE
+libroblox.so	SL_IID_ENGINE
+libroblox.so	SL_IID_PLAY
+libroblox.so	SL_IID_RECORD
+libroblox.so	SL_IID_VOLUME
 libroblox.so	snprintf
 libroblox.so	socket
 libroblox.so	socketpair
