@@ -55,6 +55,12 @@ This also means a resource Cordial does not already broker needs a change to
 Cordial rather than to your manifest. Slower on purpose: the manifest is the one
 place anyone can read the whole sandbox, and it should stay true.
 
+To keep that rare, the common effects are already brokered — `presence.set`,
+`notify.send` and `url.open` (`http`/`https` only). If you need one that is not
+here, open an issue: a broker is a payload type and an effect, so adding one is a
+small change rather than a redesign. If a proposed broker *cannot* be small, that
+usually means the capability is too broad and wants splitting.
+
 ## Flags have two lifetimes
 
 `flags.write` contributes flags that take effect at the **next launch**.

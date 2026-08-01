@@ -329,7 +329,10 @@ mod tests {
     fn statically_initialised_cond_works() {
         // bionic's PTHREAD_COND_INITIALIZER is all zeroes; signalling one that
         // was never explicitly initialised must still work.
-        let mut storage = [0u8; 32];
+        // u64, not u8: the wrapper's first field is an AtomicU64, so byte
+        // storage is under-aligned and the cast is UB. Real conds come from the
+        // engine's own allocations and are always aligned.
+        let mut storage = [0u64; 4];
         let cond = storage.as_mut_ptr() as *mut c_void;
         assert_eq!(cond_signal(cond), 0);
         assert_eq!(cond_broadcast(cond), 0);
@@ -338,7 +341,7 @@ mod tests {
 
     #[test]
     fn init_destroy_roundtrip_does_not_leak_state() {
-        let mut storage = [0u8; 32];
+        let mut storage = [0u64; 4];
         let cond = storage.as_mut_ptr() as *mut c_void;
         assert_eq!(cond_init(cond, std::ptr::null()), 0);
         assert_eq!(cond_destroy(cond), 0);
@@ -349,7 +352,7 @@ mod tests {
 
     #[test]
     fn semaphore_counts() {
-        let mut storage = [0u8; 16];
+        let mut storage = [0u64; 2];
         let sem = storage.as_mut_ptr() as *mut c_void;
         assert_eq!(semaphore_init(sem, 0, 1), 0);
         assert_eq!(semaphore_wait(sem), 0); // consumes the one permit

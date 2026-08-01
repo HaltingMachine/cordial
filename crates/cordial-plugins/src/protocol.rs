@@ -58,6 +58,8 @@ pub fn required_capability(method: &str) -> Option<Capability> {
         "lifecycle.subscribe" => Capability::LifecycleRead,
         "presence.set" => Capability::PresenceSet,
         "presence.clear" => Capability::PresenceSet,
+        "notify.send" => Capability::NotifySend,
+        "url.open" => Capability::UrlOpen,
         _ => return None,
     })
 }
@@ -94,6 +96,18 @@ mod tests {
         // rather than inviting a plugin to ask for two.
         assert_eq!(required_capability("presence.set"), Some(Capability::PresenceSet));
         assert_eq!(required_capability("presence.clear"), Some(Capability::PresenceSet));
+    }
+
+    #[test]
+    fn each_brokered_effect_is_its_own_capability() {
+        // Presence, notifications and opening a URL all happen to be brokered
+        // over the same kind of host resource, which is exactly why they must
+        // not share a capability — a plugin granted "tell me when a server
+        // shuffles" would otherwise also be able to open pages in the browser.
+        assert_eq!(required_capability("notify.send"), Some(Capability::NotifySend));
+        assert_eq!(required_capability("url.open"), Some(Capability::UrlOpen));
+        assert_ne!(required_capability("notify.send"), required_capability("url.open"));
+        assert_ne!(required_capability("notify.send"), required_capability("presence.set"));
     }
 
     #[test]

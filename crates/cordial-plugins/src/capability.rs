@@ -44,6 +44,19 @@ pub enum Capability {
     /// Off unless granted, and privacy-relevant: what someone is playing and
     /// when is not always something they want broadcast.
     PresenceSet,
+    /// Post a desktop notification through the freedesktop portal.
+    ///
+    /// Brokered for the same reason as `PresenceSet`: the plugin sends a summary
+    /// and a body, Cordial owns the D-Bus connection. A plugin that held the bus
+    /// could talk to every other service on it.
+    NotifySend,
+    /// Open a URL in the user's browser, through the portal.
+    ///
+    /// The narrowest useful form of "leave the application". Cordial validates
+    /// the scheme before handing it to the portal — `http` and `https` only, so
+    /// this cannot become `file://` traversal or a handler-hijack for some
+    /// arbitrary registered scheme.
+    UrlOpen,
 }
 
 impl Capability {
@@ -56,6 +69,8 @@ impl Capability {
             Capability::Log => "log",
             Capability::LifecycleRead => "lifecycle.read",
             Capability::PresenceSet => "presence.set",
+            Capability::NotifySend => "notify.send",
+            Capability::UrlOpen => "url.open",
         }
     }
 
@@ -67,6 +82,8 @@ impl Capability {
             "log" => Capability::Log,
             "lifecycle.read" => Capability::LifecycleRead,
             "presence.set" => Capability::PresenceSet,
+            "notify.send" => Capability::NotifySend,
+            "url.open" => Capability::UrlOpen,
             _ => return None,
         })
     }
@@ -81,6 +98,8 @@ impl Capability {
             Capability::Log,
             Capability::LifecycleRead,
             Capability::PresenceSet,
+            Capability::NotifySend,
+            Capability::UrlOpen,
         ]
     }
 }

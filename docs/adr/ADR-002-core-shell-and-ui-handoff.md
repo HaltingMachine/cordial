@@ -38,8 +38,13 @@ T3  UI plugin takes over
 T4  runtime loads; progress bar
 ```
 
-The chooser is a decision window, and human decision time is the exact budget a Deno cold
-start needs. Blocking on the plugin host converts that free time into a blank window.
+The chooser is a decision window, and the plugin host warms inside it for free.
+
+*Corrected:* this originally claimed human decision time is the exact budget a Deno cold
+start needs. It is not — measured, Deno starts in 20-30 ms warm and 140 ms cold, so
+blocking on the host would cost a flicker, not a blank window. The ordering above is still
+right, but for the reason in §Reasoning below rather than for latency. See
+[ADR-008](ADR-008-plugins-are-typescript-on-deno.md).
 
 ### The split
 
