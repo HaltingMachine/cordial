@@ -149,6 +149,19 @@ it.
 
 ## Practical
 
+Besides Clang, `crates/cordial-shell` (the core shell — window, chooser,
+minimal settings; see [ADR-002](docs/adr/ADR-002-core-shell-and-ui-handoff.md)
+and [ADR-011](docs/adr/ADR-011-wayland-and-libadwaita.md)) needs GTK4 ≥ 4.10
+and libadwaita ≥ 1.4 development headers on `PKG_CONFIG_PATH`, because
+`gtk4-sys`/`libadwaita-sys` link against the system libraries rather than
+vendoring them:
+
+```bash
+sudo dnf install gtk4-devel libadwaita-devel      # Fedora
+sudo apt install libgtk-4-dev libadwaita-1-dev    # Debian/Ubuntu
+sudo pacman -S gtk4 libadwaita                    # Arch
+```
+
 ```bash
 git clone --recursive https://github.com/luohoa97/cordial
 cd cordial
