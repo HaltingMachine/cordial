@@ -22,9 +22,8 @@ use std::sync::{Mutex, OnceLock};
 pub const WINDOW_FORMAT_RGBA_8888: i32 = 1;
 
 /// KeyPressMask | KeyReleaseMask | ButtonPressMask | ButtonReleaseMask |
-/// PointerMotionMask | ExposureMask, from X.h. Not StructureNotifyMask or
-/// FocusChangeMask — this window's size is fixed for its lifetime and AGDK's
-/// own focus call already runs once, unconditionally, in `game_activity.cpp`.
+/// PointerMotionMask | ExposureMask | StructureNotifyMask | FocusChangeMask,
+/// from X.h.
 /// ExposureMask is what makes a damaged window (uncovered, restored,
 /// redirected through a compositor) generate `Expose`, which
 /// `pump_input_events` turns into `onSurfaceRedrawNeededNative` — without it
@@ -38,7 +37,8 @@ pub const WINDOW_FORMAT_RGBA_8888: i32 = 1;
 /// changed size: the engine kept rendering at the size it was told at startup
 /// while X cleared the window to its background colour, which is the black
 /// flash on every resize.
-const INPUT_EVENT_MASK: c_long = 0x1 | 0x2 | 0x4 | 0x8 | 0x40 | 0x8000 | 0x20000;
+const INPUT_EVENT_MASK: c_long =
+    0x1 | 0x2 | 0x4 | 0x8 | 0x40 | 0x8000 | 0x20000 | 0x200000;
 
 type Display = *mut c_void;
 type Window = c_ulong;
@@ -65,6 +65,22 @@ struct Xlib {
     connection_number: unsafe extern "C" fn(Display) -> c_int,
     pending: unsafe extern "C" fn(Display) -> c_int,
     next_event: unsafe extern "C" fn(Display, *mut c_void) -> c_int,
+
+    grab_pointer: unsafe extern "C" fn(
+        Display, Window, c_int, c_uint, c_int, c_int, Window, c_ulong, c_ulong,
+    ) -> c_int,
+    ungrab_pointer: unsafe extern "C" fn(Display, c_ulong) -> c_int,
+    warp_pointer: unsafe extern "C" fn(
+        Display, Window, Window, c_int, c_int, c_uint, c_uint, c_int, c_int,
+    ) -> c_int,
+    query_pointer: unsafe extern "C" fn(
+        Display, Window,
+        *mut Window, *mut Window,
+        *mut c_int, *mut c_int,
+        *mut c_int, *mut c_int,
+        *mut c_uint,
+    ) -> c_int,
+
     /// `XLookupString` doubles as the keysym lookup and the ASCII/Latin-1 text
     /// lookup, and — unlike `XKeycodeToKeysym` — takes the event's `state` into
     /// account, so Shift and the rest of the modifier state do not have to be
@@ -137,6 +153,10 @@ impl Xlib {
             connection_number: sym!("XConnectionNumber"),
             pending: sym!("XPending"),
             next_event: sym!("XNextEvent"),
+            grab_pointer: sym!("XGrabPointer"),
+            ungrab_pointer: sym!("XUngrabPointer"),
+            warp_pointer: sym!("XWarpPointer"),
+            query_pointer: sym!("XQueryPointer"),
             lookup_string: sym!("XLookupString"),
             create_bitmap_from_data: sym!("XCreateBitmapFromData"),
             create_pixmap_cursor: sym!("XCreatePixmapCursor"),
@@ -162,6 +182,7 @@ pub struct HostWindow {
     /// framebuffers from the answer.
     buffers: Mutex<Geometry>,
     input: Mutex<InputState>,
+    pointer_lock: Mutex<PointerLockState>,
 }
 
 /// Buttons and timing carried across calls to `pump_input_events`, the way a
@@ -175,6 +196,31 @@ struct InputState {
     /// exact meaning: constant across a MOVE/UP sequence, not per-event.
     down_time_ms: i64,
     clock: std::time::Instant,
+}
+
+/// X11 pointer capture state.
+///
+/// X11 has no Wayland relative-pointer protocol in this backend, so the first
+/// implementation uses XGrabPointer + XWarpPointer and derives dx/dy from
+/// MotionNotify events around a fixed centre.
+struct PointerLockState {
+    locked: bool,
+    suppressed: bool,
+    ignore_next_warp: bool,
+    center: (i32, i32),
+    saved_root: Option<(i32, i32)>,
+}
+
+impl PointerLockState {
+    fn new() -> Self {
+        Self {
+            locked: false,
+            suppressed: false,
+            ignore_next_warp: false,
+            center: (0, 0),
+            saved_root: None,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -578,6 +624,7 @@ pub fn open(width: u32, height: u32, title: &str) -> Result<&'static HostWindow,
             down_time_ms: 0,
             clock: std::time::Instant::now(),
         }),
+        pointer_lock: Mutex::new(PointerLockState::new()),
     };
     Ok(WINDOW.get_or_init(|| host))
 }
@@ -658,6 +705,227 @@ impl HostWindow {
         }
     }
 
+
+    fn sync_pointer_lock(&self) {
+        let engine_wants =
+            super::input::engine_wants_pointer_lock() == Some(true);
+
+        let buttons = self
+            .input
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .buttons;
+
+        const CAMERA_BUTTONS: i32 =
+            super::input::BUTTON_SECONDARY | super::input::BUTTON_TERTIARY;
+
+        let dragging =
+            std::env::var_os("CORDIAL_NO_DRAG_LOCK").is_none()
+                && (buttons & CAMERA_BUTTONS) != 0;
+
+        let force =
+            std::env::var_os("CORDIAL_FORCE_POINTER_LOCK").is_some();
+
+        let asked = engine_wants || dragging || force;
+
+        if std::env::var_os("CORDIAL_NO_POINTER_LOCK").is_some() {
+            self.release_pointer_lock();
+            return;
+        }
+
+        let mut state = self
+            .pointer_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        if !asked {
+            state.suppressed = false;
+        }
+
+        let want = asked && !state.suppressed;
+        let held = state.locked;
+        drop(state);
+
+        if want && !held {
+            self.lock_pointer();
+        } else if !want && held {
+            self.release_pointer_lock();
+        }
+    }
+
+    fn lock_pointer(&self) {
+        let (width, height, _) = self.geometry();
+
+        if width <= 0 || height <= 0 {
+            return;
+        }
+
+        let center = (width / 2, height / 2);
+        let root =
+            unsafe { (self.xlib.default_root_window)(self.display) };
+
+        let mut root_return = 0;
+        let mut child_return = 0;
+        let mut root_x = 0;
+        let mut root_y = 0;
+        let mut win_x = 0;
+        let mut win_y = 0;
+        let mut mask = 0;
+
+        let queried = unsafe {
+            (self.xlib.query_pointer)(
+                self.display,
+                root,
+                &mut root_return,
+                &mut child_return,
+                &mut root_x,
+                &mut root_y,
+                &mut win_x,
+                &mut win_y,
+                &mut mask,
+            )
+        };
+
+        let saved_root =
+            if queried != 0 { Some((root_x, root_y)) } else { None };
+
+        // X11 CurrentTime is 0.
+        // owner_events = True
+        // pointer_mode = GrabModeAsync
+        // keyboard_mode = GrabModeAsync
+        let result = unsafe {
+            (self.xlib.grab_pointer)(
+                self.display,
+                self.window,
+                1,
+                0x4 | 0x8 | 0x40,
+                1,
+                1,
+                self.window,
+                0,
+                0,
+            )
+        };
+
+        if result != 0 {
+            if super::input::trace_mouse() {
+                eprintln!(
+                    "[cordial] X11 pointer grab failed: status={result}"
+                );
+            }
+            return;
+        }
+
+        {
+            let mut state = self
+                .pointer_lock
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+
+            state.locked = true;
+            state.ignore_next_warp = true;
+            state.center = center;
+            state.saved_root = saved_root;
+        }
+
+        unsafe {
+            (self.xlib.warp_pointer)(
+                self.display,
+                0,
+                self.window,
+                0,
+                0,
+                0,
+                0,
+                center.0,
+                center.1,
+            );
+            (self.xlib.flush)(self.display);
+        }
+
+        super::input::reset_mouse_delta();
+
+        if super::input::trace_mouse() {
+            eprintln!(
+                "[cordial] X11 pointer lock acquired at ({}, {})",
+                center.0,
+                center.1
+            );
+        }
+    }
+
+    fn release_pointer_lock(&self) {
+        let (was_locked, saved_root) = {
+            let mut state = self
+                .pointer_lock
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+
+            let was_locked = state.locked;
+            let saved_root = state.saved_root.take();
+
+            state.locked = false;
+            state.ignore_next_warp = false;
+            state.center = (0, 0);
+
+            (was_locked, saved_root)
+        };
+
+        if !was_locked {
+            return;
+        }
+
+        unsafe {
+            // X11 CurrentTime is 0.
+            (self.xlib.ungrab_pointer)(self.display, 0);
+
+            if let Some((x, y)) = saved_root {
+                let root =
+                    (self.xlib.default_root_window)(self.display);
+
+                (self.xlib.warp_pointer)(
+                    self.display,
+                    root,
+                    root,
+                    0,
+                    0,
+                    0,
+                    0,
+                    x,
+                    y,
+                );
+            }
+
+            (self.xlib.flush)(self.display);
+        }
+
+        super::input::reset_mouse_delta();
+
+        if super::input::trace_mouse() {
+            eprintln!("[cordial] X11 pointer lock released");
+        }
+    }
+
+    fn escape_pointer_lock(&self) -> bool {
+        let held = self
+            .pointer_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .locked;
+
+        if !held {
+            return false;
+        }
+
+        self.pointer_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .suppressed = true;
+
+        self.release_pointer_lock();
+        true
+    }
+
     pub fn close(&self) {
         // SAFETY: both handles came from this struct's own creation calls.
         unsafe {
@@ -719,6 +987,7 @@ struct XInputEvent {
 const KEY_PRESS: c_int = 2;
 const KEY_RELEASE: c_int = 3;
 const MOTION_NOTIFY: c_int = 6;
+const FOCUS_OUT: c_int = 10;
 const BUTTON_PRESS: c_int = 4;
 const BUTTON_RELEASE: c_int = 5;
 const EXPOSE: c_int = 12;
@@ -915,8 +1184,103 @@ impl HostWindow {
     }
 
     fn dispatch_motion(&self, handle: i64, ev: &XInputEvent) {
+        {
+            let mut state = self
+                .pointer_lock
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+
+            if state.locked {
+                let (cx, cy) = state.center;
+
+                if state.ignore_next_warp
+                    && ev.x == cx
+                    && ev.y == cy
+                {
+                    state.ignore_next_warp = false;
+                    return;
+                }
+
+                let dx = ev.x - cx;
+                let dy = ev.y - cy;
+
+                // Preserve the existing Android/AGDK motion path while the
+                // pointer is captured. The absolute position remains the
+                // capture centre, but Roblox still sees the same MotionEvent
+                // sequence it saw before pointer locking was introduced.
+                let input = self
+                    .input
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+
+                let buttons = input.buttons;
+                let down_time = input.down_time_ms;
+                let now = input.clock.elapsed().as_millis() as i64;
+                drop(input);
+
+                let action =
+                    if buttons != 0 {
+                        ACTION_MOVE
+                    } else {
+                        ACTION_HOVER_MOVE
+                    };
+
+                deliver_touch(
+                    handle,
+                    action,
+                    cx as f32,
+                    cy as f32,
+                    buttons,
+                    0,
+                    now,
+                    down_time,
+                );
+
+                // The relative delta is still delivered through Roblox's
+                // NativeInputInterface path for camera rotation.
+                if dx != 0 || dy != 0 {
+                    drop(state);
+
+                    super::input::pass_mouse_move_delta(
+                        cx as f32,
+                        cy as f32,
+                        dx as f32,
+                        dy as f32,
+                    );
+
+                    let mut state = self
+                        .pointer_lock
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+
+                    state.ignore_next_warp = true;
+                    drop(state);
+
+                    unsafe {
+                        (self.xlib.warp_pointer)(
+                            self.display,
+                            0,
+                            self.window,
+                            0,
+                            0,
+                            0,
+                            0,
+                            cx,
+                            cy,
+                        );
+                        (self.xlib.flush)(self.display);
+                    }
+                }
+
+                return;
+            }
+        }
+
         let (x, y) = (ev.x as f32, ev.y as f32);
-        let state = self.input.lock().unwrap_or_else(|e| e.into_inner());
+        let state = self
+            .input
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let now = state.clock.elapsed().as_millis() as i64;
         let (buttons, down_time) = (state.buttons, state.down_time_ms);
         drop(state);
@@ -953,6 +1317,10 @@ impl HostWindow {
         let unicode = if n > 0 { text[0] as i32 } else { 0 };
         let meta = android_meta_state(ev.state);
         let now = self.now_ms();
+
+        if down && keysym == 0xff1b && self.escape_pointer_lock() {
+            return;
+        }
 
         if super::input::trace_text() {
             // `text=` is a length unless `CORDIAL_TRACE_TEXT_SHOW_PASSWORDS=1`:
@@ -1047,6 +1415,8 @@ impl HostWindow {
     /// Drain and deliver whatever X11 input is already queued, then return.
     /// See the module-level comment above for why this never blocks.
     fn pump_input_events(&self, handle: i64) {
+        self.sync_pointer_lock();
+
         // Before draining input: if the engine has opened or closed an editor
         // since last time, acknowledge it. Cheap — an atomic load and a
         // comparison unless something actually changed.
@@ -1091,6 +1461,16 @@ impl HostWindow {
                 KEY_PRESS | KEY_RELEASE => {
                     self.dispatch_key(handle, &mut buf, event_type == KEY_PRESS);
                 }
+                FOCUS_OUT => {
+                    self.release_pointer_lock();
+
+                    let mut state = self
+                        .input
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+
+                    state.buttons = 0;
+                }
                 EXPOSE => {
                     // SAFETY: `event_type == EXPOSE` means `XNextEvent` just
                     // filled `buf` as the `XExposeEvent` member of Xlib's
@@ -1112,6 +1492,8 @@ impl HostWindow {
                 _ => {}
             }
         }
+
+        self.sync_pointer_lock();
     }
 
     /// The window changed size. Update what the engine is told about it.
